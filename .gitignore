@@ -1,0 +1,17 @@
+# Python junk
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Data and Results (Don't track these! Keep them local/HPC only)
+data/
+results/
+checkpoints/
+logs/
+
+# Large files
+*.tif
+*.pth
+*.ckpt
