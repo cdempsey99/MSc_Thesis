@@ -35,7 +35,10 @@ def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map, ground
     Displays a comprehensive 5-pane figure showing
     ground truth, class prediction, average variance, entropy and mutual information
     """
-    ensure_dir("results/metrics")
+    # Use the env var for the res dir, default to results for Windows setup
+    base_results_dir = os.getenv("OUT_DIR", "results")
+    save_path = os.path.join(base_results_dir, "metrics") 
+    ensure_dir(save_path)
 
     to_np = lambda x: x.cpu().numpy() if hasattr(x, 'cpu') else x
 
@@ -90,7 +93,8 @@ def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map, ground
         ax.axis('off')
 
     plt.tight_layout()
-    plt.savefig(os.path.join("results/metrics", save_name), bbox_inches='tight', dpi=300)
+    full_file_path = os.path.join(save_path, save_name)
+    plt.savefig(full_file_path, bbox_inches='tight', dpi=300)
     # plt.show()
 
 
@@ -108,10 +112,13 @@ def display_truth_proportions(ground_truth):
     print(proportions)
 
 
-#Aux fn for the next aux fn
+# Plot the accuracy versus confidence of the model 
 def plot_reliability_diagram(bin_accs_all, bin_counts, save_name="reliability_diagram"):
 
-    ensure_dir("results/reliability")
+    # Use env var for results dir, with default results for Windows setup
+    base_results_dir = os.getenv("OUT_DIR", "results")
+    save_path = os.path.join(base_results_dir, "reliability")
+    ensure_dir(save_path)
 
     # bin_accs_all should be an array of 10 values
     bin_centers = np.linspace(0.05, 0.95, 10)
@@ -137,7 +144,8 @@ def plot_reliability_diagram(bin_accs_all, bin_counts, save_name="reliability_di
     plt.grid(alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(os.path.join("results/reliability", save_name), bbox_inches='tight')
+    full_file_path = os.path.join(save_path, save_name)
+    plt.savefig(full_file_path, bbox_inches='tight')
     # plt.show()
 
 
