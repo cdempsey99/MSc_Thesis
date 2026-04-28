@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 venv/
 .env
+.idea/
 
 # Data and Results (Don't track these! Keep them local/HPC only)
 data/

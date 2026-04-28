@@ -12,6 +12,19 @@ import os
 
 #random.seed(None)
 
+# Parse cmd line args
+parser = argparse.ArgumentParser(description="training_run")
+
+
+# We set the defaults to your "Windows/Local" values
+parser.add_argument("--data_dir", type=str, default="./data")
+parser.add_argument("--num_epochs", type=int, default=2)  # Local default
+parser.add_argument("--lam", type=float, default=0.1)     # Local default
+parser.add_argument("--out_dir", type=str, default="./results")
+
+args = parser.parse_args()
+
+
 # Based on previous tinkering, choose lambda_diversity of 0.01
 # After changing the diversity to be calculated based on softmaxxed probs rather than preds, lambda needs to be much higher
 # This change still appears to be a more rigorous choice but makes the diversity optimisation a bit more annoying
@@ -19,8 +32,8 @@ import os
 lam = 0.1
 
 # Path for dev input test image and ground truth mask
-image_filepaths = ["data/GF2_PMS1__L1A0000962382-MSS1.tif"]
-mask_filepaths = ["data/GF2_PMS1__L1A0000962382-MSS1_24label.png"]
+#image_filepaths = ["data/GF2_PMS1__L1A0000962382-MSS1.tif"]
+#mask_filepaths = ["data/GF2_PMS1__L1A0000962382-MSS1_24label.png"]
 
 # Define input for a training run
 input_dict = {
@@ -28,27 +41,18 @@ input_dict = {
     "embed_dim": DECODER_EMBED_DIM,
     "ensemble_size": ENSEMBLE_SIZE,
     "num_classes": NUM_CLASSES,
-    "num_epochs": 2,
-    "lambda_div": lam,
+    "num_epochs": args.num_epochs,
+    "lambda_div": args.lam,
     "enforce_diversity": True,
     "learning_rate": LEARNING_RATE,
     "batch_size": 2,
-    "hide_unlabelled_pixels" : True
+    "hide_unlabelled_pixels" : True,
+    "out_dir" : args.out_dir
 }
 
-# Parse cmd line args
-parser = argparse.ArgumentParser(description="training_run")
-
-# Ensure we point to the data in scratch
-parser.add_argument("--data_dir", type=str, default="./data", help="Path to the dataset")
-
-# Ensure we send results to scratch
-parser.add_argument("--out_dir", type=str, default="./results", help="Path to save resulting plots to")
-
-args = parser.parse.args()
-
-
-
+# Build paths using args.data_dir
+image_filepaths = [os.path.join(args.data_dir, "GF2_PMS1__L1A0000962382-MSS1.tif")]
+mask_filepaths = [os.path.join(args.data_dir, "GF2_PMS1__L1A0000962382-MSS1_24label.png")]
 
 
 # Instantiate an object of the Dataset class
