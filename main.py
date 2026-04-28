@@ -1,6 +1,8 @@
 from utils.training import *
 from utils.dataset import *
 import time
+import argparse
+import os
 
 # TODO : Can we somehow take outputs from different layers our from the clay encoder? Instead of just the last one?
 # TODO : Change learning rate as epochs go on? Also mess around with different optimizers potentially
@@ -33,6 +35,21 @@ input_dict = {
     "batch_size": 2,
     "hide_unlabelled_pixels" : True
 }
+
+# Parse cmd line args
+parser = argparse.ArgumentParser(description="training_run")
+
+# Ensure we point to the data in scratch
+parser.add_argument("--data_dir", type=str, default="./data", help="Path to the dataset")
+
+# Ensure we send results to scratch
+parser.add_argument("--out_dir", type=str, default="./results", help="Path to save resulting plots to")
+
+args = parser.parse.args()
+
+
+
+
 
 # Instantiate an object of the Dataset class
 full_image_dataset = FBPPatchDataset(image_filepaths, mask_filepaths, patch_size=224, stride=112)
