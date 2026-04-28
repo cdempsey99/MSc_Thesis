@@ -3,6 +3,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from configs.config import *
 
+# Auxiliary lambda
+to_np = lambda x: x.cpu().numpy() if isinstance(x, torch.Tensor) else x
+
 # Helper to ensure directory exists
 def ensure_dir(path="results"):
     if not os.path.exists(path):
@@ -34,12 +37,15 @@ def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map, ground
     """
     ensure_dir("results/metrics")
 
+    to_np = lambda x: x.cpu().numpy() if hasattr(x, 'cpu') else x
+
     # Ensure everything is 2D by removing any leading '1' dimensions
-    class_map = np.squeeze(class_map)
-    variance_map = np.squeeze(variance_map)
-    total_entropy = np.squeeze(total_entropy)
-    mi_map = np.squeeze(mi_map)
-    ground_truth = np.squeeze(ground_truth)
+    # and ensure everything is on the cpu
+    class_map = np.squeeze(to_np(class_map))
+    variance_map = np.squeeze(to_np(variance_map))
+    total_entropy = np.squeeze(to_np(total_entropy))
+    mi_map = np.squeeze(to_np(mi_map))
+    ground_truth = np.squeeze(to_np(ground_truth))
 
     fig, axes = plt.subplots(1, 5, figsize=(25, 5))
 
@@ -50,8 +56,8 @@ def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map, ground
         ignore_mask = (ground_truth == 0)
 
         # We can use a masked array for the prediction map
-        class_map_np = class_map.cpu().numpy()
-        ignore_mask_np = ignore_mask.cpu().numpy()
+        class_map_np = to_np(class_map)
+        ignore_mask_np = to_np(ignore_mask)
         class_map_masked = np.ma.masked_where(ignore_mask_np, class_map_np)
     else:
         class_map_masked = class_map
