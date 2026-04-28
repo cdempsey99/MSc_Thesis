@@ -52,7 +52,7 @@ def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map, ground
         # We can use a masked array for the prediction map
         class_map_np = class_map.cpu().numpy()
         ignore_mask_np = ignore_mask.cpu().numpy()
-        class_map_masked = np.ma.masked_where(ignore_mask, class_map)
+        class_map_masked = np.ma.masked_where(ignore_mask_np, class_map_np)
     else:
         class_map_masked = class_map
 
