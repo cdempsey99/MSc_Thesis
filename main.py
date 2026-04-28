@@ -15,45 +15,48 @@ import os
 # Parse cmd line args
 parser = argparse.ArgumentParser(description="training_run")
 
-
-# We set the defaults to your "Windows/Local" values
+# Set the defaults to the values we had locally on Windows
 parser.add_argument("--data_dir", type=str, default="./data")
-parser.add_argument("--num_epochs", type=int, default=2)  # Local default
-parser.add_argument("--lam", type=float, default=0.1)     # Local default
 parser.add_argument("--out_dir", type=str, default="./results")
+parser.add_argument("--decoder_in_channels", type=int, default=1024)
+parser.add_argument("--decoder_embed_dim", type=int, default=256)
+parser.add_argument("--ensemble_size", type=int, default=5)
+parser.add_argument("--num_classes", type=int, default=25)
+parser.add_argument("--num_epochs", type=int, default=5)
+parser.add_argument("--lam", type=float, default=0.1)
+parser.add_argument("--enforce_diversity", action="store_true")
+parser.add_argument("--lr", type=float, default=0.0001)
+parser.add_argument("--batch_size", type=int, default=2)
+parser.add_argument("--hide_unlabelled_pixels", action="store_true")
 
 args = parser.parse_args()
-
 
 # Based on previous tinkering, choose lambda_diversity of 0.01
 # After changing the diversity to be calculated based on softmaxxed probs rather than preds, lambda needs to be much higher
 # This change still appears to be a more rigorous choice but makes the diversity optimisation a bit more annoying
 # Now this (1.0) seems too large, moving down
-lam = 0.1
+#lam = 0.1
 
-# Path for dev input test image and ground truth mask
-#image_filepaths = ["data/GF2_PMS1__L1A0000962382-MSS1.tif"]
-#mask_filepaths = ["data/GF2_PMS1__L1A0000962382-MSS1_24label.png"]
 
-# Define input for a training run
+# Pass all variables defining a training run thourgh this dict
+# Populate dict with the values parsed from the cmd line
 input_dict = {
-    "in_channels": DECODER_IN_CHANNELS,
-    "embed_dim": DECODER_EMBED_DIM,
-    "ensemble_size": ENSEMBLE_SIZE,
-    "num_classes": NUM_CLASSES,
+    "in_channels": args.decoder_in_channels,
+    "embed_dim": args.decoder_embed_dim,
+    "ensemble_size": args.ensemble_size,
+    "num_classes": args.num_classes,
     "num_epochs": args.num_epochs,
     "lambda_div": args.lam,
-    "enforce_diversity": True,
-    "learning_rate": LEARNING_RATE,
-    "batch_size": 2,
-    "hide_unlabelled_pixels" : True,
+    "enforce_diversity": args.enforce_diversity,
+    "learning_rate": args.lr,
+    "batch_size": args.batch_size,
+    "hide_unlabelled_pixels" : args.hide_unlabelled_pixels,
     "out_dir" : args.out_dir
 }
 
-# Build paths using args.data_dir
+# Get paths for our initial test image and mask
 image_filepaths = [os.path.join(args.data_dir, "GF2_PMS1__L1A0000962382-MSS1.tif")]
 mask_filepaths = [os.path.join(args.data_dir, "GF2_PMS1__L1A0000962382-MSS1_24label.png")]
-
 
 # Instantiate an object of the Dataset class
 full_image_dataset = FBPPatchDataset(image_filepaths, mask_filepaths, patch_size=224, stride=112)
