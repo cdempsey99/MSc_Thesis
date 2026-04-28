@@ -13,7 +13,10 @@ def ensure_dir(path="results"):
 
 # Fn to take the [1, 1024, 28, 28] tensor and produce a heatmap of 'attention'
 def visualise_encoder_output(grid_features, save_name="encoder_heatmap.png"):
-    ensure_dir("results/heatmaps")
+    
+    base_results_dir = os.getenv("OUT_DIR", "results")
+    save_path = os.path.join(base_results_dir, "heatmaps")
+    ensure_dir(save_path)
 
     heatmap = grid_features.detach().cpu().mean(dim=1).squeeze()
 
@@ -26,8 +29,9 @@ def visualise_encoder_output(grid_features, save_name="encoder_heatmap.png"):
     plt.ylabel("Spatial Height (Patches)")
 
     # Save logic
-    plt.savefig(os.path.join("results/heatmaps", save_name), bbox_inches='tight')
-    #i plt.show()
+    full_file_path = os.path.join(save_path, save_name)
+    plt.savefig(full_file_path, bbox_inches='tight')
+    # plt.show()
 
 # The 5 pane figure showing the ground truth, class predictions, variance, entropy and mutual information
 def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map, ground_truth, hide_unlabelled, save_name="all_metrics.png"):
