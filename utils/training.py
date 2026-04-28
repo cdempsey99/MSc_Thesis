@@ -73,6 +73,16 @@ def train_model(decoder_model, encoder_model, train_loader, num_epochs, criterio
             else:
                 epoch_task_loss += task_loss
 
+        # Save the progress at the end of the epoch
+        current_state = {
+            'epoch': epoch + 1,
+            'model_state_dict': decoder_model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+        }
+        out_dir = os.getenv("OUT_DIR", "results")
+        checkpoint_dir = os.path.join(out_dir, "checkpoints")
+        save_checkpoint(current_state, checkpoint_dir)
+
         # Print epoch summary
         avg_task = epoch_task_loss / len(train_loader)
         avg_div = epoch_div_loss / len(train_loader)

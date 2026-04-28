@@ -52,7 +52,6 @@ class DecoderEnsemble(nn.Module):
 
 # ENCODER Section of this file now:
 
-# Get the pruned clay encoder
 def initialize_clay_encoder():
     """Initializes the Clay model and loads pruned weights once."""
     print("Initializing Clay Encoder and loading pruned weights...")

@@ -180,3 +180,10 @@ def get_random_batch(loader, device):
     # Fallback just in case (shouldn't happen)
     return next(iter(loader))
 
+# fn to save checkpoints of the model so as not to lose too much progress
+def save_checkpoint(state, out_dir, filename="last_checkpoint.pth"):
+
+    # Save latest version
+    last_path = os.path.join(out_dir, filename)
+    torch.save(state, last_path)
+    print(f"=> Saving checkpoint to {last_path}", flush=True)
