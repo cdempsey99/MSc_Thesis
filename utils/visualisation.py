@@ -27,7 +27,7 @@ def visualise_encoder_output(grid_features, save_name="encoder_heatmap.png"):
 
     # Save logic
     plt.savefig(os.path.join("results/heatmaps", save_name), bbox_inches='tight')
-    #plt.show()
+    #i plt.show()
 
 # The 5 pane figure showing the ground truth, class predictions, variance, entropy and mutual information
 def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map, ground_truth, hide_unlabelled, save_name="all_metrics.png"):
@@ -91,7 +91,7 @@ def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map, ground
 
     plt.tight_layout()
     plt.savefig(os.path.join("results/metrics", save_name), bbox_inches='tight', dpi=300)
-    plt.show()
+    # plt.show()
 
 
 # Fn to print dictionary of the proportions of each smenatic category in a given ground_truth map
@@ -138,7 +138,7 @@ def plot_reliability_diagram(bin_accs_all, bin_counts, save_name="reliability_di
 
     plt.tight_layout()
     plt.savefig(os.path.join("results/reliability", save_name), bbox_inches='tight')
-    plt.show()
+    # plt.show()
 
 
 # Fn used to plot various accuracy metrics for different values of lambda (diversity hyperparameter)
@@ -167,5 +167,5 @@ def plot_lambda_results(lams, mious, overall_accs, avg_uncs, save_name="lambda_c
 
     plt.tight_layout()
     plt.savefig(os.path.join("results/lambda_curves", save_name), bbox_inches='tight')
-    plt.show()
+    # plt.show()
 
