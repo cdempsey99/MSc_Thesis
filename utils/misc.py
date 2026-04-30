@@ -62,8 +62,11 @@ def js_divergence_loss(all_preds):
     total_kl = 0
     for i in range(M):
         # F.kl_div(input, target) where input is log-space
-        p_i = all_probs[i]
-        total_kl += F.kl_div(log_mean_probs, p_i, reduction="batchmean", log_target=False)
+        #p_i = all_probs[i]
+        #total_kl += F.kl_div(log_mean_probs, p_i, reduction="batchmean", log_target=False)
+        kl = F.kl_div(log_mean_probs, all_probs[i], reduction="sum")
+        # Divide by (Batch * #pixels) to get the avg per pixel
+        total_kl += kl / (all_probs.size(1) * all_probs.size(3) * all_probs.size(4))
 
     return total_kl / M
 

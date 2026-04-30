@@ -6,12 +6,18 @@ def train_model(decoder_model, encoder_model, train_loader, num_epochs, criterio
 
     decoder_model.train()
     optimizer.zero_grad()
+    save_interval = 20
 
     print(f"Starting Training")
 
     for epoch in range(num_epochs):
         epoch_task_loss = 0
         epoch_div_loss  = 0
+
+        # Test
+        #print(f"Head 0 weight sum: {decoder_model.heads[0].weight.sum()}", flush=True)
+        #print(f"Head 1 weight sum: {decoder_model.heads[1].weight.sum()}", flush=True)
+
 
         # Iterate over DataLoader
         for batch_idx, (images, targets) in enumerate(train_loader):
@@ -73,21 +79,23 @@ def train_model(decoder_model, encoder_model, train_loader, num_epochs, criterio
             else:
                 epoch_task_loss += task_loss
 
-        # Save the progress at the end of the epoch
-        current_state = {
-            'epoch': epoch + 1,
-            'model_state_dict': decoder_model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-        }
-        out_dir = os.getenv("OUT_DIR", "results")
-        checkpoint_dir = os.path.join(out_dir, "checkpoints")
-        save_checkpoint(current_state, checkpoint_dir)
+        if (epoch + 1) % save_interval == 0:
+            # Save the progress at the end of every 20th epoch
+            print(f"Periodic save at epoch {epoch+1}", flush=True)
+            current_state = {
+                'epoch': epoch + 1,
+                'model_state_dict': decoder_model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+            }
+            out_dir = os.getenv("OUT_DIR", "results")
+            checkpoint_dir = os.path.join(out_dir, "checkpoints")
+            save_checkpoint(current_state, checkpoint_dir)
 
         # Print epoch summary
         avg_task = epoch_task_loss / len(train_loader)
         avg_div = epoch_div_loss / len(train_loader)
 
-        print(f"Epoch [{epoch + 1}/{num_epochs}] - Task Loss: {avg_task:.4f}, Div Loss: {avg_div:.4f}")
+        print(f"Epoch [{epoch + 1}/{num_epochs}] - Task Loss: {avg_task:.8f}, Div Loss: {avg_div:.8f}")
 
     print(f"Training completed")
 
