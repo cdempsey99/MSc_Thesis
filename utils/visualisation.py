@@ -98,7 +98,7 @@ def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map, ground
         ax.axis('off')
 
     plt.tight_layout()
-    current_time = datetime.now().strftime("%Y%m%d%H%M")
+    current_time = datetime.datetime.now().strftime("%Y%m%d%H%M")
     save_name += f"_{current_time}.png"
     full_file_path = os.path.join(save_path, save_name)
     plt.savefig(full_file_path, bbox_inches='tight', dpi=300)
@@ -151,7 +151,7 @@ def plot_reliability_diagram(bin_accs_all, bin_counts, save_name="reliability_di
     plt.grid(alpha=0.3)
 
     plt.tight_layout()
-    current_time = datetime.current_time.now().strftime("%Y%m%d%H%M")
+    current_time = datetime.datetime.now().strftime("%Y%m%d%H%M")
     save_name += f"_{current_time}.png"
     full_file_path = os.path.join(save_path, save_name)
     plt.savefig(full_file_path, bbox_inches='tight')
