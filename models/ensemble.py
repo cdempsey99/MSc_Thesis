@@ -6,7 +6,7 @@ from configs.config import *
 # Note the choice of decoder embedding dim of 256 is arbitrary
 class SegFormerDecoderHead(nn.Module):
 
-    def __init__(self, in_channels=1024, embed_dim=256, num_classes=NUM_CLASSES):
+    def __init__(self, in_channels=1024, embed_dim=256, num_classes=NUM_CLASSES, p_drop=0.1):
         super().__init__()
 
         # 1024 -> 256 using a 2dconv as Pointwise MLP
@@ -17,6 +17,9 @@ class SegFormerDecoderHead(nn.Module):
         self.spatial_refine = nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(embed_dim)
         self.activation2 = nn.GELU()
+
+        # Dropout layer
+        self.dropout = nn.Dropout2d(p=p_drop)
 
         # Classifier: 256 -> 24
         self.classifier = nn.Conv2d(embed_dim, num_classes, kernel_size=1)
@@ -32,6 +35,7 @@ class SegFormerDecoderHead(nn.Module):
         x = self.spatial_refine(x)
         x = self.bn2(x)
         x = self.activation2(x)
+        x = self.dropout(x)
         x = self.classifier(x)
         x = self.learnable_upsample(x)
 
@@ -48,9 +52,12 @@ class DecoderEnsemble(nn.Module):
 
         self.M = M
 
+        # Create a range of dropout values for the various heads
+        self.dropout_rates = torch.linspace(0.05, 0.35, M).to_list()
+
         # Create M individual SegFormerDecoderHead instances
         self.heads = nn.ModuleList([
-            SegFormerDecoderHead(in_channels, embed_dim, num_classes) for _ in range(M)
+            SegFormerDecoderHead(in_channels, embed_dim, num_classes, p_drop=self.dropout_rates[i]) for i in range(M)
         ])
 
     def forward(self, x):
