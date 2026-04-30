@@ -26,7 +26,7 @@ class SegFormerDecoderHead(nn.Module):
 
         # Learnable upsampling
         # use groups=num_classes so each class channels upscales independently
-        self.learnable_upsample = nn.ConvTranspose2d(num_classes, num_classes, kernel_size=8, stride=8, groups=num_classes)
+        #self.learnable_upsample = nn.ConvTranspose2d(num_classes, num_classes, kernel_size=8, stride=8, groups=num_classes)
 
     def forward(self, x):
         # x starts as [1, 1024, 28, 28]
@@ -37,11 +37,11 @@ class SegFormerDecoderHead(nn.Module):
         x = self.activation2(x)
         x = self.dropout(x)
         x = self.classifier(x)
-        x = self.learnable_upsample(x)
+        #x = self.learnable_upsample(x)
 
         # Upsampling, we stretch the 24 outputs back to the 224 x 224 of the original image
         # TODO : Change this to learnable weights?
-        # x = F.interpolate(x, size=(224, 224), mode='bilinear', align_corners=False)
+        x = F.interpolate(x, size=(224, 224), mode='bilinear', align_corners=False)
         
         return x
 
