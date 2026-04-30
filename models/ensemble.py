@@ -53,7 +53,7 @@ class DecoderEnsemble(nn.Module):
         self.M = M
 
         # Create a range of dropout values for the various heads
-        self.dropout_rates = torch.linspace(0.05, 0.35, M).to_list()
+        self.dropout_rates = torch.linspace(0.05, 0.35, M).tolist()
 
         # Create M individual SegFormerDecoderHead instances
         self.heads = nn.ModuleList([
