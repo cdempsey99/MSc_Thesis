@@ -63,7 +63,7 @@ full_image_dataset = FBPPatchDataset(image_filepaths, mask_filepaths, patch_size
 
 # For tinkering, use a much smaller dataset
 small_dataset = True
-small_samples = 200
+small_samples = 100
 
 if small_dataset:
     print(f"Using SMALL dataset of only {small_samples} samples")

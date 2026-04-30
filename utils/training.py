@@ -1,6 +1,6 @@
 from models.ensemble import *
 from utils.misc import *
-
+from models.encoder import *
 
 def train_model(decoder_model, encoder_model, train_loader, num_epochs, criterion, optimizer, lambda_div, enforce_diversity):
 

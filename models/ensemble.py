@@ -15,23 +15,30 @@ class SegFormerDecoderHead(nn.Module):
 
         # Spatial Context Layer (3x3 conv): 256 -> 256
         self.spatial_refine = nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1)
-        self.activation2 = nn.BatchNorm2d(embed_dim)
+        self.bn2 = nn.BatchNorm2d(embed_dim)
+        self.activation2 = nn.GELU()
 
         # Classifier: 256 -> 24
         self.classifier = nn.Conv2d(embed_dim, num_classes, kernel_size=1)
+
+        # Learnable upsampling
+        # use groups=num_classes so each class channels upscales independently
+        self.learnable_upsample = nn.ConvTranspose2d(num_classes, num_classes, kernel_size=8, stride=8, groups=num_classes)
 
     def forward(self, x):
         # x starts as [1, 1024, 28, 28]
         x = self.linear_fusion(x)
         x = self.activation1(x)
         x = self.spatial_refine(x)
+        x = self.bn2(x)
         x = self.activation2(x)
         x = self.classifier(x)
+        x = self.learnable_upsample(x)
 
         # Upsampling, we stretch the 24 outputs back to the 224 x 224 of the original image
         # TODO : Change this to learnable weights?
-        x = F.interpolate(x, size=(224, 224), mode='bilinear', align_corners=False)
-
+        # x = F.interpolate(x, size=(224, 224), mode='bilinear', align_corners=False)
+        
         return x
 
 class DecoderEnsemble(nn.Module):
