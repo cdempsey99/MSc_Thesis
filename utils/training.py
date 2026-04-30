@@ -58,7 +58,7 @@ def train_model(decoder_model, encoder_model, train_loader, num_epochs, criterio
                 # Convert to probs for JSD
 
                 # Adding in temperature to soften prob profiles
-                T = 7.0
+                T = 1.0
                 #all_probs = torch.softmax(all_preds, dim=2)
                 all_probs_soft = torch.softmax(all_preds / T, dim=2)
 
@@ -128,7 +128,7 @@ def full_decoder_training_run(input_dict, train_loader):
     # Instantiate Decoder Ensemble
     print("Instantiating model")
     this_ensemble = DecoderEnsemble(ensemble_size, in_channels, embed_dim, num_classes)
-    this_ensemble.apply(init_weights)
+    #this_ensemble.apply(init_weights)
     this_ensemble.to(DEVICE)
 
     # Training of the Decoder ensemble

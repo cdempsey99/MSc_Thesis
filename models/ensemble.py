@@ -14,13 +14,19 @@ class SegFormerDecoderHead(nn.Module):
         self.linear_fusion = nn.Conv2d(in_channels, embed_dim, kernel_size=1)
         self.activation1 = nn.GELU()
 
-        # 256 -> 24, this is the classifier
+        # Spatial Context Layer (3x3 conv): 256 -> 256
+        self.spatial_refine = nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1)
+        self.activation2 = nn.BatchNorm2d(embed_dim)
+
+        # Classifier: 256 -> 24
         self.classifier = nn.Conv2d(embed_dim, num_classes, kernel_size=1)
 
     def forward(self, x):
         # x starts as [1, 1024, 28, 28]
         x = self.linear_fusion(x)
         x = self.activation1(x)
+        x = self.spatial_refine(x)
+        x = self.activation2(x)
         x = self.classifier(x)
 
         # Upsampling, we stretch the 24 outputs back to the 224 x 224 of the original image
