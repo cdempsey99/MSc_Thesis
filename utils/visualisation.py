@@ -1,3 +1,4 @@
+from datetime import datetime
 import os
 import numpy as np
 import matplotlib.pyplot as plt
@@ -34,7 +35,7 @@ def visualise_encoder_output(grid_features, save_name="encoder_heatmap.png"):
     # plt.show()
 
 # The 5 pane figure showing the ground truth, class predictions, variance, entropy and mutual information
-def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map, ground_truth, hide_unlabelled, save_name="all_metrics.png"):
+def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map, ground_truth, hide_unlabelled, save_name="all_metrics"):
     """
     Displays a comprehensive 5-pane figure showing
     ground truth, class prediction, average variance, entropy and mutual information
@@ -97,6 +98,8 @@ def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map, ground
         ax.axis('off')
 
     plt.tight_layout()
+    current_time = datetime.now().strftime("%Y%m%d%H%M")
+    save_name += f"_{current_time}.png"
     full_file_path = os.path.join(save_path, save_name)
     plt.savefig(full_file_path, bbox_inches='tight', dpi=300)
     # plt.show()
@@ -148,6 +151,8 @@ def plot_reliability_diagram(bin_accs_all, bin_counts, save_name="reliability_di
     plt.grid(alpha=0.3)
 
     plt.tight_layout()
+    current_time = datetimcurrent_time.now()strftime("%Y%m%d%H%M")
+    save_name += f"_{current_time}.png"
     full_file_path = os.path.join(save_path, save_name)
     plt.savefig(full_file_path, bbox_inches='tight')
     # plt.show()
