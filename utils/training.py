@@ -55,9 +55,14 @@ def train_model(decoder_model, encoder_model, train_loader, num_epochs, criterio
             # 3. Diversity Loss (JSD) - Always calculate at 28x28
             div_loss = 0
             if enforce_diversity:
-                # IMPORTANT: Convert to probabilities for JSD!
-                all_probs = torch.softmax(all_preds, dim=2)
-                div_loss = js_divergence_loss(all_probs)
+                # Convert to probs for JSD
+
+                # Adding in temperature to soften prob profiles
+                T = 7.0
+                #all_probs = torch.softmax(all_preds, dim=2)
+                all_probs_soft = torch.softmax(all_preds / T, dim=2)
+
+                div_loss = js_divergence_loss(all_probs_soft)
 
             # 4. Total Loss Calculation
             # Higher div_loss = More diverse = Lower total_loss
