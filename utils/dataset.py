@@ -46,9 +46,11 @@ def ingest_paired_patch(img_path, mask_path, x, y):
 
 class FBPPatchDataset(Dataset):
 
-    def __init__(self, img_paths, mask_paths, patch_size=224, stride=112, min_labelled_pixels=100):
+    def __init__(self, img_paths, mask_paths, patch_size=224, stride=112, preload=True):
         self.patch_size = patch_size
+        self.preload = preload
         self.samples = [] # List of [img_path, mask_path, x, y]
+        self.loaded_data = []
 
         for img_p, mask_p in zip(img_paths, mask_paths):
             with rasterio.open(img_p) as src:
@@ -65,6 +67,18 @@ class FBPPatchDataset(Dataset):
                         # Could try bringing this number up to only take interesting pixels?
                         if (mask_patch > 0).sum() > MIN_LABELLED_PIXELS:
                             self.samples.append((img_p, mask_p, x, y))
+
+        # 2. Pre-loading with Progress Bar
+        if self.preload:
+            print(f"Pre-loading {len(self.samples)} patches into HPC RAM...")
+            for i, (img_p, mask_p, x, y) in enumerate(self.samples):
+                img_t, mask_t = ingest_paired_patch(img_p, mask_p, x, y)
+                # Store as CPU tensors to keep GPU memory free for the model
+                self.loaded_data.append((img_t.squeeze(0).cpu(), mask_t.squeeze(0).cpu()))
+
+                if i % 500 == 0:
+                    print(f"Loaded {i}/{len(self.samples)} patches...")
+            print("Pre-loading complete.")
 
     # Note the __x__ here as __len__ will be called automatically by Python when we use len(dataset)
     def __len__(self):
