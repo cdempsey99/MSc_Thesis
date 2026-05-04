@@ -105,7 +105,7 @@ def evaluate_metrics(class_map, ground_truth, unc_map):
     return miou, overall_accuracy, avg_unc, ece
 
 # Fn to evaluate trained model
-def get_decoder_output_maps(trained_decoder_model, grid_features):
+def get_decoder_output_maps(trained_decoder_model, grid_features, save_name="heads_predictions"):
     # Evaluation
     trained_decoder_model.eval()
     with torch.no_grad():
@@ -130,11 +130,18 @@ def get_decoder_output_maps(trained_decoder_model, grid_features):
             axes[i].set_title(f"Head {i + 1}")
             axes[i].axis('off')
 
-        plt.tight_layout()
-        plt.show()
+        # Save figure
+        save_path = os.path.join(BASE_OUT, "heads", save_name)
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
+
+        current_time = datetime.now().strftime("%Y%m%d%H%M")
+        full_file_path = os.path.join(save_path, f"ensemble_heads_{current_time}.png")
+        plt.savefig(full_file_path, bbox_inches='tight', dpi=150)
+        # plt.show()
 
         # Take softmax first, then calculate class predictions for every pixel
-        all_probs = torch.softmax(eval_preds, dim=2) # softmaxing over the class dimension: [5, 1, 25, 224, 224]
+        all_probs = torch.softmax(eval_preds, dim=2) # softmaxxing over the class dimension: [5, 1, 25, 224, 224]
         mean_probs = all_probs.mean(dim=0)  # [1, 25, 224, 224]
         class_map = torch.argmax(mean_probs, dim=1).squeeze().cpu().numpy() # [224, 224]
 
