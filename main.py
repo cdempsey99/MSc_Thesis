@@ -61,7 +61,10 @@ image_filepaths = [os.path.join(args.data_dir, "GF2_PMS1__L1A0000962382-MSS1.tif
 mask_filepaths = [os.path.join(args.data_dir, "GF2_PMS1__L1A0000962382-MSS1_24label.png")]
 
 # Instantiate an object of the Dataset class
-full_image_dataset = FBPPatchDataset(image_filepaths, mask_filepaths, patch_size=224, stride=112)
+is_hpc = os.getenv("OUT_DIR") is not None
+use_preload = True if is_hpc else False # Only preload on the cluster
+
+full_image_dataset = FBPPatchDataset(image_filepaths, mask_filepaths, patch_size=224, stride=112, preload=use_preload)
 
 # For tinkering, use a much smaller dataset
 small_dataset = True
