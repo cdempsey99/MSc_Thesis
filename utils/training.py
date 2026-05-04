@@ -1,23 +1,40 @@
 from models.ensemble import *
 from utils.misc import *
 from models.encoder import *
+from configs.config import *
 
-def train_model(decoder_model, encoder_model, train_loader, num_epochs, criterion, optimizer, lambda_div, enforce_diversity):
+def train_model(decoder_model, encoder_model, train_loader, num_epochs, criterion, optimizer, lambda_div, enforce_diversity, resume=False):
+
+    # TODO : Change this fn to just take an input dict
 
     decoder_model.train()
     optimizer.zero_grad()
     save_interval = 20
 
+    decoder_model.to(DEVICE)
+    start_epoch = 0
+
+    # Resume from a saved checkpoint if one is available
+    if resume and LAST_CHECKPOINT_PATH.exists():
+        print(f"--> User requested resume. Loading {LAST_CHECKPOINT_PATH}...")
+        checkpoint = torch.load(LAST_CHECKPOINT_PATH, map_location=DEVICE)
+
+        decoder_model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+        start_epoch = checkpoint['epoch']
+        print(f"--> Successfully resumed from epoch {start_epoch + 1}")
+
+    elif not resume and LAST_CHECKPOINT_PATH.exists():
+        # Safety warning so you don't accidentally overwrite your 102-epoch work
+        print("!! WARNING: Checkpoint exists but --resume was not used. !!")
+        print("!! This run will OVERWRITE your existing checkpoint. !!")
+
     print(f"Starting Training")
 
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         epoch_task_loss = 0
         epoch_div_loss  = 0
-
-        # Test
-        #print(f"Head 0 weight sum: {decoder_model.heads[0].weight.sum()}", flush=True)
-        #print(f"Head 1 weight sum: {decoder_model.heads[1].weight.sum()}", flush=True)
-
 
         # Iterate over DataLoader
         for batch_idx, (images, targets) in enumerate(train_loader):
@@ -121,6 +138,7 @@ def full_decoder_training_run(input_dict, train_loader):
     enforce_diversity = input_dict["enforce_diversity"]
     learning_rate = input_dict["learning_rate"]
     hide_unlabelled_pixels = input_dict["hide_unlabelled_pixels"]
+    resume = input_dict["resume"]
 
     # Load Encoder
     encoder_model = initialize_clay_encoder()
@@ -137,7 +155,7 @@ def full_decoder_training_run(input_dict, train_loader):
 
     # Train
     trained_decoder_model = train_model(
-        this_ensemble, encoder_model, train_loader, num_epochs, criterion, optimizer, lambda_div, enforce_diversity
+        this_ensemble, encoder_model, train_loader, num_epochs, criterion, optimizer, lambda_div, enforce_diversity, resume
     )
 
     # Since we don't have a single 'ground_truth' anymore,

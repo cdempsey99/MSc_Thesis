@@ -28,6 +28,7 @@ parser.add_argument("--enforce_diversity", action="store_true")
 parser.add_argument("--lr", type=float, default=0.0001)
 parser.add_argument("--batch_size", type=int, default=2)
 parser.add_argument("--hide_unlabelled_pixels", action="store_true")
+parser.add_argument("--resume", action="store_true", help="Resume from the last checkpoint")
 
 args = parser.parse_args()
 
@@ -51,7 +52,8 @@ input_dict = {
     "learning_rate": args.lr,
     "batch_size": args.batch_size,
     "hide_unlabelled_pixels" : args.hide_unlabelled_pixels,
-    "out_dir" : args.out_dir
+    "out_dir" : args.out_dir,
+    "resume" : args.resume
 }
 
 # Get paths for our initial test image and mask

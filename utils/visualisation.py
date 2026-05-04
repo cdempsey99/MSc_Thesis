@@ -15,8 +15,9 @@ def ensure_dir(path="results"):
 # Fn to take the [1, 1024, 28, 28] tensor and produce a heatmap of 'attention'
 def visualise_encoder_output(grid_features, save_name="encoder_heatmap.png"):
     
-    base_results_dir = os.getenv("OUT_DIR", "results")
-    save_path = os.path.join(base_results_dir, "heatmaps")
+    #base_results_dir = os.getenv("OUT_DIR", "results")
+
+    save_path = os.path.join(BASE_OUT, "heatmaps")
     ensure_dir(save_path)
 
     heatmap = grid_features.detach().cpu().mean(dim=1).squeeze()
@@ -41,8 +42,9 @@ def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map, ground
     ground truth, class prediction, average variance, entropy and mutual information
     """
     # Use the env var for the res dir, default to results for Windows setup
-    base_results_dir = os.getenv("OUT_DIR", "results")
-    save_path = os.path.join(base_results_dir, "metrics") 
+    #base_results_dir = os.getenv("OUT_DIR", "results")
+
+    save_path = os.path.join(BASE_OUT, "metrics")
     ensure_dir(save_path)
 
     to_np = lambda x: x.cpu().numpy() if hasattr(x, 'cpu') else x
@@ -123,8 +125,9 @@ def display_truth_proportions(ground_truth):
 def plot_reliability_diagram(bin_accs_all, bin_counts, save_name="reliability_diagram"):
 
     # Use env var for results dir, with default results for Windows setup
-    base_results_dir = os.getenv("OUT_DIR", "results")
-    save_path = os.path.join(base_results_dir, "reliability")
+    #base_results_dir = os.getenv("OUT_DIR", "results")
+
+    save_path = os.path.join(BASE_OUT, "reliability")
     ensure_dir(save_path)
 
     # bin_accs_all should be an array of 10 values

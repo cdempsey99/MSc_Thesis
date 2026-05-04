@@ -1,15 +1,32 @@
-from pathlib import Path
 import torch
+import os
+from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-CHECKPOINT_DIR = ROOT_DIR / "checkpoints"
+
+# Check for the HPC environment variable
+hpc_out_dir = os.getenv("OUT_DIR")
+
+# If on HPC, BASE_OUT is the scratch space; otherwise, it's your local ROOT_DIR
+BASE_OUT = Path(hpc_out_dir) if hpc_out_dir else ROOT_DIR
+
+CHECKPOINT_DIR = BASE_OUT / "checkpoints"
+
 DATA_DIR = ROOT_DIR / "data"
 UTILS_DIR = ROOT_DIR / "utils"
 MODELS_DIR = ROOT_DIR / "models"
 CONFIGS_DIR = ROOT_DIR / "configs"
 
+# Global constant for the specific file path
+LAST_CHECKPOINT_PATH = CHECKPOINT_DIR / "last_checkpoint.pth"
+
+# Ensure the checkpoint directory exists
+CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+
 # Change device to cuda or gpu if available
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# Model and training parameters
 NUM_CLASSES=25
 ENSEMBLE_SIZE=5
 DECODER_IN_CHANNELS=1024
