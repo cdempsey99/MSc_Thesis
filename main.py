@@ -84,7 +84,7 @@ full_image_dataset = FBPPatchDataset(
 )
 
 # Create DataLoader
-train_loader = DataLoader(full_image_dataset, batch_size=input_dict["batch_size"], shuffle=False)
+train_loader = DataLoader(full_image_dataset, batch_size=input_dict["batch_size"], shuffle=True, pin_memory=True)
 
 print(f"Total patches found: {len(full_image_dataset)}")
 print(f"Total batches to run per epoch : {len(train_loader)}")
