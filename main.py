@@ -60,19 +60,28 @@ input_dict = {
 image_filepaths = [os.path.join(args.data_dir, "GF2_PMS1__L1A0000962382-MSS1.tif")]
 mask_filepaths = [os.path.join(args.data_dir, "GF2_PMS1__L1A0000962382-MSS1_24label.png")]
 
+
+
 # Instantiate an object of the Dataset class
 is_hpc = os.getenv("OUT_DIR") is not None
-use_preload = True if is_hpc else False # Only preload on the cluster
-
-full_image_dataset = FBPPatchDataset(image_filepaths, mask_filepaths, patch_size=224, stride=112, preload=use_preload)
+use_preload = True if is_hpc else False
 
 # For tinkering, use a much smaller dataset
 small_dataset = True
-small_samples = 100
+sample_limit = 100 if small_dataset else None
 
 if small_dataset:
-    print(f"Using SMALL dataset of only {small_samples} samples")
-    full_image_dataset.samples = full_image_dataset.samples[:small_samples]
+    print(f"Using SMALL dataset of only {sample_limit} samples")
+
+# Instantiate the FBP patch dataset
+full_image_dataset = FBPPatchDataset(
+    image_filepaths,
+    mask_filepaths,
+    patch_size=224,
+    stride=112,
+    preload=True,
+    max_samples=sample_limit
+)
 
 # Create DataLoader
 train_loader = DataLoader(full_image_dataset, batch_size=input_dict["batch_size"], shuffle=False)

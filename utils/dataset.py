@@ -46,19 +46,28 @@ def ingest_paired_patch(img_path, mask_path, x, y):
 
 class FBPPatchDataset(Dataset):
 
-    def __init__(self, img_paths, mask_paths, patch_size=224, stride=112, preload=True):
+    def __init__(self, img_paths, mask_paths, patch_size=224, stride=112, preload=True, max_samples=None):
         self.patch_size = patch_size
         self.preload = preload
         self.samples = [] # List of [img_path, mask_path, x, y]
         self.loaded_data = []
 
         for img_p, mask_p in zip(img_paths, mask_paths):
+            if max_samples and len(self.samples) >= max_samples:
+                break
+
             with rasterio.open(img_p) as src:
                 h, w = src.height, src.width
 
                 # Create a grid of x, y offsets
                 for y in range(0, h - patch_size, stride):
+                    if max_samples and len(self.samples) >= max_samples:
+                        break
+
                     for x in range(0, w - patch_size, stride):
+                        if max_samples and len(self.samples) >= max_samples:
+                            break
+
                         # Check here if the patch has any pixels that are not label 0
                         win = Window(x, y, patch_size, patch_size)
                         mask_patch = src.read(1, window=win)
