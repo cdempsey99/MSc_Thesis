@@ -1,6 +1,7 @@
 from claymodel.module import ClayMAEModule
 from configs.config import *
 from utils.dataset import *
+from tqdm import tqdm
 
 def initialize_clay_encoder():
     """Initializes the Clay model and loads pruned weights once."""
