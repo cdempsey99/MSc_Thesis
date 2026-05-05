@@ -82,7 +82,7 @@ existing_files = list(feature_dir.glob("*.pt")) if feature_dir.exists() else []
 
 # Trigger bake if folder is missing, empty, or doesn't match our intended run size
 if not feature_dir.exists() or len(existing_files) == 0 or (not small_dataset and len(existing_files) < 200):
-    print(f"--> Triggering fresh bake. Reason: {len(existing_files)} patches found, but full run requested.")
+    print(f"--> Triggering fresh bake. Reason: {len(existing_files)} patches found, but larger run requested.")
 
     # CLEANUP: Remove old directories to ensure a clean index from 0 to N
     if feature_dir.exists():
