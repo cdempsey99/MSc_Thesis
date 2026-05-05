@@ -1,6 +1,5 @@
 from models.ensemble import *
 from utils.misc import *
-from models.encoder import *
 from configs.config import *
 
 def train_model(decoder_model, train_loader, num_epochs, criterion, optimizer, lambda_div, enforce_diversity, resume=False):
@@ -31,32 +30,6 @@ def train_model(decoder_model, train_loader, num_epochs, criterion, optimizer, l
         print("!! This run will OVERWRITE your existing checkpoint. !!")
 
     print(f"Starting Training")
-
-
-    """
-    for epoch in range(start_epoch, num_epochs):
-        epoch_task_loss = 0
-        epoch_div_loss  = 0
-
-        # Iterate over DataLoader
-        for batch_idx, (images, targets) in enumerate(train_loader):
-
-            optimizer.zero_grad()
-
-            # Move to device
-            images = images.to(DEVICE)
-            targets = targets.to(DEVICE).long()
-
-            # Pass through frozen Encoder
-            with torch.no_grad():
-                grid_features = get_encoder_representation(images, encoder_model)
-                # This should be returning [Batch, 1024, 28, 28]
-
-            # Forward pass through Decoder Ensemble
-            all_preds = decoder_model(grid_features)  # [5, Batch, 24, 224, 224]
-            
-    """
-
     for epoch in range(start_epoch, num_epochs):
 
         epoch_task_loss = 0
@@ -69,11 +42,8 @@ def train_model(decoder_model, train_loader, num_epochs, criterion, optimizer, l
             features = features.to(DEVICE)
             targets = targets.to(DEVICE).long()
 
-            # Forward pass - NO ENCODER CALL HERE
+            # Forward pass
             all_preds = decoder_model(features)  # [M, Batch, 24, 224, 224]
-
-            # ... [Rest of your Task Loss and Diversity Loss logic remains the same] ...
-
 
             # Task Loss: Process one head at a time (Memory Efficient)
             total_task_loss = 0
@@ -95,20 +65,16 @@ def train_model(decoder_model, train_loader, num_epochs, criterion, optimizer, l
             div_loss = 0
             if enforce_diversity:
                 # Convert to probs for JSD
+                # Adding in temperature to soften prob profiles ?
+                all_probs = torch.softmax(all_preds, dim=2)
 
-                # Adding in temperature to soften prob profiles
-                T = 1.0
-                #all_probs = torch.softmax(all_preds, dim=2)
-                all_probs_soft = torch.softmax(all_preds / T, dim=2)
-
-                div_loss = js_divergence_loss(all_probs_soft)
+                div_loss = js_divergence_loss(all_probs)
 
             # 4. Total Loss Calculation
             # Higher div_loss = More diverse = Lower total_loss
             # Keep in mind here the names are maybe not ideal, a higher div_loss is good as it means the heads are more diverse
             # this is then subtracted to make the total loss smaller
             total_loss = task_loss - (lambda_div * div_loss)
-
             total_loss.backward()
             optimizer.step()
 
@@ -162,8 +128,6 @@ def full_decoder_training_run(input_dict, train_loader):
     hide_unlabelled_pixels = input_dict["hide_unlabelled_pixels"]
     resume = input_dict["resume"]
 
-    # Load Encoder
-    #encoder_model = initialize_clay_encoder()
 
     # Instantiate Decoder Ensemble
     print("Instantiating model")
@@ -179,24 +143,6 @@ def full_decoder_training_run(input_dict, train_loader):
     trained_decoder_model = train_model(
         this_ensemble, train_loader, num_epochs, criterion, optimizer, lambda_div, enforce_diversity, resume
     )
-    """
-    # Evaluate
-    # Since we don't have a single 'ground_truth' anymore,
-    # we grab one batch from the loader to use as our "Visual Test"
-    test_images, test_ground_truth = get_random_batch(train_loader, DEVICE)
-    test_images = test_images.to(DEVICE)
-
-    # We need to get the encoder features for this test batch to visualize them
-    with torch.no_grad():
-        test_grid_features = get_encoder_representation(test_images, encoder_model)
-
-    # Evaluate
-    print("Evaluating model on test batch")
-    # We use index [0] to just look at the first image in that test batch
-    mean_probs, class_map, variance_map, total_entropy, mutual_info = get_decoder_output_maps(
-        trained_decoder_model, test_grid_features[0].unsqueeze(0)
-    )
-    """
 
     # Evaluate
     # Since our loader now returns (features, masks), test_features is already [Batch, 1024, 28, 28]
@@ -208,9 +154,6 @@ def full_decoder_training_run(input_dict, train_loader):
     mean_probs, class_map, variance_map, total_entropy, mutual_info = get_decoder_output_maps(
         trained_decoder_model, test_grid_features[0].unsqueeze(0)
     )
-
-
-
 
     # Now call visualization using the mask from that same test image
     visualise_all_metrics(class_map, variance_map, total_entropy, mutual_info, test_ground_truth[0], hide_unlabelled_pixels)

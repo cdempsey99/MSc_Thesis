@@ -1,5 +1,6 @@
 from utils.training import *
 from utils.dataset import *
+from models.encoder import *
 import time
 import argparse
 import os
@@ -69,38 +70,13 @@ use_preload = True if is_hpc else False
 small_dataset = True
 sample_limit = 100 if small_dataset else None
 
-
 if small_dataset:
     print(f"Using SMALL dataset of only {sample_limit} samples")
 
-"""
-
-# TODO : Record time for data loading
-
-# Instantiate the FBP patch dataset
-full_image_dataset = FBPPatchDataset(
-    image_filepaths,
-    mask_filepaths,
-    patch_size=224,
-    stride=112,
-    preload=True,
-    max_samples=sample_limit
-)
-
-# Create DataLoader
-train_loader = DataLoader(full_image_dataset, batch_size=input_dict["batch_size"], shuffle=True, pin_memory=True)
-
-print(f"Total patches found: {len(full_image_dataset)}")
-print(f"Total batches to run per epoch : {len(train_loader)}")
-"""
-
-#=======================
-
-# 1. Define specific paths for the baked data in the scratch space
+# Define specific paths for the baked data in the scratch space
 feature_dir = BASE_OUT / "features"
 mask_dir = BASE_OUT / "masks_tensors"
 
-# 2. Check if we need to bake features
 # We only run the expensive encoder if the features don't exist yet
 if not feature_dir.exists() or len(list(feature_dir.glob("*.pt"))) == 0:
     print("--> Baked features not found. Starting one-time extraction...")
@@ -144,11 +120,8 @@ train_loader = DataLoader(
 print(f"Total baked patches found: {len(baked_dataset)}")
 print(f"Total batches to run per epoch: {len(train_loader)}")
 
-# ======  RUN  =======
+# Record time
 start_time = time.time()
-
-
-#-------------------------------------------------------
 
 
 # ======  RUN  =======
@@ -164,7 +137,7 @@ print("-" * 30)
 print(f"Total Execution Time for full_decoder_training_run function: {minutes}m {seconds}s")
 print("-" * 30)
 
-# This timer will only finish when i manually exit out of the graphs
+# Keep in mind this timer will only finish when i manually exit out of the graphs
 
 
 """
