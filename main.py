@@ -4,13 +4,13 @@ from models.encoder import *
 import time
 import argparse
 import os
+import shutil
 
 # TODO : Can we somehow take outputs from different layers our from the clay encoder? Instead of just the last one?
 # TODO : Change learning rate as epochs go on? Also mess around with different optimizers potentially
 # TODO : Try only turning on/increasing Diversity after a few epochs ?
 # TODO : Use more assert statements
 # TODO : Use dropout for regularisation ?
-
 
 #random.seed(None)
 
@@ -77,9 +77,20 @@ if small_dataset:
 feature_dir = BASE_OUT / "features"
 mask_dir = BASE_OUT / "masks_tensors"
 
-# We only run the expensive encoder if the features don't exist yet
-if not feature_dir.exists() or len(list(feature_dir.glob("*.pt"))) == 0:
-    print("--> Baked features not found. Starting one-time extraction...")
+# Count existing files
+existing_files = list(feature_dir.glob("*.pt")) if feature_dir.exists() else []
+
+# Trigger bake if folder is missing, empty, or doesn't match our intended run size
+if not feature_dir.exists() or len(existing_files) == 0 or (not small_dataset and len(existing_files) < 200):
+    print(f"--> Triggering fresh bake. Reason: {len(existing_files)} patches found, but full run requested.")
+
+    # CLEANUP: Remove old directories to ensure a clean index from 0 to N
+    if feature_dir.exists():
+        print(f"Cleaning old features at {feature_dir}...")
+        shutil.rmtree(feature_dir)
+    if mask_dir.exists():
+        print(f"Cleaning old masks at {mask_dir}...")
+        shutil.rmtree(mask_dir)
 
     # Use your original dataset/loader just for the extraction phase
     raw_dataset = FBPPatchDataset(

@@ -5,6 +5,10 @@ from configs.config import *
 def train_model(decoder_model, train_loader, num_epochs, criterion, optimizer, lambda_div, enforce_diversity, resume=False):
 
     # TODO : Change this fn to just take an input dict
+    # num epochs
+    # lambda div
+    # enforce div
+    # resume
 
     decoder_model.train()
     optimizer.zero_grad()
