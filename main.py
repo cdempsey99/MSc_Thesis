@@ -104,12 +104,19 @@ if not feature_dir.exists() or len(existing_files) == 0 or (not small_dataset an
     # Batch size 1 is safest for the large Transformer extraction
     extract_loader = DataLoader(raw_dataset, batch_size=1, shuffle=False)
 
+    # Record time for baking features
+    bake_start = time.time()
+
     # Load encoder once to bake
     encoder_model = initialize_clay_encoder()
     encoder_model.to(DEVICE)
 
     # Call the new function in encoder.py
     bake_features(extract_loader, encoder_model)
+
+    bake_end = time.time()
+    bake_duration = (bake_end - bake_start) / 60
+    print(f"✅ Baking of features complete. Total time: {bake_duration:.2f} minutes for {len(extract_loader)} patches.")
 
     # Clean up encoder to free 30GB+ of VRAM for training
     del encoder_model
