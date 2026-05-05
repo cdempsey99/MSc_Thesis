@@ -3,7 +3,7 @@ from utils.misc import *
 from models.encoder import *
 from configs.config import *
 
-def train_model(decoder_model, encoder_model, train_loader, num_epochs, criterion, optimizer, lambda_div, enforce_diversity, resume=False):
+def train_model(decoder_model, train_loader, num_epochs, criterion, optimizer, lambda_div, enforce_diversity, resume=False):
 
     # TODO : Change this fn to just take an input dict
 
@@ -163,7 +163,7 @@ def full_decoder_training_run(input_dict, train_loader):
     resume = input_dict["resume"]
 
     # Load Encoder
-    encoder_model = initialize_clay_encoder()
+    #encoder_model = initialize_clay_encoder()
 
     # Instantiate Decoder Ensemble
     print("Instantiating model")
@@ -177,9 +177,9 @@ def full_decoder_training_run(input_dict, train_loader):
 
     # Train
     trained_decoder_model = train_model(
-        this_ensemble, encoder_model, train_loader, num_epochs, criterion, optimizer, lambda_div, enforce_diversity, resume
+        this_ensemble, train_loader, num_epochs, criterion, optimizer, lambda_div, enforce_diversity, resume
     )
-
+    """
     # Evaluate
     # Since we don't have a single 'ground_truth' anymore,
     # we grab one batch from the loader to use as our "Visual Test"
@@ -196,6 +196,21 @@ def full_decoder_training_run(input_dict, train_loader):
     mean_probs, class_map, variance_map, total_entropy, mutual_info = get_decoder_output_maps(
         trained_decoder_model, test_grid_features[0].unsqueeze(0)
     )
+    """
+
+    # Evaluate
+    # Since our loader now returns (features, masks), test_features is already [Batch, 1024, 28, 28]
+    test_grid_features, test_ground_truth = get_random_batch(train_loader, DEVICE)
+
+    # Evaluate
+    print("Evaluating model on test batch")
+    # We use index [0] to look at the first set of features in that test batch
+    mean_probs, class_map, variance_map, total_entropy, mutual_info = get_decoder_output_maps(
+        trained_decoder_model, test_grid_features[0].unsqueeze(0)
+    )
+
+
+
 
     # Now call visualization using the mask from that same test image
     visualise_all_metrics(class_map, variance_map, total_entropy, mutual_info, test_ground_truth[0], hide_unlabelled_pixels)
