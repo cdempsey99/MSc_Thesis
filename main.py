@@ -67,7 +67,7 @@ is_hpc = os.getenv("OUT_DIR") is not None
 use_preload = True if is_hpc else False
 
 # For tinkering, use a much smaller dataset
-small_dataset = True
+small_dataset = False
 sample_limit = 100 if small_dataset else None
 
 if small_dataset:
