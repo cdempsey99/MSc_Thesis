@@ -161,6 +161,7 @@ def get_decoder_output_maps(trained_decoder_model, grid_features, save_name="hea
 
     return mean_probs, class_map, variance_map, total_entropy, mutual_info
 
+# Unsure if this is a good idea or not
 # Fn to make sure we initialise weights with very small values to ensure some class doesn't accidentally start off as
 # being picked and then the model becomes confident on this class only because of a random fluctuation
 def init_weights(m):

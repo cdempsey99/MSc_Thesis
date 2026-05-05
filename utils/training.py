@@ -2,13 +2,14 @@ from models.ensemble import *
 from utils.misc import *
 from configs.config import *
 
-def train_model(decoder_model, train_loader, num_epochs, criterion, optimizer, lambda_div, enforce_diversity, resume=False):
+def train_model(decoder_model, train_loader, criterion, optimizer, input_dict):
 
     # TODO : Change this fn to just take an input dict
-    # num epochs
-    # lambda div
-    # enforce div
-    # resume
+    # Extract parameters from original input dict
+    num_epochs = input_dict["num_epochs"]
+    lambda_div = input_dict["lambda_div"]
+    enforce_diversity = input_dict["enforce_diversity"]
+    resume = input_dict["resume"]
 
     decoder_model.train()
     optimizer.zero_grad()
@@ -132,7 +133,6 @@ def full_decoder_training_run(input_dict, train_loader):
     hide_unlabelled_pixels = input_dict["hide_unlabelled_pixels"]
     resume = input_dict["resume"]
 
-
     # Instantiate Decoder Ensemble
     print("Instantiating model")
     this_ensemble = DecoderEnsemble(ensemble_size, in_channels, embed_dim, num_classes)
@@ -145,7 +145,7 @@ def full_decoder_training_run(input_dict, train_loader):
 
     # Train
     trained_decoder_model = train_model(
-        this_ensemble, train_loader, num_epochs, criterion, optimizer, lambda_div, enforce_diversity, resume
+        this_ensemble, train_loader, criterion, optimizer, input_dict
     )
 
     # Evaluate
