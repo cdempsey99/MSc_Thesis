@@ -60,8 +60,6 @@ input_dict = {
 image_filepaths = [os.path.join(args.data_dir, "GF2_PMS1__L1A0000962382-MSS1.tif")]
 mask_filepaths = [os.path.join(args.data_dir, "GF2_PMS1__L1A0000962382-MSS1_24label.png")]
 
-
-
 # Instantiate an object of the Dataset class
 is_hpc = os.getenv("OUT_DIR") is not None
 use_preload = True if is_hpc else False
@@ -72,6 +70,8 @@ sample_limit = 100 if small_dataset else None
 
 if small_dataset:
     print(f"Using SMALL dataset of only {sample_limit} samples")
+
+# TODO : Record time for data loading
 
 # Instantiate the FBP patch dataset
 full_image_dataset = FBPPatchDataset(
@@ -89,7 +89,7 @@ train_loader = DataLoader(full_image_dataset, batch_size=input_dict["batch_size"
 print(f"Total patches found: {len(full_image_dataset)}")
 print(f"Total batches to run per epoch : {len(train_loader)}")
 
-# Record time
+# Record time for training
 start_time = time.time()
 
 # ======  RUN  =======
