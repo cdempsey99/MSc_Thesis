@@ -32,6 +32,8 @@ def train_model(decoder_model, encoder_model, train_loader, num_epochs, criterio
 
     print(f"Starting Training")
 
+
+    """
     for epoch in range(start_epoch, num_epochs):
         epoch_task_loss = 0
         epoch_div_loss  = 0
@@ -52,6 +54,26 @@ def train_model(decoder_model, encoder_model, train_loader, num_epochs, criterio
 
             # Forward pass through Decoder Ensemble
             all_preds = decoder_model(grid_features)  # [5, Batch, 24, 224, 224]
+            
+    """
+
+    for epoch in range(start_epoch, num_epochs):
+
+        epoch_task_loss = 0
+        epoch_div_loss = 0
+
+        for features, targets in train_loader:
+            optimizer.zero_grad()
+
+            # Move data to GPU - Note: features are already [1024, 28, 28]
+            features = features.to(DEVICE)
+            targets = targets.to(DEVICE).long()
+
+            # Forward pass - NO ENCODER CALL HERE
+            all_preds = decoder_model(features)  # [M, Batch, 24, 224, 224]
+
+            # ... [Rest of your Task Loss and Diversity Loss logic remains the same] ...
+
 
             # Task Loss: Process one head at a time (Memory Efficient)
             total_task_loss = 0
@@ -158,6 +180,7 @@ def full_decoder_training_run(input_dict, train_loader):
         this_ensemble, encoder_model, train_loader, num_epochs, criterion, optimizer, lambda_div, enforce_diversity, resume
     )
 
+    # Evaluate
     # Since we don't have a single 'ground_truth' anymore,
     # we grab one batch from the loader to use as our "Visual Test"
     test_images, test_ground_truth = get_random_batch(train_loader, DEVICE)

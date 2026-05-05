@@ -1,5 +1,6 @@
 from claymodel.module import ClayMAEModule
 from configs.config import *
+from utils.dataset import *
 
 def initialize_clay_encoder():
     """Initializes the Clay model and loads pruned weights once."""
@@ -55,3 +56,38 @@ def get_encoder_representation(input_tensor, encoder_model):
     grid_features = features.transpose(1, 2).reshape(batch_size, 1024, 28, 28)
 
     return grid_features
+
+
+def bake_features(loader, encoder_model):
+    """
+    Runs the full dataset through the frozen encoder once and saves
+    the resulting grid features to disk to avoid redundant computation.
+    """
+    feature_dir = BASE_OUT / "features"
+    mask_dir = BASE_OUT / "masks_tensors"
+
+    # Ensure directories exist
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    mask_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Starting feature extraction. Saving to: {feature_dir}")
+    encoder_model.eval()
+
+    with torch.no_grad():
+        for i, (images, masks) in enumerate(tqdm(loader)):
+            # Move images to GPU for the encoder
+            images = images.to(DEVICE)
+
+            # grid_features shape: [Batch, 1024, 28, 28]
+            grid_features = get_encoder_representation(images, encoder_model)
+
+            # Save batch items individually
+            for j in range(grid_features.size(0)):
+                # Calculate unique index: (current batch index * batch size) + item index in batch
+                patch_idx = i * loader.batch_size + j
+
+                # Save as CPU tensors (.cpu()) to save VRAM and make them portable
+                torch.save(grid_features[j].cpu(), feature_dir / f"feat_{patch_idx}.pt")
+                torch.save(masks[j].cpu(), mask_dir / f"mask_{patch_idx}.pt")
+
+    print(f"Extraction complete. {len(loader.dataset)} patches baked.")

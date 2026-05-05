@@ -44,6 +44,7 @@ def ingest_paired_patch(img_path, mask_path, x, y):
 
     return img_tensor.unsqueeze(0), mask_tensor.unsqueeze(0)
 
+
 class FBPPatchDataset(Dataset):
 
     def __init__(self, img_paths, mask_paths, patch_size=224, stride=112, preload=True, max_samples=None):
@@ -103,4 +104,20 @@ class FBPPatchDataset(Dataset):
         return img_tensor.squeeze(0), mask_tensor.squeeze(0)
 
 
+# update the class to read presaved .pt files of the encoder representation of the image tiles
+class BakedFeatureDataset(Dataset):
+    def __init__(self, feature_dir, mask_dir):
+        # Sort to ensure features and masks align
+        self.feature_files = sorted(list(Path(feature_dir).glob("feat_*.pt")),
+                                   key=lambda x: int(x.stem.split('_')[1]))
+        self.mask_files = sorted(list(Path(mask_dir).glob("mask_*.pt")),
+                                 key=lambda x: int(x.stem.split('_')[1]))
 
+    def __len__(self):
+        return len(self.feature_files)
+
+    def __getitem__(self, idx):
+        # Load the [1024, 28, 28] tensor and the label mask
+        x = torch.load(self.feature_files[idx])
+        y = torch.load(self.mask_files[idx])
+        return x, y

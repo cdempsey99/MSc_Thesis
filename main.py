@@ -10,6 +10,7 @@ import os
 # TODO : Use more assert statements
 # TODO : Use dropout for regularisation ?
 
+
 #random.seed(None)
 
 # Parse cmd line args
@@ -68,8 +69,11 @@ use_preload = True if is_hpc else False
 small_dataset = True
 sample_limit = 100 if small_dataset else None
 
+
 if small_dataset:
     print(f"Using SMALL dataset of only {sample_limit} samples")
+
+"""
 
 # TODO : Record time for data loading
 
@@ -88,9 +92,64 @@ train_loader = DataLoader(full_image_dataset, batch_size=input_dict["batch_size"
 
 print(f"Total patches found: {len(full_image_dataset)}")
 print(f"Total batches to run per epoch : {len(train_loader)}")
+"""
 
-# Record time for training
+#=======================
+
+# 1. Define specific paths for the baked data in the scratch space
+feature_dir = BASE_OUT / "features"
+mask_dir = BASE_OUT / "masks_tensors"
+
+# 2. Check if we need to bake features
+# We only run the expensive encoder if the features don't exist yet
+if not feature_dir.exists() or len(list(feature_dir.glob("*.pt"))) == 0:
+    print("--> Baked features not found. Starting one-time extraction...")
+
+    # Use your original dataset/loader just for the extraction phase
+    raw_dataset = FBPPatchDataset(
+        image_filepaths,
+        mask_filepaths,
+        patch_size=224,
+        stride=112,
+        preload=False,  # Don't need to preload pixels into RAM for this
+        max_samples=sample_limit
+    )
+    # Batch size 1 is safest for the large Transformer extraction
+    extract_loader = DataLoader(raw_dataset, batch_size=1, shuffle=False)
+
+    # Load encoder once to bake
+    encoder_model = initialize_clay_encoder()
+    encoder_model.to(DEVICE)
+
+    # Call the new function in encoder.py
+    bake_features(extract_loader, encoder_model)
+
+    # Clean up encoder to free 30GB+ of VRAM for training
+    del encoder_model
+    torch.cuda.empty_cache()
+else:
+    print(f"--> Found existing baked features at {feature_dir}. Skipping extraction.")
+
+# 3. Instantiate the FAST dataset and loader
+# This loads [1024, 28, 28] tensors directly
+baked_dataset = BakedFeatureDataset(feature_dir, mask_dir)
+
+train_loader = DataLoader(
+    baked_dataset,
+    batch_size=input_dict["batch_size"],
+    shuffle=True,
+    pin_memory=True
+)
+
+print(f"Total baked patches found: {len(baked_dataset)}")
+print(f"Total batches to run per epoch: {len(train_loader)}")
+
+# ======  RUN  =======
 start_time = time.time()
+
+
+#-------------------------------------------------------
+
 
 # ======  RUN  =======
 # Instantiating, training and evaluating the trained decoder ensemble visually and with metrics
