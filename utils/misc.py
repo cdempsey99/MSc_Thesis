@@ -112,12 +112,11 @@ def get_decoder_output_maps(trained_decoder_model, grid_features, save_name="hea
         # eval_preds shape: [5, 1, 24, 224, 224]
         eval_preds = trained_decoder_model(grid_features)
 
-        # 2. Set up the plotting grid
-        fig, axes = plt.subplots(1, ENSEMBLE_SIZE, figsize=(20, 5))
+        # Set up the plotting grid
+        fig, axes = plt.subplots(1, trained_decoder_model.M, figsize=(20, 5))
         fig.suptitle(f"Individual Ensemble Head Predictions", fontsize=16)
 
-        # This should probably be taking ensemble size from input_dict rather than config ?
-        for i in range(ENSEMBLE_SIZE):
+        for i in range(trained_decoder_model.M):
             # Extract the [24, 224, 224] tensor for this head and get the winning class per pixel
             head_logits = eval_preds[i].squeeze(0)
             head_map = torch.argmax(head_logits, dim=0).cpu().numpy()
