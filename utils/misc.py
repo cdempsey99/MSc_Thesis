@@ -145,19 +145,21 @@ def get_decoder_output_maps(trained_decoder_model, grid_features, save_name="hea
         mean_probs = all_probs.mean(dim=0)  # [1, 25, 224, 224]
         class_map = torch.argmax(mean_probs, dim=1).squeeze().cpu().numpy() # [224, 224]
 
-        # Uncertainty measures
-        # Average Variance
-        variance_map = all_probs.var(dim=0).mean(dim=1).squeeze().cpu().numpy()  # [224, 224]
-
-        # Total Entropy (Entropy of the mean)
+        # Always calculate these regardless of M
+        all_probs = torch.softmax(eval_preds, dim=2)
+        mean_probs = all_probs.mean(dim=0)
+        class_map = torch.argmax(mean_probs, dim=1).squeeze().cpu().numpy()
         total_entropy = -1 * torch.sum(mean_probs * torch.log(mean_probs + 1e-10), dim=1)
 
-        # Average Entropy (mean of the entropies)
-        individual_entropies = -1 * torch.sum(all_probs * torch.log(all_probs + 1e-10), dim=2)
-        avg_entropy = torch.mean(individual_entropies, dim=0)
-
-        # Mutual Information
-        mutual_info = total_entropy - avg_entropy
+        # Ensemble-only uncertainty measures
+        if trained_decoder_model.M > 1:
+            variance_map = all_probs.var(dim=0).mean(dim=1).squeeze().cpu().numpy()
+            individual_entropies = -1 * torch.sum(all_probs * torch.log(all_probs + 1e-10), dim=2)
+            avg_entropy = torch.mean(individual_entropies, dim=0)
+            mutual_info = total_entropy - avg_entropy
+        else:
+            variance_map = np.zeros((224, 224))
+            mutual_info = torch.zeros_like(total_entropy)
 
     return mean_probs, class_map, variance_map, total_entropy, mutual_info
 
