@@ -11,6 +11,14 @@ import shutil
 # TODO : Try only turning on/increasing Diversity after a few epochs ?
 # TODO : Use more assert statements
 # TODO : Use dropout for regularisation ?
+# TODO : write unit tests?
+# TODO : Check second timer
+
+# Current unsolved issues:
+# Need to investigate the diversity enforcement more, size of lambda - other papers
+# Scale up to all (or most) FBP images
+
+
 
 #random.seed(None)
 
@@ -31,6 +39,7 @@ parser.add_argument("--lr", type=float, default=0.0001)
 parser.add_argument("--batch_size", type=int, default=2)
 parser.add_argument("--hide_unlabelled_pixels", action="store_true")
 parser.add_argument("--resume", action="store_true", help="Resume from the last checkpoint")
+parser.add_argument("--max_images", type=int, default=Mone)
 
 args = parser.parse_args()
 
@@ -59,8 +68,20 @@ input_dict = {
 }
 
 # Get paths for our initial test image and mask
-image_filepaths = [os.path.join(args.data_dir, "GF2_PMS1__L1A0000962382-MSS1.tif")]
-mask_filepaths = [os.path.join(args.data_dir, "GF2_PMS1__L1A0000962382-MSS1_24label.png")]
+#image_filepaths = [os.path.join(args.data_dir, "GF2_PMS1__L1A0000962382-MSS1.tif")]
+#mask_filepaths = [os.path.join(args.data_dir, "GF2_PMS1__L1A0000962382-MSS1_24label.png")]
+
+# Ingest all images available in the data dir
+data_dir = Path(args.data_dir)
+image_filepaths = sorted(data_dir.glob("*.tif"))
+if args.max_images is not None:
+    image_filepaths = image_filepaths[:args.max_images]
+mask_filepaths = [data_dir / (p.stem + "_24label.png") for p in image_filepaths]
+
+for img, mask in zip(image_filepaths, mask_filepaths):
+    assert mask.exists(), f"Missing mask for {img.name}"
+
+print(f"Found {len(image_filepaths)} image/mask pairs")
 
 # Instantiate an object of the Dataset class
 is_hpc = os.getenv("OUT_DIR") is not None
