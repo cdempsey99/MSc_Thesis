@@ -113,7 +113,8 @@ def get_decoder_output_maps(trained_decoder_model, grid_features, save_name="hea
         eval_preds = trained_decoder_model(grid_features)
 
         # Set up the plotting grid
-        fig, axes = plt.subplots(1, trained_decoder_model.M, figsize=(20, 5))
+        fig, axes = plt.subplots(1, trained_decoder_model.M, figsize=(20, 5), squeeze=False)
+        axes = axes[0]
         fig.suptitle(f"Individual Ensemble Head Predictions", fontsize=16)
 
         for i in range(trained_decoder_model.M):
