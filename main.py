@@ -36,10 +36,10 @@ parser.add_argument("--num_epochs", type=int, default=5)
 parser.add_argument("--lam", type=float, default=0.1)
 parser.add_argument("--enforce_diversity", action="store_true")
 parser.add_argument("--lr", type=float, default=0.0001)
-parser.add_argument("--batch_size", type=int, default=2)
+parser.add_argument("--batch_size", type=int, default=32)
 parser.add_argument("--hide_unlabelled_pixels", action="store_true")
 parser.add_argument("--resume", action="store_true", help="Resume from the last checkpoint")
-parser.add_argument("--max_images", type=int, default=Mone)
+parser.add_argument("--max_images", type=int, default=None)
 
 args = parser.parse_args()
 
