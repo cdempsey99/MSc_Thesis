@@ -267,7 +267,7 @@ print("-" * 30)
 trained_model = full_decoder_training_run(input_dict, train_loader, val_loader)
 
 end_time = time.time()
-print(f"Time for training: {start_time - end_time}")
+print(f"Time for training: {end_time - start_time}")
 
 # --- 5. Final Test Evaluation (Outside) ---
 print("\n" + "="*30)
