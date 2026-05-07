@@ -2,7 +2,7 @@ from models.ensemble import *
 from utils.misc import *
 from configs.config import *
 
-def train_model(decoder_model, train_loader, criterion, optimizer, input_dict):
+def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, input_dict):
 
     # TODO : Change this fn to just take an input dict
     # Extract parameters from original input dict
@@ -112,12 +112,36 @@ def train_model(decoder_model, train_loader, criterion, optimizer, input_dict):
 
         print(f"Epoch [{epoch + 1}/{num_epochs}] - Task Loss: {avg_task:.8f}, Div Loss: {avg_div:.8f}")
 
+        # --- NEW: Validation Block ---
+        if val_loader is not None:
+            decoder_model.eval()  # Turn off dropout/batchnorm
+            val_task_loss = 0
+
+            with torch.no_grad():
+                for v_features, v_targets in val_loader:
+                    v_features = v_features.to(DEVICE)
+                    v_targets = v_targets.to(DEVICE).long()
+
+                    # We evaluate the ensemble mean for validation metrics
+                    all_preds = decoder_model(v_features)
+                    mean_logits_low = all_preds.mean(dim=0)
+                    mean_logits_high = F.interpolate(mean_logits_low, size=(224, 224), mode='bilinear')
+
+                    v_loss = criterion(mean_logits_high, v_targets)
+                    val_task_loss += v_loss.item()
+
+            avg_val_loss = val_task_loss / len(val_loader)
+            print(f"Validation Loss: {avg_val_loss:.8f}")
+
+            # Switch back to train mode for the next epoch!
+            decoder_model.train()
+
     print(f"Training completed")
 
     return decoder_model
 
 # Fn to run instantiation, training, and evaluation (visual and metrics) of decoder ensemble model
-def full_decoder_training_run(input_dict, train_loader):
+def full_decoder_training_run(input_dict, train_loader, val_loader=None):
 
     print(f"Running full decoder training and evaluation with inputs:\n {input_dict}")
 
@@ -145,13 +169,16 @@ def full_decoder_training_run(input_dict, train_loader):
 
     # Train
     trained_decoder_model = train_model(
-        this_ensemble, train_loader, criterion, optimizer, input_dict
+        this_ensemble, train_loader, val_loader, criterion, optimizer, input_dict
     )
 
+    # No longer evaluating inside this fn
+    """
     # Evaluate
     # Since our loader now returns (features, masks), test_features is already [Batch, 1024, 28, 28]
     test_grid_features, test_ground_truth = get_random_batch(train_loader, DEVICE)
 
+    
     # Evaluate
     print("Evaluating model on test batch")
     # We use index [0] to look at the first set of features in that test batch
@@ -180,3 +207,7 @@ def full_decoder_training_run(input_dict, train_loader):
     )
 
     return miou, overall_accuracy, avg_unc, ece
+
+    """
+    return trained_decoder_model
+

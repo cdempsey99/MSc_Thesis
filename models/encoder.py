@@ -59,13 +59,14 @@ def get_encoder_representation(input_tensor, encoder_model):
     return grid_features
 
 
-def bake_features(loader, encoder_model):
+def bake_features(loader, encoder_model, feature_dir, mask_dir):
     """
     Runs the full dataset through the frozen encoder once and saves
     the resulting grid features to disk to avoid redundant computation.
     """
-    feature_dir = BASE_OUT / "features"
-    mask_dir = BASE_OUT / "masks_tensors"
+
+    #feature_dir = BASE_OUT / "features"
+    #mask_dir = BASE_OUT / "masks_tensors"
 
     # Ensure directories exist
     feature_dir.mkdir(parents=True, exist_ok=True)

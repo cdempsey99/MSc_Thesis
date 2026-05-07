@@ -5,6 +5,7 @@ import time
 import argparse
 import os
 import shutil
+import random
 
 # TODO : Can we somehow take outputs from different layers our from the clay encoder? Instead of just the last one?
 # TODO : Change learning rate as epochs go on? Also mess around with different optimizers potentially
@@ -70,6 +71,9 @@ input_dict = {
 # Get paths for our initial test image and mask
 #image_filepaths = [os.path.join(args.data_dir, "GF2_PMS1__L1A0000962382-MSS1.tif")]
 #mask_filepaths = [os.path.join(args.data_dir, "GF2_PMS1__L1A0000962382-MSS1_24label.png")]
+
+
+"""
 
 # Ingest all images available in the data dir
 data_dir = Path(args.data_dir)
@@ -162,7 +166,84 @@ print(f"Total batches to run per epoch: {len(train_loader)}")
 # Record time
 start_time = time.time()
 
+"""
 
+# --- 1. Dataset Discovery & Splitting ---
+data_dir = Path(args.data_dir)
+# Gaofen-2 images are usually .tif; masks are .png
+all_tifs = sorted(list(data_dir.glob("*.tif")))
+
+if args.max_images is not None:
+    all_tifs = all_tifs[:args.max_images]
+
+all_image_filepaths = all_tifs
+all_mask_filepaths = [data_dir / (p.stem + "_24label.png") for p in all_image_filepaths]
+
+for img, mask in zip(all_image_filepaths, all_mask_filepaths):
+    assert mask.exists(), f"Missing mask for {img.name}"
+
+# Reproducible Shuffle
+random.seed(42)
+combined = list(zip(all_image_filepaths, all_mask_filepaths))
+random.shuffle(combined)
+
+# Partition (e.g., 100 Train, 20 Val, 30 Test for the full 150)
+num_total = len(combined)
+train_idx = int(num_total * 0.66)
+val_idx = int(num_total * 0.80)
+
+splits = {
+    "train": combined[:train_idx],
+    "val": combined[train_idx:val_idx],
+    "test": combined[val_idx:]
+}
+
+print(f"Split: {len(splits['train'])} Train | {len(splits['val'])} Val | {len(splits['test'])} Test")
+
+# --- 2. Mandatory Fresh Bake ---
+# Point this to your Beegfs scratch path via args.out_dir
+BAKED_ROOT = Path(args.out_dir) / "baked_data"
+
+if BAKED_ROOT.exists():
+    print(f"Cleaning old baked data at {BAKED_ROOT}...")
+    shutil.rmtree(BAKED_ROOT)
+
+bake_start = time.time()
+encoder_model = initialize_clay_encoder().to(DEVICE)
+
+for split_name, file_list in splits.items():
+    if not file_list: continue
+
+    print(f"Baking {split_name} split...")
+    split_feat_dir = BAKED_ROOT / split_name / "features"
+    split_mask_dir = BAKED_ROOT / split_name / "masks_tensors"
+    split_feat_dir.mkdir(parents=True)
+    split_mask_dir.mkdir(parents=True)
+
+    imgs, msks = zip(*file_list)
+    raw_dataset = FBPPatchDataset(list(imgs), list(msks), patch_size=224, stride=112)
+    # Batch size 1 for memory safety during Transformer extraction
+    extract_loader = DataLoader(raw_dataset, batch_size=1, shuffle=False)
+
+    # UPDATED: Passes specific split paths to the bake function
+    bake_features(extract_loader, encoder_model, split_feat_dir, split_mask_dir)
+
+del encoder_model
+torch.cuda.empty_cache()
+print(f"Baking complete. Total time: {(time.time() - bake_start) / 60:.2f}m")
+
+
+# --- 3. Fast Training Loaders ---
+train_baked = BakedFeatureDataset(BAKED_ROOT / "train/features", BAKED_ROOT / "train/masks_tensors")
+val_baked = BakedFeatureDataset(BAKED_ROOT / "val/features", BAKED_ROOT / "val/masks_tensors")
+
+train_loader = DataLoader(train_baked, batch_size=args.batch_size, shuffle=True, pin_memory=True)
+val_loader = DataLoader(val_baked, batch_size=args.batch_size, shuffle=False, pin_memory=True)
+
+
+start_time = time.time()
+
+"""
 # ======  RUN  =======
 # Instantiating, training and evaluating the trained decoder ensemble visually and with metrics
 # getting the encoder rep is packaged into this fn as well
@@ -177,6 +258,53 @@ print(f"Total Execution Time for full_decoder_training_run function: {minutes}m 
 print("-" * 30)
 
 # Keep in mind this timer will only finish when i manually exit out of the graphs
+"""
+
+
+
+
+# --- 4. Execution (Training) ---
+trained_model = full_decoder_training_run(input_dict, train_loader, val_loader)
+
+end_time = time.time()
+print(f"Time for training: {start_time - end_time}")
+
+# --- 5. Final Test Evaluation (Outside) ---
+print("\n" + "="*30)
+print("STARTING FINAL TEST EVALUATION")
+print("="*30)
+
+# Instantiate Test Loader
+test_baked = BakedFeatureDataset(BAKED_ROOT / "test/features", BAKED_ROOT / "test/masks_tensors")
+test_loader = DataLoader(test_baked, batch_size=1, shuffle=False) # BS=1 is best for visualization
+
+# Get a random batch for visual check (from the unseen test set!)
+test_features, test_masks = get_random_batch(test_loader, DEVICE)
+
+# Get maps (using your existing utility)
+mean_probs, class_map, variance_map, total_entropy, mutual_info = get_decoder_output_maps(
+    trained_model, test_features[0].unsqueeze(0)
+)
+
+# Visualize & Calculate Final Metrics
+visualise_all_metrics(
+    class_map, variance_map, total_entropy, mutual_info,
+    test_masks[0], input_dict["hide_unlabelled_pixels"]
+)
+
+# Quantitative Metrics
+conf_tensor, _ = torch.max(mean_probs, dim=1)
+confidence_map_2d = conf_tensor.squeeze().cpu().numpy()
+ground_truth_2d = test_masks[0].squeeze().cpu().numpy()
+
+miou, acc, avg_unc, ece = evaluate_metrics(
+    class_map, ground_truth_2d, confidence_map_2d
+)
+
+print(f"FINAL TEST RESULTS: mIoU: {miou:.4f} | Acc: {acc:.4f} | ECE: {ece:.4f}")
+
+
+
 
 
 """
