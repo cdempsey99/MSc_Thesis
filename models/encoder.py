@@ -12,7 +12,7 @@ def initialize_clay_encoder():
 
     # 2. Load Weights
     try:
-        pruned_weights = torch.load("checkpoints/clay_encoder_only.pth", map_location=DEVICE)
+        pruned_weights = torch.load("encoder_checkpoints/clay_encoder_only.pth", map_location=DEVICE)
         model.load_state_dict(pruned_weights, strict=False)
         model.eval()
         model.to(DEVICE)
