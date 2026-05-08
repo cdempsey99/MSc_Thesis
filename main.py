@@ -221,7 +221,7 @@ for split_name, file_list in splits.items():
     split_mask_dir.mkdir(parents=True)
 
     imgs, msks = zip(*file_list)
-    raw_dataset = FBPPatchDataset(list(imgs), list(msks), patch_size=224, stride=112)
+    raw_dataset = FBPPatchDataset(list(imgs), list(msks), patch_size=224, stride=112, preload=False)
     # Batch size 1 for memory safety during Transformer extraction
     extract_loader = DataLoader(raw_dataset, batch_size=1, shuffle=False)
 
