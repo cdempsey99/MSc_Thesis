@@ -19,7 +19,7 @@ import random
 # Need to investigate the diversity enforcement more, size of lambda - other papers
 # Scale up to all (or most) FBP images
 
-
+# TODO: Will need to update code to expect files in the respective subdirs in the data dir?
 
 #random.seed(None)
 
