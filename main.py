@@ -204,6 +204,9 @@ if __name__ == "__main__":
 
     print(f"Split: {len(splits['train'])} Train | {len(splits['val'])} Val | {len(splits['test'])} Test")
 
+    """
+    #Updating to save pre baked features in a single file per image rather than per tile:
+    
     # --- 2. Mandatory Fresh Bake ---
     # Point this to your Beegfs scratch path via args.out_dir
     BAKED_ROOT = Path(args.out_dir) / "baked_data"
@@ -235,11 +238,58 @@ if __name__ == "__main__":
     del encoder_model
     torch.cuda.empty_cache()
     print(f"Baking complete. Total time: {(time.time() - bake_start) / 60:.2f}m")
+    """
+
+    # --- 2. Mandatory Fresh Bake (Optimized Option A) ---
+    BAKED_ROOT = Path(args.out_dir) / "baked_data"
+    if BAKED_ROOT.exists():
+        shutil.rmtree(BAKED_ROOT)
+
+    encoder_model = initialize_clay_encoder().to(DEVICE)
+    encoder_model.eval()
+
+    for split_name, file_list in splits.items():
+        if not file_list: continue
+
+        split_dir = BAKED_ROOT / split_name
+        split_dir.mkdir(parents=True, exist_ok=True)
+
+        print(f"Baking {split_name} split image-by-image...")
+
+        for img_p, mask_p in file_list:
+            image_id = img_p.stem
+
+            # Create dataset for ONLY this image to preserve your MIN_LABELLED_PIXELS logic
+            single_img_ds = FBPPatchDataset([img_p], [mask_p], patch_size=224, stride=112, preload=False)
+
+            if len(single_img_ds) == 0:
+                continue
+
+            # Use a higher batch size for baking to speed up the GPU
+            loader = DataLoader(single_img_ds, batch_size=32, shuffle=False)
+
+            # Accumulate all patches for THIS image
+            all_feats = []
+            all_masks = []
+            for batch_imgs, batch_msks in loader:
+                feats = get_encoder_representation(batch_imgs.to(DEVICE), encoder_model)
+                all_feats.append(feats.cpu())
+                all_masks.append(batch_msks.cpu())
+
+            # Save as ONE packed file per image
+            torch.save({
+                'features': torch.cat(all_feats, dim=0),
+                'masks': torch.cat(all_masks, dim=0)
+            }, split_dir / f"{image_id}_packed.pt")
+
+    del encoder_model
+    torch.cuda.empty_cache()
+
 
 
     # --- 3. Fast Training Loaders ---
-    train_baked = BakedFeatureDataset(BAKED_ROOT / "train/features", BAKED_ROOT / "train/masks_tensors")
-    val_baked = BakedFeatureDataset(BAKED_ROOT / "val/features", BAKED_ROOT / "val/masks_tensors")
+    train_baked = BakedFeatureDataset(BAKED_ROOT / "train/features", BAKED_ROOT / "train/")
+    val_baked = BakedFeatureDataset(BAKED_ROOT / "val/features", BAKED_ROOT / "val/")
 
     train_loader = DataLoader(
         train_baked,
@@ -291,7 +341,7 @@ if __name__ == "__main__":
     print("="*30)
 
     # Instantiate Test Loader
-    test_baked = BakedFeatureDataset(BAKED_ROOT / "test/features", BAKED_ROOT / "test/masks_tensors")
+    test_baked = BakedFeatureDataset(BAKED_ROOT / "test/features", BAKED_ROOT / "test")
     test_loader = DataLoader(
         test_baked,
         batch_size=1,

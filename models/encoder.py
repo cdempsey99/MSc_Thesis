@@ -59,7 +59,7 @@ def get_encoder_representation(input_tensor, encoder_model):
     return grid_features
 
 
-def bake_features(loader, encoder_model, feature_dir, mask_dir):
+def bake_features(loader, encoder_model, mask_dir, image_name):
     """
     Runs the full dataset through the frozen encoder once and saves
     the resulting grid features to disk to avoid redundant computation.
@@ -69,20 +69,32 @@ def bake_features(loader, encoder_model, feature_dir, mask_dir):
     #mask_dir = BASE_OUT / "masks_tensors"
 
     # Ensure directories exist
-    feature_dir.mkdir(parents=True, exist_ok=True)
+    #feature_dir.mkdir(parents=True, exist_ok=True)
+    #mask_dir.mkdir(parents=True, exist_ok=True)
+
     mask_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Starting feature extraction. Saving to: {feature_dir}")
+    all_features = []
+    all_masks = []
+
+    #print(f"Starting feature extraction. Saving to: {feature_dir}")
+    print(f"Baking {image_name}...")
     encoder_model.eval()
 
     with torch.no_grad():
-        for i, (images, masks) in enumerate(tqdm(loader)):
+        #for i, (images, masks) in enumerate(tqdm(loader)):
+        for images, masks in tqdm(loader):
+
             # Move images to GPU for the encoder
             images = images.to(DEVICE)
 
             # grid_features shape: [Batch, 1024, 28, 28]
             grid_features = get_encoder_representation(images, encoder_model)
 
+            all_features.append(grid_features.cpu())
+            all_masks.append(masks.cpu())
+
+            """
             # Save batch items individually
             for j in range(grid_features.size(0)):
                 # Calculate unique index: (current batch index * batch size) + item index in batch
@@ -91,5 +103,20 @@ def bake_features(loader, encoder_model, feature_dir, mask_dir):
                 # Save as CPU tensors (.cpu()) to save VRAM and make them portable
                 torch.save(grid_features[j].cpu(), feature_dir / f"feat_{patch_idx}.pt")
                 torch.save(masks[j].cpu(), mask_dir / f"mask_{patch_idx}.pt")
+            """
+    # Concatenate all batches into two large tensors
+    # Resulting shape : [total_patches, 1024, 28, 28]
+    stacked_features = torch.cat(all_features, dim=0)
+    stacked_masks = torch.cat(all_masks, dim=0)
 
-    print(f"Extraction complete. {len(loader.dataset)} patches baked.")
+    save_path = mask_dir / f"{image_name}_packed.pt"
+    torch.save({
+        'features' : stacked_features,
+        'masks' : stacked_masks
+    }, save_path)
+
+    #print(f"Extraction complete. {len(loader.dataset)} patches baked.")
+    print(f"Saved {stacked_features.size(0)} patches to {save_path}")
+
+
+

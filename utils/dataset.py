@@ -1,5 +1,5 @@
-import torch
 import rasterio
+import bisect
 from rasterio.windows import Window
 from configs.config import *
 from torch.utils.data import Dataset, DataLoader
@@ -105,19 +105,87 @@ class FBPPatchDataset(Dataset):
 
 
 # update the class to read presaved .pt files of the encoder representation of the image tiles
-class BakedFeatureDataset(Dataset):
-    def __init__(self, feature_dir, mask_dir):
+# update to load all packed .pt files into RAM
+class BakedFeatureDatasetOld(Dataset):
+
+    def __init__(self, mask_dir):
+
         # Sort to ensure features and masks align
-        self.feature_files = sorted(list(Path(feature_dir).glob("feat_*.pt")),
-                                   key=lambda x: int(x.stem.split('_')[1]))
-        self.mask_files = sorted(list(Path(mask_dir).glob("mask_*.pt")),
-                                 key=lambda x: int(x.stem.split('_')[1]))
+        #self.feature_files = sorted(list(Path(feature_dir).glob("feat_*.pt")), key=lambda x: int(x.stem.split('_')[1]))
+        #self.mask_files = sorted(list(Path(mask_dir).glob("mask_*.pt")), key=lambda x: int(x.stem.split('_')[1]))
+
+        self.all_features = []
+        self.all_masks = []
+
+        # Get all packed files
+        packed_files = sorted(list(Path(mask_dir).glob("*_packed.pt")))
+
+        if not packed_files:
+            raise FileNotFoundError(f"No packed files found in {mask_dir}")
+
+        print(f"Loading {len(packed_files)} packed images into RAM...")
+
+        for pf in packed_files:
+            data = torch.load(pf, map_location='cpu')
+            self.all_features.append(data['features'])
+            self.all_masks.append(data['masks'])
+
+        # Merge all images into one big virtual dataset
+        self.all_features = torch.cat(self.all_features, dim=0)
+        self.all_masks = torch.cat(self.all_masks, dim=0)
+
+        print(f"Dataset loaded, total patches in memory : {len(self.all_features)}")
 
     def __len__(self):
-        return len(self.feature_files)
+        return len(self.all_features)
 
     def __getitem__(self, idx):
+
         # Load the [1024, 28, 28] tensor and the label mask
-        x = torch.load(self.feature_files[idx])
-        y = torch.load(self.mask_files[idx])
-        return x, y
+        #x = torch.load(self.feature_files[idx])
+        #y = torch.load(self.mask_files[idx])
+        #return x, y
+
+        # Now instead of loading we are just slicing memory
+        return self.all_features[idx], self.all_masks[idx]
+
+
+class BakedFeatureDataset(Dataset):
+    def __init__(self, split_dir):
+        # List all packed files
+        self.files = sorted(list(Path(split_dir).glob("*_packed.pt")))
+        self.cumulative_sizes = []
+        self.current_total = 0
+
+        # We need to know how many patches are in each file to index correctly
+        for f in self.files:
+            # We load just the metadata/shape to be fast
+            data = torch.load(f, map_location='cpu', weights_only=True)
+            num_patches = data['features'].size(0)
+            self.current_total += num_patches
+            self.cumulative_sizes.append(self.current_total)
+
+        # Keep track of which file is currently "open" in RAM to avoid constant reloading
+        self.active_file_idx = -1
+        self.active_features = None
+        self.active_masks = None
+
+    def __len__(self):
+        return self.current_total
+
+    def __getitem__(self, idx):
+        # 1. Find which file contains this global index
+        file_idx = bisect.bisect_right(self.cumulative_sizes, idx)
+
+        # 2. If it's not the file we already have in RAM, load it
+        if file_idx != self.active_file_idx:
+            data = torch.load(self.files[file_idx], map_location='cpu')
+            self.active_features = data['features']
+            self.active_masks = data['masks']
+            self.active_file_idx = file_idx
+
+        # 3. Calculate local index within that file
+        offset = self.cumulative_sizes[file_idx - 1] if file_idx > 0 else 0
+        local_idx = idx - offset
+
+        return self.active_features[local_idx], self.active_masks[local_idx]
