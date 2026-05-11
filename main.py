@@ -288,8 +288,8 @@ if __name__ == "__main__":
 
 
     # --- 3. Fast Training Loaders ---
-    train_baked = BakedFeatureDataset(BAKED_ROOT / "train/features", BAKED_ROOT / "train/")
-    val_baked = BakedFeatureDataset(BAKED_ROOT / "val/features", BAKED_ROOT / "val/")
+    train_baked = BakedFeatureDataset(BAKED_ROOT / "train/")
+    val_baked = BakedFeatureDataset(BAKED_ROOT / "val/")
 
     train_loader = DataLoader(
         train_baked,
@@ -341,7 +341,7 @@ if __name__ == "__main__":
     print("="*30)
 
     # Instantiate Test Loader
-    test_baked = BakedFeatureDataset(BAKED_ROOT / "test/features", BAKED_ROOT / "test")
+    test_baked = BakedFeatureDataset(BAKED_ROOT / "test")
     test_loader = DataLoader(
         test_baked,
         batch_size=1,
