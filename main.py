@@ -6,6 +6,7 @@ import argparse
 import shutil
 import random
 import gc
+import warnings
 
 # TODO : Can we somehow take outputs from different layers our from the clay encoder? Instead of just the last one?
 # TODO : Change learning rate as epochs go on? Also mess around with different optimizers potentially
@@ -19,11 +20,14 @@ import gc
 # Need to investigate the diversity enforcement more, size of lambda - other papers
 # Scale up to all (or most) FBP images
 
-# TODO: Will need to update code to expect files in the respective subdirs in the data dir?
+# TODO: Will need to update code to expect files in the respective subdirs in the data dir? Nope just flattened dir structure
 
 # TODO : Add a timestamp to every log .lg.out style
 
 #random.seed(None)
+
+# Force rasterio to stop looking for georeferencing
+warnings.filterwarnings("ignore", category=rasterio.errors.NotGeoreferencedWarning)
 
 if __name__ == "__main__":
 
