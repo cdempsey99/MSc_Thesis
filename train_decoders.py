@@ -55,6 +55,9 @@ def run_training(args):
     # Pack parameters into your input_dict for the training function
     input_dict = vars(args)
     input_dict["lambda_div"] = args.lam  # Mapping arg name to dict key
+    input_dict["in_channels"] = args.decoder_in_channels
+    input_dict["embed_dim"] = args.decoder_embed_dim
+    input_dict["device"] = DEVICE
 
     start_time = time.time()
     trained_model = full_decoder_training_run(input_dict, train_loader, val_loader)
