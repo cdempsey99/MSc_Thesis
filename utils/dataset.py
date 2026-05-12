@@ -60,6 +60,8 @@ class FBPPatchDataset(Dataset):
             with rasterio.open(img_p) as src:
                 h, w = src.height, src.width
 
+                # Adjusting this to remove the min_labelled_pixels check
+                """
                 # Create a grid of x, y offsets
                 for y in range(0, h - patch_size, stride):
                     if max_samples and len(self.samples) >= max_samples:
@@ -77,6 +79,17 @@ class FBPPatchDataset(Dataset):
                         # Could try bringing this number up to only take interesting pixels?
                         if (mask_patch > 0).sum() > MIN_LABELLED_PIXELS:
                             self.samples.append((img_p, mask_p, x, y))
+                """
+
+            # Mathematically generate the grid without reading any pixels
+            for y in range(0, h - patch_size, stride):
+                for x in range(0, w - patch_size, stride):
+                    self.samples.append((img_p, mask_p, x, y))
+
+                    if max_samples and len(self.samples) >= max_samples:
+                        break
+                if max_samples and len(self.samples) >= max_samples:
+                    break
 
         # 2. Pre-loading with Progress Bar
         if self.preload:
@@ -160,10 +173,12 @@ class BakedFeatureDataset(Dataset):
         # We need to know how many patches are in each file to index correctly
         for f in self.files:
             # We load just the metadata/shape to be fast
-            data = torch.load(f, map_location='cpu', weights_only=True)
-            num_patches = data['features'].size(0)
+            temp_data = torch.load(f, map_location='cpu', weights_only=True)
+            num_patches = temp_data['features'].size(0)
             self.current_total += num_patches
             self.cumulative_sizes.append(self.current_total)
+            # Make sure to delete each of these at the end of the loop to minimise RAM
+            del temp_data
 
         # Keep track of which file is currently "open" in RAM to avoid constant reloading
         self.active_file_idx = -1
