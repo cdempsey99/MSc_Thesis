@@ -308,9 +308,9 @@ if __name__ == "__main__":
         val_baked,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=2,
+        num_workers=0,
         pin_memory=True,
-        persistent_workers=True
+        persistent_workers=False
     )
 
     start_time = time.time()
@@ -350,7 +350,7 @@ if __name__ == "__main__":
         test_baked,
         batch_size=1,
         shuffle=False,
-        num_workers=2,
+        num_workers=0,
         pin_memory=True
     ) # BS=1 is best for visualization
 
