@@ -86,6 +86,49 @@ def run_training(args):
 
     log_msg(f"FINAL TEST RESULTS: mIoU: {miou:.4f} | Acc: {acc:.4f} | ECE: {ece:.4f}")
 
+    # 5. Final Evaluation Metrics
+    log_msg("\n" + "=" * 30 + "\nSAVING VISUALISATIONS\n" + "=" * 30)
+
+    # Flatten tensors for reliability binning
+    conf_flat = conf_map.flatten()
+    gt_flat = test_masks[0].squeeze().cpu().numpy().flatten()
+    pred_flat = class_map.flatten()
+
+    # Create 10 bins for Reliability Diagram
+    bin_boundaries = np.linspace(0, 1, 11)
+    bin_accs = []
+    bin_counts = []
+
+    for i in range(10):
+        mask = (conf_flat > bin_boundaries[i]) & (conf_flat <= bin_boundaries[i + 1])
+        if mask.any():
+            acc = (pred_flat[mask] == gt_flat[mask]).mean()
+            bin_accs.append(acc)
+            bin_counts.append(mask.sum())
+        else:
+            bin_accs.append(0)
+            bin_counts.append(0)
+
+    # 1. Save 5-pane figure to results/metrics/
+    visualise_all_metrics(
+        class_map=class_map,
+        variance_map=var_map,
+        total_entropy=ent_map,
+        mi_map=mi_map,
+        ground_truth=test_masks[0].squeeze().cpu().numpy(),
+        hide_unlabelled=args.hide_unlabelled_pixels,
+        save_name="spatial_analysis"
+    )
+
+    # 2. Save Reliability Diagram to results/reliability/
+    plot_reliability_diagram(
+        bin_accs_all=bin_accs,
+        bin_counts=bin_counts,
+        save_name="reliability_calib"
+    )
+
+    log_msg(f"Visualisations complete. Check {args.out_dir}/metrics and {args.out_dir}/reliability")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Decoder Training Script")
