@@ -58,6 +58,7 @@ def run_training(args):
     input_dict["in_channels"] = args.decoder_in_channels
     input_dict["embed_dim"] = args.decoder_embed_dim
     input_dict["device"] = DEVICE
+    input_dict["learning_rate"] = args.lr
 
     start_time = time.time()
     trained_model = full_decoder_training_run(input_dict, train_loader, val_loader)
