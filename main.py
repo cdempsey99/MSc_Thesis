@@ -3,9 +3,9 @@ from utils.dataset import *
 from models.encoder import *
 import time
 import argparse
-import os
 import shutil
 import random
+import gc
 
 # TODO : Can we somehow take outputs from different layers our from the clay encoder? Instead of just the last one?
 # TODO : Change learning rate as epochs go on? Also mess around with different optimizers potentially
@@ -283,9 +283,9 @@ if __name__ == "__main__":
             }, split_dir / f"{image_id}_packed.pt")
 
     del encoder_model
+    gc.collect()
     torch.cuda.empty_cache()
-
-
+    print("Baking memory fully purged. Proceeding to Training phase...")
 
     # --- 3. Fast Training Loaders ---
     train_baked = BakedFeatureDataset(BAKED_ROOT / "train/")
