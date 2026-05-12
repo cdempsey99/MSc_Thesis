@@ -110,7 +110,7 @@ def bake_features(loader, encoder_model, mask_dir, image_name):
     stacked_features = torch.cat(all_features, dim=0)
     stacked_masks = torch.cat(all_masks, dim=0)
 
-    save_path = mask_dir / f"{image_name}_packed.pt"
+    save_path = mask_dir / f"{image_name}_embeddings.pt"
     torch.save({
         'features' : stacked_features,
         'masks' : stacked_masks

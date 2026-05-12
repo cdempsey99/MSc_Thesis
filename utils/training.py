@@ -173,42 +173,5 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
         this_ensemble, train_loader, val_loader, criterion, optimizer, input_dict
     )
 
-    # No longer evaluating inside this fn
-    """
-    # Evaluate
-    # Since our loader now returns (features, masks), test_features is already [Batch, 1024, 28, 28]
-    test_grid_features, test_ground_truth = get_random_batch(train_loader, DEVICE)
-
-    
-    # Evaluate
-    print("Evaluating model on test batch")
-    # We use index [0] to look at the first set of features in that test batch
-    mean_probs, class_map, variance_map, total_entropy, mutual_info = get_decoder_output_maps(
-        trained_decoder_model, test_grid_features[0].unsqueeze(0)
-    )
-
-    # Now call visualization using the mask from that same test image
-    visualise_all_metrics(class_map, variance_map, total_entropy, mutual_info, test_ground_truth[0], hide_unlabelled_pixels)
-    display_truth_proportions(test_ground_truth[0])
-
-    # 2. Get Confidence without destroying your existing class_map
-    # Use dim=1 because mean_probs is [1, 25, 224, 224]
-    conf_tensor, _ = torch.max(mean_probs, dim=1)
-
-    # 3. Squeeze to get [224, 224]
-    confidence_map_2d = conf_tensor.squeeze().cpu().numpy()
-    ground_truth_2d = test_ground_truth[0].squeeze().cpu().numpy()
-
-    # 4. Call metrics using the class_map you already have from Step 1
-    # Note: class_map is already 2D numpy from your function return!
-    miou, overall_accuracy, avg_unc, ece = evaluate_metrics(
-        class_map,
-        ground_truth_2d,
-        confidence_map_2d
-    )
-
-    return miou, overall_accuracy, avg_unc, ece
-
-    """
     return trained_decoder_model
 
