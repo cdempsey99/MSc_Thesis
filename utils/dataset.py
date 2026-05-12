@@ -162,7 +162,7 @@ class BakedFeatureDatasetOld(Dataset):
         return self.active_features[local_idx], self.active_masks[local_idx]
 
 
-class BakedFeatureDataset(Dataset):
+class BakedFeatureDatasetOlder(Dataset):
     def __init__(self, file_paths):
         self.file_paths = sorted(file_paths)
         self.cumulative_sizes = []
@@ -199,3 +199,54 @@ class BakedFeatureDataset(Dataset):
         mask = data['masks'][local_idx]
 
         return feature, mask
+
+    import bisect
+    import torch
+    from torch.utils.data import Dataset
+
+    class BakedFeatureDataset(Dataset):
+        def __init__(self, file_paths):
+            self.file_paths = sorted(file_paths)
+            self.cumulative_sizes = []
+            total_count = 0
+
+            # Persistent Buffer: This is the robust part.
+            # It stays empty until the first patch is requested.
+            self._current_file_path = None
+            self._current_data = None
+
+            for p in self.file_paths:
+                # We only load to get the count, then discard.
+                # map_location="cpu" is vital to prevent GPU spikes.
+                data = torch.load(p, map_location="cpu")
+                num_patches = data['features'].size(0)
+                total_count += num_patches
+                self.cumulative_sizes.append(total_count)
+                del data
+
+        def __len__(self):
+            return self.cumulative_sizes[-1] if self.cumulative_sizes else 0
+
+        def __getitem__(self, idx):
+            file_idx = bisect.bisect_right(self.cumulative_sizes, idx)
+
+            if file_idx == 0:
+                local_idx = idx
+            else:
+                local_idx = idx - self.cumulative_sizes[file_idx - 1]
+
+            path = self.file_paths[file_idx]
+
+            # SMART BUFFER:
+            # If the requested patch is in the file we already have in RAM,
+            # we skip the disk I/O entirely.
+            if path != self._current_file_path:
+                self._current_file_path = path
+                # Load the new file into the buffer
+                self._current_data = torch.load(path, map_location="cpu")
+
+            # Pull tensors from the buffer
+            feature = self._current_data['features'][local_idx]
+            mask = self._current_data['masks'][local_idx]
+
+            return feature, mask
