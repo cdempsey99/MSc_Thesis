@@ -299,7 +299,7 @@ if __name__ == "__main__":
         train_baked,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=2,
         pin_memory=True,
         persistent_workers=True
     )
@@ -308,7 +308,7 @@ if __name__ == "__main__":
         val_baked,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=4,
+        num_workers=2,
         pin_memory=True,
         persistent_workers=True
     )
