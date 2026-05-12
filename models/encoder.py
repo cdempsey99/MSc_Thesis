@@ -1,11 +1,12 @@
 from claymodel.module import ClayMAEModule
 from configs.config import *
 from utils.dataset import *
+from utils.misc import *
 from tqdm import tqdm
 
 def initialize_clay_encoder():
     """Initializes the Clay model and loads pruned weights once."""
-    print("Initializing Clay Encoder and loading pruned weights...")
+    log_msg("Initializing Clay Encoder and loading pruned weights...")
 
     # 1. Setup
     model = ClayMAEModule(model_size="large")
@@ -16,11 +17,11 @@ def initialize_clay_encoder():
         model.load_state_dict(pruned_weights, strict=False)
         model.eval()
         model.to(DEVICE)
-        print("----------------------------------------")
-        print("Success: Pruned backbone loaded into memory.")
-        print("----------------------------------------")
+        log_msg("----------------------------------------")
+        log_msg("Success: Pruned backbone loaded into memory.")
+        log_msg("----------------------------------------")
     except FileNotFoundError:
-        print("Error: checkpoints/clay_encoder_only.pth not found.")
+        log_msg("Error: checkpoints/clay_encoder_only.pth not found.")
         return None
 
     return model
@@ -78,7 +79,7 @@ def bake_features(loader, encoder_model, mask_dir, image_name):
     all_masks = []
 
     #print(f"Starting feature extraction. Saving to: {feature_dir}")
-    print(f"Baking {image_name}...")
+    log_msg(f"Baking {image_name}...")
     encoder_model.eval()
 
     with torch.no_grad():
@@ -116,7 +117,7 @@ def bake_features(loader, encoder_model, mask_dir, image_name):
     }, save_path)
 
     #print(f"Extraction complete. {len(loader.dataset)} patches baked.")
-    print(f"Saved {stacked_features.size(0)} patches to {save_path}")
+    log_msg(f"Saved {stacked_features.size(0)} patches to {save_path}")
 
 
 

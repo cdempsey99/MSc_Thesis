@@ -20,21 +20,21 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
     # Resume from a saved checkpoint if one is available
     if resume and LAST_CHECKPOINT_PATH.exists():
-        print(f"--> User requested resume. Loading {LAST_CHECKPOINT_PATH}...")
+        log_msg(f"--> User requested resume. Loading {LAST_CHECKPOINT_PATH}...")
         checkpoint = torch.load(LAST_CHECKPOINT_PATH, map_location=DEVICE)
 
         decoder_model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
         start_epoch = checkpoint['epoch']
-        print(f"--> Successfully resumed from epoch {start_epoch + 1}")
+        log_msg(f"--> Successfully resumed from epoch {start_epoch + 1}")
 
     elif not resume and LAST_CHECKPOINT_PATH.exists():
         # Safety warning so you don't accidentally overwrite your 102-epoch work
-        print("!! WARNING: Checkpoint exists but --resume was not used. !!")
-        print("!! This run will OVERWRITE your existing checkpoint. !!")
+        log_msg("!! WARNING: Checkpoint exists but --resume was not used. !!")
+        log_msg("!! This run will OVERWRITE your existing checkpoint. !!")
 
-    print(f"Starting Training")
+    log_msg(f"Starting Training")
     for epoch in range(start_epoch, num_epochs):
 
         epoch_task_loss = 0
@@ -96,7 +96,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
         if (epoch + 1) % save_interval == 0:
             # Save the progress at the end of every 20th epoch
-            print(f"Periodic save at epoch {epoch+1}", flush=True)
+            log_msg(f"Periodic save at epoch {epoch+1}", flush=True)
             current_state = {
                 'epoch': epoch + 1,
                 'model_state_dict': decoder_model.state_dict(),
@@ -110,7 +110,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         avg_task = epoch_task_loss / len(train_loader)
         avg_div = epoch_div_loss / len(train_loader)
 
-        print(f"Epoch [{epoch + 1}/{num_epochs}] - Task Loss: {avg_task:.8f}, Div Loss: {avg_div:.8f}")
+        log_msg(f"Epoch [{epoch + 1}/{num_epochs}] - Task Loss: {avg_task:.8f}, Div Loss: {avg_div:.8f}")
 
         # --- NEW: Validation Block ---
         if val_loader is not None:
@@ -131,34 +131,35 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                     val_task_loss += v_loss.item()
 
             avg_val_loss = val_task_loss / len(val_loader)
-            print(f"Validation Loss: {avg_val_loss:.8f}")
+            log_msg(f"Validation Loss: {avg_val_loss:.8f}")
 
             # Switch back to train mode for the next epoch!
             decoder_model.train()
 
-    print(f"Training completed")
+    log_msg(f"Training completed")
 
     return decoder_model
 
 # Fn to run instantiation, training, and evaluation (visual and metrics) of decoder ensemble model
 def full_decoder_training_run(input_dict, train_loader, val_loader=None):
 
-    print(f"Running full decoder training and evaluation with inputs:\n {input_dict}")
+    log_msg(f"Running full decoder training and evaluation with inputs:\n {input_dict}")
 
     # Extract inputs
     in_channels = input_dict["in_channels"]
     embed_dim = input_dict["embed_dim"]
     ensemble_size = input_dict["ensemble_size"]
     num_classes = input_dict["num_classes"]
-    num_epochs = input_dict["num_epochs"]
-    lambda_div = input_dict["lambda_div"]
-    enforce_diversity = input_dict["enforce_diversity"]
     learning_rate = input_dict["learning_rate"]
-    hide_unlabelled_pixels = input_dict["hide_unlabelled_pixels"]
-    resume = input_dict["resume"]
+    #num_epochs = input_dict["num_epochs"]
+    #lambda_div = input_dict["lambda_div"]
+    #enforce_diversity = input_dict["enforce_diversity"]
+
+    #hide_unlabelled_pixels = input_dict["hide_unlabelled_pixels"]
+    #resume = input_dict["resume"]
 
     # Instantiate Decoder Ensemble
-    print("Instantiating model")
+    log_msg("Instantiating model")
     this_ensemble = DecoderEnsemble(ensemble_size, in_channels, embed_dim, num_classes)
     #this_ensemble.apply(init_weights)
     this_ensemble.to(DEVICE)

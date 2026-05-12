@@ -1,10 +1,28 @@
-import torch
 import torch.nn as nn
 import random
+import time
+import inspect
+import psutil
 import torch.nn.functional as F
-
 from sklearn.metrics import jaccard_score
 from utils.visualisation import *
+
+
+def log_msg(message):
+    t_stamp = time.strftime("%H:%M:%S")
+    caller = inspect.stack()[1].function
+
+    # CPU RAM (Process only)
+    process = psutil.Process(os.getpid())
+    cpu_ram = process.memory_info().rss / (1024 ** 3)
+
+    # GPU VRAM (Allocated on current device)
+    gpu_vram = 0
+    if torch.cuda.is_available():
+        gpu_vram = torch.cuda.memory_allocated() / (1024 ** 3)
+
+    print(f"[{t_stamp}] [{caller:^15}] [CPU: {cpu_ram:5.2f}GB | GPU: {gpu_vram:5.2f}GB] | {message}")
+
 
 # Aux fn to calculate ECE
 def get_ece(y_pred, y_true, unc_map_flat):
@@ -100,7 +118,7 @@ def evaluate_metrics(class_map, ground_truth, unc_map):
     # Expected Calibration Error
     ece = get_ece(y_pred, y_true, unc_map_flat)
 
-    print(f"mIoU : {miou} | Overall Accuracy : {overall_accuracy} | Average Uncertainty : {avg_unc} | ECE : {ece} ")
+    log_msg(f"mIoU : {miou} | Overall Accuracy : {overall_accuracy} | Average Uncertainty : {avg_unc} | ECE : {ece} ")
 
     return miou, overall_accuracy, avg_unc, ece
 
@@ -123,7 +141,7 @@ def get_decoder_output_maps(trained_decoder_model, grid_features, save_name="hea
             head_map = torch.argmax(head_logits, dim=0).cpu().numpy()
 
             # Print stats to console
-            print(f"Head {i} unique predictions: {np.unique(head_map)}")
+            log_msg(f"Head {i} unique predictions: {np.unique(head_map)}")
 
             # Plotting
             im = axes[i].imshow(head_map, cmap='tab20', vmin=0, vmax=NUM_CLASSES)
@@ -199,4 +217,4 @@ def save_checkpoint(state, out_dir, filename="last_checkpoint.pth"):
     # Save latest version
     last_path = os.path.join(out_dir, filename)
     torch.save(state, last_path)
-    print(f"=> Saving checkpoint to {last_path}", flush=True)
+    log_msg(f"=> Saving checkpoint to {last_path}", flush=True)

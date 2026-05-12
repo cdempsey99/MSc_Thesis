@@ -1,8 +1,9 @@
-from datetime import datetime
-import os
+from utils.misc import *
+from datetime import datetime#
 import numpy as np
 import matplotlib.pyplot as plt
 from configs.config import *
+
 
 # Auxiliary lambda
 to_np = lambda x: x.cpu().numpy() if isinstance(x, torch.Tensor) else x
@@ -117,7 +118,7 @@ def display_truth_proportions(ground_truth):
     for u, c in zip(unique, counts):
         proportions[FBP_CLASSES_DICT[int(u)]] = f"{100 * c / total_pixels:.1f}%"
 
-    print("Ground Truth Pixel Fractions for this tile:")
+    log_msg("Ground Truth Pixel Fractions for this tile:")
     print(proportions)
 
 

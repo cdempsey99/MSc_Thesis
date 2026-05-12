@@ -3,7 +3,7 @@ import bisect
 from rasterio.windows import Window
 from configs.config import *
 from torch.utils.data import Dataset, DataLoader
-
+from utils.misc import *
 
 # Fn to ingest FBP images, taking the image found at 'path'
 def ingest_fbp_patch(path, x_offset=1000, y_offset=1000):
@@ -80,15 +80,15 @@ class FBPPatchDataset(Dataset):
 
         # 2. Pre-loading with Progress Bar
         if self.preload:
-            print(f"Pre-loading {len(self.samples)} patches into HPC RAM...")
+            log_msg(f"Pre-loading {len(self.samples)} patches into HPC RAM...")
             for i, (img_p, mask_p, x, y) in enumerate(self.samples):
                 img_t, mask_t = ingest_paired_patch(img_p, mask_p, x, y)
                 # Store as CPU tensors to keep GPU memory free for the model
                 self.loaded_data.append((img_t.squeeze(0).cpu(), mask_t.squeeze(0).cpu()))
 
                 if i % 500 == 0:
-                    print(f"Loaded {i}/{len(self.samples)} patches...")
-            print("Pre-loading complete.")
+                    log_msg(f"Loaded {i}/{len(self.samples)} patches...")
+            log_msg("Pre-loading complete.")
 
     # Note the __x__ here as __len__ will be called automatically by Python when we use len(dataset)
     def __len__(self):
@@ -123,7 +123,7 @@ class BakedFeatureDatasetOld(Dataset):
         if not packed_files:
             raise FileNotFoundError(f"No packed files found in {mask_dir}")
 
-        print(f"Loading {len(packed_files)} packed images into RAM...")
+        log_msg(f"Loading {len(packed_files)} packed images into RAM...")
 
         for pf in packed_files:
             data = torch.load(pf, map_location='cpu')
@@ -134,7 +134,7 @@ class BakedFeatureDatasetOld(Dataset):
         self.all_features = torch.cat(self.all_features, dim=0)
         self.all_masks = torch.cat(self.all_masks, dim=0)
 
-        print(f"Dataset loaded, total patches in memory : {len(self.all_features)}")
+        log_msg(f"Dataset loaded, total patches in memory : {len(self.all_features)}")
 
     def __len__(self):
         return len(self.all_features)

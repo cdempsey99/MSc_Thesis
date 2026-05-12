@@ -202,7 +202,7 @@ if __name__ == "__main__":
         "test": combined[val_idx:]
     }
 
-    print(f"Split: {len(splits['train'])} Train | {len(splits['val'])} Val | {len(splits['test'])} Test")
+    log_msg(f"Split: {len(splits['train'])} Train | {len(splits['val'])} Val | {len(splits['test'])} Test")
 
     """
     #Updating to save pre baked features in a single file per image rather than per tile:
@@ -254,7 +254,7 @@ if __name__ == "__main__":
         split_dir = BAKED_ROOT / split_name
         split_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"Baking {split_name} split image-by-image...")
+        log_msg(f"Baking {split_name} split image-by-image...")
 
         for img_p, mask_p in file_list:
             image_id = img_p.stem
@@ -285,7 +285,7 @@ if __name__ == "__main__":
     del encoder_model
     gc.collect()
     torch.cuda.empty_cache()
-    print("Baking memory fully purged. Proceeding to Training phase...")
+    log_msg("Baking memory fully purged. Proceeding to Training phase...")
 
     # --- 3. Fast Training Loaders ---
     train_baked = BakedFeatureDataset(BAKED_ROOT / "train/")
@@ -333,12 +333,12 @@ if __name__ == "__main__":
     trained_model = full_decoder_training_run(input_dict, train_loader, val_loader)
 
     end_time = time.time()
-    print(f"Time for training: {end_time - start_time}")
+    log_msg(f"Time for training: {end_time - start_time}")
 
     # --- 5. Final Test Evaluation (Outside) ---
-    print("\n" + "="*30)
-    print("STARTING FINAL TEST EVALUATION")
-    print("="*30)
+    log_msg("\n" + "="*30)
+    log_msg("STARTING FINAL TEST EVALUATION")
+    log_msg("="*30)
 
     # Instantiate Test Loader
     test_baked = BakedFeatureDataset(BAKED_ROOT / "test")
@@ -373,8 +373,7 @@ if __name__ == "__main__":
         class_map, ground_truth_2d, confidence_map_2d
     )
 
-    print(f"FINAL TEST RESULTS: mIoU: {miou:.4f} | Acc: {acc:.4f} | ECE: {ece:.4f}")
-
+    log_msg(f"FINAL TEST RESULTS: mIoU: {miou:.4f} | Acc: {acc:.4f} | ECE: {ece:.4f}")
 
 
 
