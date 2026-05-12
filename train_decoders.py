@@ -6,7 +6,7 @@ import time
 import argparse
 import random
 
-from utils.dataset import BakedFeatureDataset  # Your debugged dataset class
+from utils.dataset import * # Your debugged dataset class
 from utils.training import full_decoder_training_run, log_msg
 from utils.misc import get_random_batch, visualise_all_metrics, get_decoder_output_maps, evaluate_metrics
 
