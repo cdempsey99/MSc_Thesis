@@ -35,9 +35,17 @@ def run_training(args):
     random.shuffle(all_files)
 
     n = len(all_files)
-    train_files = all_files[:int(n * 0.7)]
-    val_files = all_files[int(n * 0.7):int(n * 0.85)]
-    test_files = all_files[int(n * 0.85):]
+    if n < 5:
+        # QA Mode: Manually ensure no set is empty
+        log_msg(f"Small dataset detected ({n} files). Using manual QA splits.")
+        train_files = all_files[0:1]
+        val_files = all_files[1:2]
+        test_files = all_files[2:]
+    else:
+        # Production Mode: Use your standard percentages
+        train_files = all_files[:int(n * 0.7)]
+        val_files = all_files[int(n * 0.7):int(n * 0.85)]
+        test_files = all_files[int(n * 0.85):]
 
     log_msg(f"Split: {len(train_files)} Train | {len(val_files)} Val | {len(test_files)} Test")
 
