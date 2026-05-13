@@ -41,7 +41,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         epoch_task_loss = 0
         epoch_div_loss = 0
 
-        for features, targets in train_loader:
+        for i, features, targets in enumerate(train_loader):
             optimizer.zero_grad()
 
             if i == 0:
