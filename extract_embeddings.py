@@ -33,6 +33,8 @@ def run_extraction(args):
 
     log_msg(f"Starting extraction for {len(all_tifs)} images into {output_base}")
 
+    patches_per_image = None
+
     with torch.no_grad():
         for img_p in all_tifs:
             mask_p = data_dir / (img_p.stem + "_24label.png")
@@ -63,24 +65,32 @@ def run_extraction(args):
                 all_feats.append(feats.cpu())
                 all_masks.append(batch_msks.cpu())
 
-            # Save the "Packed" image embeddings
+            features_tensor = torch.cat(all_feats, dim=0)
+            masks_tensor = torch.cat(all_masks, dim=0)
+
             torch.save({
-                'features': torch.cat(all_feats, dim=0),
-                'masks': torch.cat(all_masks, dim=0)
+                'features': features_tensor,
+                'masks': masks_tensor,
             }, target_file)
+
+            # Record patches per image (same for all FBP images)
+            patches_per_image = int(features_tensor.size(0))
 
             log_msg(f"Finished {img_p.stem}")
 
-    # 3. Save Metadata Passport
-    metadata = {
-        "patch_size": args.patch_size,
-        "stride": args.stride,
-        "encoder": "clay_v1_pruned",
-        "timestamp": time.ctime()
-    }
-    with open(output_base / "metadata.json", "w") as f:
-        json.dump(metadata, f, indent=4)
-
+    # Only save metadata if we actually processed at least one image
+    if patches_per_image is None:
+        log_msg("All files already existed, skipping metadata update.")
+    else:
+        metadata = {
+            "patch_size": args.patch_size,
+            "stride": args.stride,
+            "encoder": "clay_v1_pruned",
+            "timestamp": time.ctime(),
+            "patches_per_image": patches_per_image
+        }
+        with open(output_base / "metadata.json", "w") as f:
+            json.dump(metadata, f, indent=4)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Feature Extraction Script")

@@ -168,48 +168,6 @@ class BakedFeatureDatasetOlder(Dataset):
         self.cumulative_sizes = []
         total_count = 0
 
-        # Pre-calculate the "map" of where each file starts and ends
-        for p in self.file_paths:
-            # We load just the metadata/shape to avoid RAM bloat
-            data = torch.load(p, map_location="cpu")
-            num_patches = data['features'].size(0)
-            total_count += num_patches
-            self.cumulative_sizes.append(total_count)
-            del data  # Clear immediately
-
-    def __len__(self):
-        return self.cumulative_sizes[-1] if self.cumulative_sizes else 0
-
-    def __getitem__(self, idx):
-        # 1. Find which file the 'idx' belongs to using binary search
-        file_idx = bisect.bisect_right(self.cumulative_sizes, idx)
-
-        # 2. Calculate the local index within that file
-        if file_idx == 0:
-            local_idx = idx
-        else:
-            local_idx = idx - self.cumulative_sizes[file_idx - 1]
-
-        # 3. Load the file (In your training script, num_workers=0 makes this stable)
-        # For high-scale, you might want to cache the 'active' file to avoid re-loading
-        path = self.file_paths[file_idx]
-        data = torch.load(path, map_location="cpu")
-
-        feature = data['features'][local_idx]
-        mask = data['masks'][local_idx]
-
-        return feature, mask
-
-    import bisect
-    import torch
-    from torch.utils.data import Dataset
-
-class BakedFeatureDataset(Dataset):
-    def __init__(self, file_paths):
-        self.file_paths = sorted(file_paths)
-        self.cumulative_sizes = []
-        total_count = 0
-
         # Persistent Buffer: This is the robust part.
         # It stays empty until the first patch is requested.
         self._current_file_path = None
@@ -250,3 +208,41 @@ class BakedFeatureDataset(Dataset):
         mask = self._current_data['masks'][local_idx]
 
         return feature, mask
+
+
+class BakedFeatureDataset(Dataset):
+    def __init__(self, file_paths):
+        self.file_paths = sorted(file_paths)
+
+        # Read patches_per_image from metadata
+        meta_path = self.file_paths[0].parent / "metadata.json"
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+        patches_per_image = meta["patches_per_image"]
+
+        # Build cumulative sizes without loading any tensors
+        self.cumulative_sizes = [
+            patches_per_image * (i + 1) for i in range(len(self.file_paths))
+        ]
+
+        # Smart buffer
+        self._current_file_path = None
+        self._current_data = None
+
+    def __len__(self):
+        return self.cumulative_sizes[-1] if self.cumulative_sizes else 0
+
+    def __getitem__(self, idx):
+        file_idx = bisect.bisect_right(self.cumulative_sizes, idx)
+        if file_idx == 0:
+            local_idx = idx
+        else:
+            local_idx = idx - self.cumulative_sizes[file_idx - 1]
+
+        path = self.file_paths[file_idx]
+
+        if path != self._current_file_path:
+            self._current_file_path = path
+            self._current_data = torch.load(path, map_location="cpu")
+
+        return self._current_data['features'][local_idx], self._current_data['masks'][local_idx]
