@@ -36,6 +36,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
     log_msg(f"Starting Training")
     for epoch in range(start_epoch, num_epochs):
+        log_msg(f"Starting epoch {epoch+1}...")
 
         epoch_task_loss = 0
         epoch_div_loss = 0
