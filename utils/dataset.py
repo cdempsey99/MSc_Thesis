@@ -202,7 +202,7 @@ class BakedFeatureDatasetOlder(Dataset):
         if path != self._current_file_path:
             self._current_file_path = path
             # Load the new file into the buffer
-            self._current_data = torch.load(path, map_location="cpu")
+            self._current_data = torch.load(path, map_location="cpu", mmap=True)
 
         # Pull tensors from the buffer
         feature = self._current_data['features'][local_idx]
