@@ -244,6 +244,6 @@ class BakedFeatureDataset(Dataset):
 
         if path != self._current_file_path:
             self._current_file_path = path
-            self._current_data = torch.load(path, map_location="cpu")
+            self._current_data = torch.load(path, map_location="cpu", mmap=True)
 
         return self._current_data['features'][local_idx], self._current_data['masks'][local_idx]
