@@ -41,11 +41,8 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         epoch_task_loss = 0
         epoch_div_loss = 0
 
-        for i, (features, targets) in enumerate(train_loader):
+        for features, targets in train_loader:
             optimizer.zero_grad()
-
-            if i == 0:
-                log_msg(f"First batch loaded, features shape: {features.shape}")
 
             # Move data to GPU - Note: features are already [1024, 28, 28]
             features = features.to(DEVICE)
