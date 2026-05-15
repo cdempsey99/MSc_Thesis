@@ -100,7 +100,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
         if (epoch + 1) % save_interval == 0:
             # Save the progress at the end of every 20th epoch
-            log_msg(f"Periodic save at epoch {epoch+1}", flush=True)
+            log_msg(f"Periodic save at epoch {epoch+1}")
             current_state = {
                 'epoch': epoch + 1,
                 'model_state_dict': decoder_model.state_dict(),
