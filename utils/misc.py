@@ -217,4 +217,4 @@ def save_checkpoint(state, out_dir, filename="last_checkpoint.pth"):
     # Save latest version
     last_path = os.path.join(out_dir, filename)
     torch.save(state, last_path)
-    log_msg(f"=> Saving checkpoint to {last_path}", flush=True)
+    log_msg(f"=> Saving checkpoint to {last_path}")
