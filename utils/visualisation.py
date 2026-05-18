@@ -3,7 +3,7 @@ from datetime import datetime#
 import numpy as np
 import matplotlib.pyplot as plt
 from configs.config import *
-
+import json
 
 # Auxiliary lambda
 to_np = lambda x: x.cpu().numpy() if isinstance(x, torch.Tensor) else x
@@ -189,4 +189,30 @@ def plot_lambda_results(lams, mious, overall_accs, avg_uncs, save_name="lambda_c
     plt.tight_layout()
     plt.savefig(os.path.join("results/lambda_curves", save_name), bbox_inches='tight')
     # plt.show()
+
+def plot_loss_curves(loss_history_path, save_name="loss_curves"):
+    save_path = os.path.join(BASE_OUT, "losses")
+    ensure_dir(save_path)
+
+    with open(loss_history_path) as f:
+        history = json.load(f)
+
+    train_losses = history["train"]
+    val_losses = history["val"]
+    epochs = range(1, len(train_losses) + 1)
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(epochs, train_losses, label="Train Loss", color="blue")
+    plt.plot(epochs, val_losses, label="Val Loss", color="orange")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training and Validation Loss")
+    plt.legend()
+    plt.grid(alpha=0.3)
+
+    current_time = datetime.now().strftime("%Y%m%d%H%M")
+    full_path = os.path.join(save_path, f"{save_name}_{current_time}.png")
+    plt.savefig(full_path, bbox_inches='tight')
+    plt.close()
+    log_msg(f"Loss curves saved to {full_path}")
 

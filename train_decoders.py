@@ -1,4 +1,8 @@
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from sklearn.metrics import jaccard_score
+from configs.config import *
 from torch.utils.data import DataLoader
 from pathlib import Path
 import json
@@ -6,9 +10,9 @@ import time
 import argparse
 import random
 
-from utils.dataset import * # Your debugged dataset class
+from utils.dataset import *
 from utils.training import full_decoder_training_run, log_msg
-from utils.misc import get_random_batch, visualise_all_metrics, get_decoder_output_maps, evaluate_metrics
+from utils.misc import *
 
 # Set Device
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -77,6 +81,7 @@ def run_training(args):
 
     log_msg(f"Training completed in {(time.time() - start_time) / 60:.2f} minutes.")
 
+    """
     # 5. Final Evaluation
     log_msg("\n" + "=" * 30 + "\nSTARTING FINAL TEST EVALUATION\n" + "=" * 30)
 
@@ -132,6 +137,19 @@ def run_training(args):
     )
 
     log_msg(f"Visualisations complete. Check {args.out_dir}/metrics and {args.out_dir}/reliability")
+    """
+
+    # Plot loss curves
+    loss_history_path = os.path.join(args.out_dir, "loss_history.json")
+    plot_loss_curves(loss_history_path, save_name="AS1_loss_curves")
+
+    # --- 5. Final Test Evaluation ---
+    results = evaluate_test_set(
+        trained_model, test_loader,
+        nn.CrossEntropyLoss(ignore_index=0),
+        args,
+        run_name="AS1_baseline"
+    )
 
 
 if __name__ == "__main__":
