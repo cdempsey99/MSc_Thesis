@@ -13,7 +13,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
     decoder_model.train()
     optimizer.zero_grad()
-    save_interval = 20
+    save_interval = 5
 
     decoder_model.to(DEVICE)
     start_epoch = 0
