@@ -32,6 +32,9 @@ def run_training(args):
         if meta["patch_size"] != args.patch_size:
             raise ValueError(f"Metadata mismatch! Data was extracted with patch {meta['patch_size']}")
 
+    run_name = f"{args.run_name}_{time.strftime('%Y%m%d_%H%M')}"
+    log_msg(f"Run name: {run_name}")
+
     # 2. Split Discovery
     # We find all .pt files and split them into Train/Val/Test
     all_files = sorted(list(embedding_dir.glob("*_embeddings.pt")))
@@ -75,6 +78,7 @@ def run_training(args):
     input_dict["embed_dim"] = args.decoder_embed_dim
     input_dict["device"] = DEVICE
     input_dict["learning_rate"] = args.lr
+    input_dict["run_name"] = run_name
 
     start_time = time.time()
     trained_model = full_decoder_training_run(input_dict, train_loader, val_loader)
@@ -140,15 +144,25 @@ def run_training(args):
     """
 
     # Plot loss curves
-    loss_history_path = os.path.join(args.out_dir, "loss_history.json")
-    plot_loss_curves(loss_history_path, save_name="AS1_loss_curves")
+    #loss_history_path = os.path.join(args.out_dir, "loss_history.json")
+    #plot_loss_curves(loss_history_path, save_name="AS1_loss_curves")
+
+    loss_history_path = os.path.join(os.getenv("OUT_DIR", "results"), "runs",
+                                     f"{run_name}_loss_history.json")
+    plot_loss_curves(loss_history_path, save_name=f"{run_name}_loss_curves")
 
     # --- 5. Final Test Evaluation ---
+    #results = evaluate_test_set(
+    #    trained_model, test_loader,
+    #    nn.CrossEntropyLoss(ignore_index=0),
+    #    args,
+    #    run_name="AS1_baseline"
+    #)
     results = evaluate_test_set(
         trained_model, test_loader,
         nn.CrossEntropyLoss(ignore_index=0),
         args,
-        run_name="AS1_baseline"
+        run_name=run_name
     )
 
 
@@ -173,6 +187,7 @@ if __name__ == "__main__":
     parser.add_argument("--enforce_diversity", action="store_true")
     parser.add_argument("--hide_unlabelled_pixels", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--run_name", type=str, default="run")
 
     args = parser.parse_args()
     run_training(args)

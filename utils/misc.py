@@ -310,8 +310,9 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
         "per_class_iou": {FBP_CLASSES[i+1]: float(iou)
                           for i, iou in enumerate(per_class_iou)}
     }
-    results_path = os.path.join(os.getenv("OUT_DIR", "results"),
-                                f"{run_name}_results.json")
+    runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
+    os.makedirs(runs_dir, exist_ok=True)
+    results_path = os.path.join(runs_dir, f"{run_name}_results.json")
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
     log_msg(f"Results saved to {results_path}")

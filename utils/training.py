@@ -149,6 +149,12 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
     enforce_diversity = input_dict["enforce_diversity"]
     resume = input_dict["resume"]
 
+    run_name = input_dict.get("run_name", "run")
+    runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
+    os.makedirs(runs_dir, exist_ok=True)
+    checkpoint_path = CHECKPOINT_DIR / f"{run_name}_last_checkpoint.pth"
+    loss_history = {"train": [], "val": []}
+
     decoder_model.train()
     optimizer.zero_grad()
     save_interval = 5
@@ -157,20 +163,20 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
     loss_history = {"train": [], "val": []}
 
-    if resume and LAST_CHECKPOINT_PATH.exists():
-        log_msg(f"--> User requested resume. Loading {LAST_CHECKPOINT_PATH}...")
-        checkpoint = torch.load(LAST_CHECKPOINT_PATH, map_location=DEVICE)
+    if resume and checkpoint_path.exists():
+        log_msg(f"--> User requested resume. Loading {checkpoint_path}...")
+        checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
         decoder_model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch']
-        # Load existing loss history if available
-        loss_path = os.path.join(os.getenv("OUT_DIR", "results"), "loss_history.json")
+        # Load existing loss history
+        loss_path = os.path.join(runs_dir, f"{run_name}_loss_history.json")
         if os.path.exists(loss_path):
             with open(loss_path) as f:
                 loss_history = json.load(f)
         log_msg(f"--> Successfully resumed from epoch {start_epoch + 1}")
 
-    elif not resume and LAST_CHECKPOINT_PATH.exists():
+    elif not resume and checkpoint_path.exists():
         log_msg("!! WARNING: Checkpoint exists but --resume was not used. !!")
         log_msg("!! This run will OVERWRITE your existing checkpoint. !!")
 
@@ -244,38 +250,31 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
             log_msg(f"Validation Loss: {avg_val_loss:.8f}")
 
         if (epoch + 1) % save_interval == 0:
-            log_msg(f"Periodic save at epoch {epoch+1}")
+            log_msg(f"Periodic save at epoch {epoch + 1}")
             current_state = {
                 'epoch': epoch + 1,
                 'model_state_dict': decoder_model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
             }
-            out_dir = os.getenv("OUT_DIR", "results")
-            checkpoint_dir = os.path.join(out_dir, "checkpoints")
-            save_checkpoint(current_state, checkpoint_dir)
-
-            # Save loss history at each checkpoint too
-            loss_path = os.path.join(out_dir, "loss_history.json")
+            save_checkpoint(current_state, str(CHECKPOINT_DIR),
+                            filename=f"{run_name}_last_checkpoint.pth")
+            loss_path = os.path.join(runs_dir, f"{run_name}_loss_history.json")
             with open(loss_path, "w") as f:
                 json.dump(loss_history, f, indent=2)
 
-    # Save final model
-    out_dir = os.getenv("OUT_DIR", "results")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     final_state = {
         'epoch': num_epochs,
         'model_state_dict': decoder_model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'input_dict': input_dict
     }
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    save_checkpoint(final_state, os.path.join(out_dir, "checkpoints"),
-                    filename=f"final_model_{timestamp}.pth")
-
-    # Save final loss history
-    loss_path = os.path.join(out_dir, "loss_history.json")
+    save_checkpoint(final_state, str(CHECKPOINT_DIR),
+                    filename=f"{run_name}_final_model_{timestamp}.pth")
+    loss_path = os.path.join(runs_dir, f"{run_name}_loss_history.json")
     with open(loss_path, "w") as f:
         json.dump(loss_history, f, indent=2)
+    log_msg(f"Final model saved.")
 
     log_msg(f"Training completed")
     return decoder_model
