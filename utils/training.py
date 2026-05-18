@@ -163,6 +163,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
     loss_history = {"train": [], "val": []}
 
+    """
     if resume and checkpoint_path.exists():
         log_msg(f"--> User requested resume. Loading {checkpoint_path}...")
         checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
@@ -170,6 +171,28 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch']
         # Load existing loss history
+        loss_path = os.path.join(runs_dir, f"{run_name}_loss_history.json")
+        if os.path.exists(loss_path):
+            with open(loss_path) as f:
+                loss_history = json.load(f)
+        log_msg(f"--> Successfully resumed from epoch {start_epoch + 1}")
+
+    elif not resume and checkpoint_path.exists():
+        log_msg("!! WARNING: Checkpoint exists but --resume was not used. !!")
+        log_msg("!! This run will OVERWRITE your existing checkpoint. !!")
+    """
+    # Build checkpoint path
+    if input_dict.get("checkpoint_path"):
+        checkpoint_path = Path(input_dict["checkpoint_path"])
+    else:
+        checkpoint_path = CHECKPOINT_DIR / f"{run_name}_last_checkpoint.pth"
+
+    if resume and checkpoint_path.exists():
+        log_msg(f"--> Resuming from {checkpoint_path}...")
+        checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
+        decoder_model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch']
         loss_path = os.path.join(runs_dir, f"{run_name}_loss_history.json")
         if os.path.exists(loss_path):
             with open(loss_path) as f:

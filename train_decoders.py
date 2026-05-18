@@ -84,6 +84,7 @@ def run_training(args):
     input_dict["device"] = DEVICE
     input_dict["learning_rate"] = args.lr
     input_dict["run_name"] = run_name
+    input_dict["checkpoint_path"] = args.checkpoint_path
 
     start_time = time.time()
     trained_model = full_decoder_training_run(input_dict, train_loader, val_loader)
@@ -194,6 +195,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--run_name", type=str, default="run")
     parser.add_argument("--max_images", type=int, default=None)
+    parser.add_argument("--checkpoint_path", type=str, default=None)
 
     args = parser.parse_args()
     run_training(args)
