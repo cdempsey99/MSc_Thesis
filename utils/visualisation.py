@@ -3,7 +3,7 @@ from datetime import datetime#
 import numpy as np
 import matplotlib.pyplot as plt
 from configs.config import *
-from utils.misc import *
+#from utils.misc import *
 import json
 
 # Auxiliary lambda
@@ -119,7 +119,7 @@ def display_truth_proportions(ground_truth):
     for u, c in zip(unique, counts):
         proportions[FBP_CLASSES_DICT[int(u)]] = f"{100 * c / total_pixels:.1f}%"
 
-    log_msg("Ground Truth Pixel Fractions for this tile:")
+    print("Ground Truth Pixel Fractions for this tile:")
     print(proportions)
 
 
@@ -215,5 +215,5 @@ def plot_loss_curves(loss_history_path, save_name="loss_curves"):
     full_path = os.path.join(save_path, f"{save_name}_{current_time}.png")
     plt.savefig(full_path, bbox_inches='tight')
     plt.close()
-    log_msg(f"Loss curves saved to {full_path}")
+    print(f"Loss curves saved to {full_path}")
 
