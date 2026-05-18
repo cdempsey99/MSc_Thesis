@@ -40,6 +40,9 @@ def run_training(args):
     # 2. Split Discovery
     # We find all .pt files and split them into Train/Val/Test
     all_files = sorted(list(embedding_dir.glob("*_embeddings.pt")))
+    if args.max_images is not None:
+        all_files = all_files[:args.max_images]
+        log_msg(f"Limited to {args.max_images} images")
     random.seed(42)  # Keep splits consistent across different decoder experiments
     random.shuffle(all_files)
 
@@ -190,6 +193,7 @@ if __name__ == "__main__":
     parser.add_argument("--hide_unlabelled_pixels", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--run_name", type=str, default="run")
+    parser.add_argument("--max_images", type=int, default=None)
 
     args = parser.parse_args()
     run_training(args)
