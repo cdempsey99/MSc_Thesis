@@ -259,6 +259,8 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                     hide_unlabelled=args.hide_unlabelled_pixels,
                     save_name=f"{run_name}_test_patch_{batch_idx}"
                 )
+                del mean_probs_vis, var_map, ent_map, mi_map
+                torch.cuda.empty_cache()
 
             # Accumulate metrics for each item in batch
             for b in range(test_features.shape[0]):
@@ -266,15 +268,21 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                 if (gt > 0).sum() < 100:
                     continue
                 mask = gt > 0
-                all_preds_global.extend(class_maps[b][mask].tolist())
-                all_gts_global.extend(gt[mask].tolist())
-                all_conf_global.extend(conf_maps[b][mask].tolist())
+                #all_preds_global.extend(class_maps[b][mask].tolist())
+                #all_gts_global.extend(gt[mask].tolist())
+                #all_conf_global.extend(conf_maps[b][mask].tolist())
+                all_preds_global.append(class_maps[b][mask])
+                all_gts_global.append(gt[mask])
+                all_conf_global.append(conf_maps[b][mask])
                 patch_count += 1
 
     # Convert to arrays
-    all_preds_arr = np.array(all_preds_global)
-    all_gts_arr = np.array(all_gts_global)
-    all_conf_arr = np.array(all_conf_global)
+    #all_preds_arr = np.array(all_preds_global)
+    #all_gts_arr = np.array(all_gts_global)
+    #all_conf_arr = np.array(all_conf_global)
+    all_preds_arr = np.concatenate(all_preds_global)
+    all_gts_arr = np.concatenate(all_gts_global)
+    all_conf_arr = np.concatenate(all_conf_global)
 
     # Global metrics
     global_miou = jaccard_score(all_gts_arr, all_preds_arr,
