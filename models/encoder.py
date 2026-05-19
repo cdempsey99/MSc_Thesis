@@ -29,7 +29,7 @@ def initialize_clay_encoder():
 def get_encoder_representation(input_tensor, encoder_model):
     """Processes a batch using the provided encoder model object."""
     # Define waves for GF2
-    waves = torch.tensor([0.842, 0.665, 0.560, 0.490], dtype=torch.float32).to(DEVICE)
+    waves = torch.tensor([0.842, 0.665, 0.560], dtype=torch.float32).to(DEVICE)
     input_tensor = input_tensor.to(DEVICE)
 
     with torch.no_grad():

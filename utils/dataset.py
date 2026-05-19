@@ -7,7 +7,7 @@ from utils.misc import *
 import json
 
 # Fn to ingest FBP images, taking the image found at 'path'
-def ingest_fbp_patch(path, x_offset=1000, y_offset=1000):
+def ingest_fbp_patch_OLD(path, x_offset=1000, y_offset=1000):
     with rasterio.open(path) as src:
         # Open a 224 x 224 window so we don't overload RAM
         win = Window(x_offset, y_offset, 224, 224)
@@ -27,9 +27,21 @@ def ingest_fbp_patch(path, x_offset=1000, y_offset=1000):
     # Add a batch dim, so [1, 4, 224, 224]
     return img_tensor.unsqueeze(0)
 
+def ingest_fbp_patch(path, x_offset=1000, y_offset=1000):
+    with rasterio.open(path) as src:
+        win = Window(x_offset, y_offset, 224, 224)
+        img = src.read([1, 2, 3], window=win).astype(np.float32)
+
+        mean = np.array([80.53, 118.39, 115.69]).reshape(3, 1, 1)
+        std = np.array([58.25, 65.24, 63.92]).reshape(3, 1, 1)
+        img = (img - mean) / std
+
+        img_tensor = torch.from_numpy(img).float()
+
+    return img_tensor.unsqueeze(0)
 
 # x and y here are the offsets to give us the tile location
-def ingest_paired_patch(img_path, mask_path, x, y):
+def ingest_paired_patch_OLD(img_path, mask_path, x, y):
     # 1. Grab the Image Patch
     with rasterio.open(img_path) as src:
         win = Window(x, y, 224, 224)
@@ -42,6 +54,25 @@ def ingest_paired_patch(img_path, mask_path, x, y):
     with rasterio.open(mask_path) as src_mask:
         mask = src_mask.read(1, window=win)  # Read only the 1st band (the labels)
         mask_tensor = torch.from_numpy(mask).long()  # Labels must be Long integers
+
+    return img_tensor.unsqueeze(0), mask_tensor.unsqueeze(0)
+
+
+def ingest_paired_patch(img_path, mask_path, x, y):
+    with rasterio.open(img_path) as src:
+        win = Window(x, y, 224, 224)
+        img = src.read([1, 2, 3], window=win).astype(np.float32)  # Only 3 real bands
+
+        # Normalise with FBP-specific stats
+        mean = np.array([80.53, 118.39, 115.69]).reshape(3, 1, 1)
+        std = np.array([58.25, 65.24, 63.92]).reshape(3, 1, 1)
+        img = (img - mean) / std
+
+        img_tensor = torch.from_numpy(img).float()
+
+    with rasterio.open(mask_path) as src_mask:
+        mask = src_mask.read(1, window=win)
+        mask_tensor = torch.from_numpy(mask).long()
 
     return img_tensor.unsqueeze(0), mask_tensor.unsqueeze(0)
 
