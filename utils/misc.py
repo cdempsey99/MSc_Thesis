@@ -8,6 +8,7 @@ from sklearn.metrics import jaccard_score
 from utils.visualisation import *
 import json
 import os
+import gc
 
 def log_msg(message):
     t_stamp = time.strftime("%H:%M:%S")
@@ -256,7 +257,9 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                     save_name=f"{run_name}_test_patch_{batch_idx}"
                 )
                 del mean_probs_vis, var_map, ent_map, mi_map
+                plt.close('all')
                 torch.cuda.empty_cache()
+                gc.collect()
 
             # Accumulate metrics for each item in batch
             for b in range(test_features.shape[0]):
