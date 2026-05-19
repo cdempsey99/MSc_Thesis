@@ -124,7 +124,7 @@ def evaluate_metrics(class_map, ground_truth, unc_map):
     return miou, overall_accuracy, avg_unc, ece
 
 # Fn to evaluate trained model
-def get_decoder_output_maps(trained_decoder_model, grid_features, save_name="heads_predictions", save_plots=True):
+def get_decoder_output_maps(trained_decoder_model, grid_features, save_name="heads_predictions"):
     # Evaluation
     trained_decoder_model.eval()
     with torch.no_grad():
@@ -158,16 +158,14 @@ def get_decoder_output_maps(trained_decoder_model, grid_features, save_name="hea
         full_file_path = os.path.join(save_path, f"ensemble_heads_{current_time}.png")
         plt.savefig(full_file_path, bbox_inches='tight', dpi=150)
         # plt.show()
+        plt.close()
 
+        # Always calculate these regardless of M
         # Take softmax first, then calculate class predictions for every pixel
         all_probs = torch.softmax(eval_preds, dim=2) # softmaxxing over the class dimension: [5, 1, 25, 224, 224]
         mean_probs = all_probs.mean(dim=0)  # [1, 25, 224, 224]
         class_map = torch.argmax(mean_probs, dim=1).squeeze().cpu().numpy() # [224, 224]
 
-        # Always calculate these regardless of M
-        all_probs = torch.softmax(eval_preds, dim=2)
-        mean_probs = all_probs.mean(dim=0)
-        class_map = torch.argmax(mean_probs, dim=1).squeeze().cpu().numpy()
         total_entropy = -1 * torch.sum(mean_probs * torch.log(mean_probs + 1e-10), dim=1)
 
         # Ensemble-only uncertainty measures
@@ -246,9 +244,7 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
             # Save visualisation for selected batches (first item in batch only)
             if batch_idx in vis_indices:
                 single_feat = test_features[0].unsqueeze(0)
-                mean_probs_vis, class_map_vis, var_map, ent_map, mi_map = get_decoder_output_maps(
-                    trained_model, single_feat, save_plots=False
-                )
+                mean_probs_vis, class_map_vis, var_map, ent_map, mi_map = get_decoder_output_maps(trained_model, single_feat)
                 gt_vis = test_masks[0].squeeze().cpu().numpy()
                 visualise_all_metrics(
                     class_map=class_map_vis,
@@ -268,18 +264,12 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                 if (gt > 0).sum() < 100:
                     continue
                 mask = gt > 0
-                #all_preds_global.extend(class_maps[b][mask].tolist())
-                #all_gts_global.extend(gt[mask].tolist())
-                #all_conf_global.extend(conf_maps[b][mask].tolist())
                 all_preds_global.append(class_maps[b][mask])
                 all_gts_global.append(gt[mask])
                 all_conf_global.append(conf_maps[b][mask])
                 patch_count += 1
 
     # Convert to arrays
-    #all_preds_arr = np.array(all_preds_global)
-    #all_gts_arr = np.array(all_gts_global)
-    #all_conf_arr = np.array(all_conf_global)
     all_preds_arr = np.concatenate(all_preds_global)
     all_gts_arr = np.concatenate(all_gts_global)
     all_conf_arr = np.concatenate(all_conf_global)

@@ -91,79 +91,11 @@ def run_training(args):
 
     log_msg(f"Training completed in {(time.time() - start_time) / 60:.2f} minutes.")
 
-    """
-    # 5. Final Evaluation
-    log_msg("\n" + "=" * 30 + "\nSTARTING FINAL TEST EVALUATION\n" + "=" * 30)
-
-    test_features, test_masks = get_random_batch(test_loader, DEVICE)
-    mean_probs, class_map, var_map, ent_map, mi_map = get_decoder_output_maps(trained_model,
-                                                                              test_features[0].unsqueeze(0))
-
-    # Quantitative Metrics
-    conf_map = torch.max(mean_probs, dim=1)[0].squeeze().cpu().numpy()
-    miou, acc, avg_unc, ece = evaluate_metrics(class_map, test_masks[0].squeeze().cpu().numpy(), conf_map)
-
-    log_msg(f"FINAL TEST RESULTS: mIoU: {miou:.4f} | Acc: {acc:.4f} | ECE: {ece:.4f}")
-
-    # 5. Final Evaluation Metrics
-    log_msg("\n" + "=" * 30 + "\nSAVING VISUALISATIONS\n" + "=" * 30)
-
-    # Flatten tensors for reliability binning
-    conf_flat = conf_map.flatten()
-    gt_flat = test_masks[0].squeeze().cpu().numpy().flatten()
-    pred_flat = class_map.flatten()
-
-    # Create 10 bins for Reliability Diagram
-    bin_boundaries = np.linspace(0, 1, 11)
-    bin_accs = []
-    bin_counts = []
-
-    for i in range(10):
-        mask = (conf_flat > bin_boundaries[i]) & (conf_flat <= bin_boundaries[i + 1])
-        if mask.any():
-            acc = (pred_flat[mask] == gt_flat[mask]).mean()
-            bin_accs.append(acc)
-            bin_counts.append(mask.sum())
-        else:
-            bin_accs.append(0)
-            bin_counts.append(0)
-
-    # 1. Save 5-pane figure to results/metrics/
-    visualise_all_metrics(
-        class_map=class_map,
-        variance_map=var_map,
-        total_entropy=ent_map,
-        mi_map=mi_map,
-        ground_truth=test_masks[0].squeeze().cpu().numpy(),
-        hide_unlabelled=args.hide_unlabelled_pixels,
-        save_name="spatial_analysis"
-    )
-
-    # 2. Save Reliability Diagram to results/reliability/
-    plot_reliability_diagram(
-        bin_accs_all=bin_accs,
-        bin_counts=bin_counts,
-        save_name="reliability_calib"
-    )
-
-    log_msg(f"Visualisations complete. Check {args.out_dir}/metrics and {args.out_dir}/reliability")
-    """
-
     # Plot loss curves
-    #loss_history_path = os.path.join(args.out_dir, "loss_history.json")
-    #plot_loss_curves(loss_history_path, save_name="AS1_loss_curves")
-
     loss_history_path = os.path.join(os.getenv("OUT_DIR", "results"), "runs",
                                      f"{run_name}_loss_history.json")
     plot_loss_curves(loss_history_path, save_name=f"{run_name}_loss_curves")
 
-    # --- 5. Final Test Evaluation ---
-    #results = evaluate_test_set(
-    #    trained_model, test_loader,
-    #    nn.CrossEntropyLoss(ignore_index=0),
-    #    args,
-    #    run_name="AS1_baseline"
-    #)
     results = evaluate_test_set(
         trained_model, test_loader,
         nn.CrossEntropyLoss(ignore_index=0),
@@ -192,6 +124,7 @@ if __name__ == "__main__":
     parser.add_argument("--lam", type=float, default=0.1, help="Lambda diversity")
     parser.add_argument("--enforce_diversity", action="store_true")
     parser.add_argument("--hide_unlabelled_pixels", action="store_true")
+
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--run_name", type=str, default="run")
     parser.add_argument("--max_images", type=int, default=None)

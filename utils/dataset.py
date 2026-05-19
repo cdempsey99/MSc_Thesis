@@ -62,6 +62,7 @@ class FBPPatchDataset(Dataset):
                 h, w = src.height, src.width
 
                 # Adjusting this to remove the min_labelled_pixels check
+                # TODO: removed the MIN_LABELLED_PIXELS check for speed reasons. Think about if we should put a similar check back in
                 """
                 # Create a grid of x, y offsets
                 for y in range(0, h - patch_size, stride):
@@ -117,98 +118,6 @@ class FBPPatchDataset(Dataset):
 
         return img_tensor.squeeze(0), mask_tensor.squeeze(0)
 
-
-# update the class to read presaved .pt files of the encoder representation of the image tiles
-# update to load all packed .pt files into RAM
-class BakedFeatureDatasetOld(Dataset):
-    def __init__(self, split_dir):
-        # List all packed files
-        self.files = sorted(list(Path(split_dir).glob("*_packed.pt")))
-        self.cumulative_sizes = []
-        self.current_total = 0
-
-        # We need to know how many patches are in each file to index correctly
-        for f in self.files:
-            # We load just the metadata/shape to be fast
-            temp_data = torch.load(f, map_location='cpu', weights_only=True)
-            num_patches = temp_data['features'].size(0)
-            self.current_total += num_patches
-            self.cumulative_sizes.append(self.current_total)
-            # Make sure to delete each of these at the end of the loop to minimise RAM
-            del temp_data
-
-        # Keep track of which file is currently "open" in RAM to avoid constant reloading
-        self.active_file_idx = -1
-        self.active_features = None
-        self.active_masks = None
-
-    def __len__(self):
-        return self.current_total
-
-    def __getitem__(self, idx):
-        # 1. Find which file contains this global index
-        file_idx = bisect.bisect_right(self.cumulative_sizes, idx)
-
-        # 2. If it's not the file we already have in RAM, load it
-        if file_idx != self.active_file_idx:
-            data = torch.load(self.files[file_idx], map_location='cpu')
-            self.active_features = data['features']
-            self.active_masks = data['masks']
-            self.active_file_idx = file_idx
-
-        # 3. Calculate local index within that file
-        offset = self.cumulative_sizes[file_idx - 1] if file_idx > 0 else 0
-        local_idx = idx - offset
-
-        return self.active_features[local_idx], self.active_masks[local_idx]
-
-
-class BakedFeatureDatasetOlder(Dataset):
-    def __init__(self, file_paths):
-        self.file_paths = sorted(file_paths)
-        self.cumulative_sizes = []
-        total_count = 0
-
-        # Persistent Buffer: This is the robust part.
-        # It stays empty until the first patch is requested.
-        self._current_file_path = None
-        self._current_data = None
-
-        for p in self.file_paths:
-            # We only load to get the count, then discard.
-            # map_location="cpu" is vital to prevent GPU spikes.
-            data = torch.load(p, map_location="cpu")
-            num_patches = data['features'].size(0)
-            total_count += num_patches
-            self.cumulative_sizes.append(total_count)
-            del data
-
-    def __len__(self):
-        return self.cumulative_sizes[-1] if self.cumulative_sizes else 0
-
-    def __getitem__(self, idx):
-        file_idx = bisect.bisect_right(self.cumulative_sizes, idx)
-
-        if file_idx == 0:
-            local_idx = idx
-        else:
-            local_idx = idx - self.cumulative_sizes[file_idx - 1]
-
-        path = self.file_paths[file_idx]
-
-        # SMART BUFFER:
-        # If the requested patch is in the file we already have in RAM,
-        # we skip the disk I/O entirely.
-        if path != self._current_file_path:
-            self._current_file_path = path
-            # Load the new file into the buffer
-            self._current_data = torch.load(path, map_location="cpu", mmap=True)
-
-        # Pull tensors from the buffer
-        feature = self._current_data['features'][local_idx]
-        mask = self._current_data['masks'][local_idx]
-
-        return feature, mask
 
 
 class BakedFeatureDataset(Dataset):

@@ -6,7 +6,6 @@ from datetime import datetime
 
 def train_model_old(decoder_model, train_loader, val_loader, criterion, optimizer, input_dict):
 
-    # TODO : Change this fn to just take an input dict
     # Extract parameters from original input dict
     num_epochs = input_dict["num_epochs"]
     lambda_div = input_dict["lambda_div"]
@@ -32,7 +31,7 @@ def train_model_old(decoder_model, train_loader, val_loader, criterion, optimize
         log_msg(f"--> Successfully resumed from epoch {start_epoch + 1}")
 
     elif not resume and LAST_CHECKPOINT_PATH.exists():
-        # Safety warning so you don't accidentally overwrite your 102-epoch work
+        # Safety warning so you don't accidentally overwrite previous work
         log_msg("!! WARNING: Checkpoint exists but --resume was not used. !!")
         log_msg("!! This run will OVERWRITE your existing checkpoint. !!")
 
@@ -115,7 +114,7 @@ def train_model_old(decoder_model, train_loader, val_loader, criterion, optimize
 
         log_msg(f"Epoch [{epoch + 1}/{num_epochs}] - Task Loss: {avg_task:.8f}, Div Loss: {avg_div:.8f}")
 
-        # --- NEW: Validation Block ---
+        # --- Validation Block ---
         if val_loader is not None:
             decoder_model.eval()  # Turn off dropout/batchnorm
             val_task_loss = 0
@@ -136,7 +135,7 @@ def train_model_old(decoder_model, train_loader, val_loader, criterion, optimize
             avg_val_loss = val_task_loss / len(val_loader)
             log_msg(f"Validation Loss: {avg_val_loss:.8f}")
 
-            # Switch back to train mode for the next epoch!
+            # Switch back to train mode for the next epoch
             decoder_model.train()
 
     log_msg(f"Training completed")
@@ -163,24 +162,6 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
     loss_history = {"train": [], "val": []}
 
-    """
-    if resume and checkpoint_path.exists():
-        log_msg(f"--> User requested resume. Loading {checkpoint_path}...")
-        checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
-        decoder_model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_epoch = checkpoint['epoch']
-        # Load existing loss history
-        loss_path = os.path.join(runs_dir, f"{run_name}_loss_history.json")
-        if os.path.exists(loss_path):
-            with open(loss_path) as f:
-                loss_history = json.load(f)
-        log_msg(f"--> Successfully resumed from epoch {start_epoch + 1}")
-
-    elif not resume and checkpoint_path.exists():
-        log_msg("!! WARNING: Checkpoint exists but --resume was not used. !!")
-        log_msg("!! This run will OVERWRITE your existing checkpoint. !!")
-    """
     # Build checkpoint path
     if input_dict.get("checkpoint_path"):
         checkpoint_path = Path(input_dict["checkpoint_path"])
@@ -303,8 +284,6 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
     return decoder_model
 
 
-
-
 # Fn to run instantiation, training, and evaluation (visual and metrics) of decoder ensemble model
 def full_decoder_training_run(input_dict, train_loader, val_loader=None):
 
@@ -316,16 +295,11 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
     ensemble_size = input_dict["ensemble_size"]
     num_classes = input_dict["num_classes"]
     learning_rate = input_dict["learning_rate"]
-    #num_epochs = input_dict["num_epochs"]
-    #lambda_div = input_dict["lambda_div"]
-    #enforce_diversity = input_dict["enforce_diversity"]
-
-    #hide_unlabelled_pixels = input_dict["hide_unlabelled_pixels"]
-    #resume = input_dict["resume"]
 
     # Instantiate Decoder Ensemble
     log_msg("Instantiating model")
     this_ensemble = DecoderEnsemble(ensemble_size, in_channels, embed_dim, num_classes)
+    # Leaving this in for now as I'm not sure if it is a good idea or not
     #this_ensemble.apply(init_weights)
     this_ensemble.to(DEVICE)
 
