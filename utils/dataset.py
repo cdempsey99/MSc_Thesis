@@ -79,7 +79,7 @@ def ingest_paired_patch(img_path, mask_path, x, y):
 
 class FBPPatchDataset(Dataset):
 
-    def __init__(self, img_paths, mask_paths, patch_size=224, stride=112, preload=True, max_samples=None):
+    def __init__(self, img_paths, mask_paths, patch_size=224, stride=112, preload=False, max_samples=None):
         self.patch_size = patch_size
         self.preload = preload
         self.samples = [] # List of [img_path, mask_path, x, y]
