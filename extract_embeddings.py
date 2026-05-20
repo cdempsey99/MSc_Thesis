@@ -50,7 +50,8 @@ def run_extraction(args):
             # Process single image
             ds = FBPPatchDataset([img_p], [mask_p],
                                  patch_size=args.patch_size,
-                                 stride=args.stride)
+                                 stride=args.stride,
+                                 preload=False)
 
             if len(ds) == 0:
                 continue

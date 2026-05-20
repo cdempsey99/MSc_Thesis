@@ -45,6 +45,63 @@ class SegFormerDecoderHead(nn.Module):
         
         return x
 
+
+class SegFormerDecoderHeadImproved(nn.Module):
+
+    def __init__(self, in_channels=1024, embed_dim=512, num_classes=NUM_CLASSES, p_drop=0.1):
+        super().__init__()
+
+        # 1024 -> 512
+        self.linear_fusion = nn.Conv2d(in_channels, embed_dim, kernel_size=1)
+        self.bn1 = nn.BatchNorm2d(embed_dim)
+        self.activation1 = nn.GELU()
+
+        # Spatial refinement block 1
+        self.spatial_refine1 = nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(embed_dim)
+        self.activation2 = nn.GELU()
+
+        # Spatial refinement block 2
+        self.spatial_refine2 = nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm2d(embed_dim)
+        self.activation3 = nn.GELU()
+
+        # Bottleneck 512 -> 256
+        self.bottleneck = nn.Conv2d(embed_dim, embed_dim // 2, kernel_size=1)
+        self.bn4 = nn.BatchNorm2d(embed_dim // 2)
+        self.activation4 = nn.GELU()
+
+        self.dropout = nn.Dropout2d(p=p_drop)
+        self.classifier = nn.Conv2d(embed_dim // 2, num_classes, kernel_size=1)
+
+    def forward(self, x):
+        x = self.linear_fusion(x)
+        x = self.bn1(x)
+        x = self.activation1(x)
+
+        x = self.spatial_refine1(x)
+        x = self.bn2(x)
+        x = self.activation2(x)
+
+        x = self.spatial_refine2(x)
+        x = self.bn3(x)
+        x = self.activation3(x)
+
+        x = self.bottleneck(x)
+        x = self.bn4(x)
+        x = self.activation4(x)
+
+        x = self.dropout(x)
+        x = self.classifier(x)
+
+        # Progressive upsampling
+        x = F.interpolate(x, size=(56, 56), mode='bilinear', align_corners=False)
+        x = F.interpolate(x, size=(112, 112), mode='bilinear', align_corners=False)
+        x = F.interpolate(x, size=(224, 224), mode='bilinear', align_corners=False)
+
+        return x
+
+
 class DecoderEnsemble(nn.Module):
 
     def __init__(self, M=5, in_channels=1024, embed_dim=256, num_classes=NUM_CLASSES):
