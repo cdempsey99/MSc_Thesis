@@ -292,7 +292,11 @@ def evaluate_test_set_old(trained_model, test_loader, criterion, args, run_name=
                 raw_img_path = data_dir / f"{img_stem}.tif"
 
                 # GF2 standard dimensions: width=7300, height=6908
-                patches_per_row = (7300 - 224) // args.stride  # columns (width direction)
+                #patches_per_row = (7300 - 224) // args.stride  # columns (width direction)
+                #x = (local_idx % patches_per_row) * args.stride
+                #y = (local_idx // patches_per_row) * args.stride
+
+                patches_per_row = len(range(0, 7300 - 224, args.stride))
                 x = (local_idx % patches_per_row) * args.stride
                 y = (local_idx // patches_per_row) * args.stride
 
