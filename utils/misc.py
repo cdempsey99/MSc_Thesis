@@ -12,6 +12,9 @@ import gc
 import matplotlib.pyplot as plt
 import math
 
+import rasterio
+from rasterio.windows import Window
+
 def log_msg(message):
     t_stamp = time.strftime("%H:%M:%S")
     caller = inspect.stack()[1].function
@@ -262,7 +265,6 @@ def evaluate_test_set_old(trained_model, test_loader, criterion, args, run_name=
     all_conf_global = []
     patch_count = 0
 
-
     # Pick 3 random batch indices for visualisation
     vis_indices = random.sample(range(len(test_loader)), min(3, len(test_loader)))
 
@@ -441,6 +443,16 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                     y = (local_idx // patches_per_row) * args.stride
 
                     log_msg(f"Vis patch: {img_stem} local_idx={local_idx} x={x} y={y}")
+
+                    # ADD DEBUG CHECK
+
+                    mask_path = data_dir / f"{img_stem}_24label.png"
+                    if mask_path.exists():
+                        with rasterio.open(mask_path) as src:
+                            mask_check = src.read(1, window=Window(x, y, 224, 224))
+                            log_msg(f"Mask from disk unique values: {np.unique(mask_check)}")
+                            log_msg(
+                                f"Mask from dataset unique values: {np.unique(test_masks[b_offset].squeeze().cpu().numpy())}")
 
                     # Load raw image patch
                     raw_patch = None
