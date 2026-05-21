@@ -99,7 +99,7 @@ def js_divergence_loss(all_preds):
 
     M = all_preds.shape[0]
     # Softmax predictions to get probabilities
-    all_probs = torch.softmax(all_preds, dims=2) # [M, B, C, H, W]
+    all_probs = torch.softmax(all_preds, dim=2) # [M, B, C, H, W]
 
     total_jsd = 0
     count = 0
