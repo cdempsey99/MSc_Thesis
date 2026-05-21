@@ -136,9 +136,10 @@ def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map,
 
     panel = 0
 
-    # --- 0. Raw Image (if available) ---
+    # --- 0. Raw Image with mask overlay ---
     if raw_patch is not None:
         axes[panel].imshow(raw_patch)
+        axes[panel].imshow(ground_truth, cmap='tab20', vmin=0, vmax=24, alpha=0.3)
         axes[panel].set_title(f"Raw Image\n{patch_info}", fontsize=8)
         axes[panel].axis('off')
         panel += 1
