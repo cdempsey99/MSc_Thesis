@@ -65,6 +65,7 @@ def get_ece(y_pred, y_true, unc_map_flat):
 # Fn to calculate the JS divergence between
 # Maybe TODO : this is calculating the mean and comparing all heads to that, is that the best?
 # Ok I think it is for the moment anyway
+# Fn to compute pairwise Jenson Shannon Divergence between M decoder heads
 def js_divergence_loss(all_preds):
     # all_preds shape: [M, B, C, H, W]
     M = all_preds.shape[0]
@@ -256,7 +257,7 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                     hide_unlabelled=args.hide_unlabelled_pixels,
                     save_name=f"{run_name}_test_patch_{batch_idx}"
                 )
-                del mean_probs_vis, var_map, ent_map, mi_map
+                del mean_probs_vis, class_map_vis, var_map, ent_map, mi_map
                 plt.close('all')
                 torch.cuda.empty_cache()
                 gc.collect()
@@ -287,17 +288,20 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
     per_class_iou = jaccard_score(all_gts_arr, all_preds_arr,
                                   average=None, labels=list(range(1, 25)))
 
+    # This is an extra loop over the data which is putting more RAM pressure on the system and test loss is not as informative as it might be
+    # Maybe add back in later but try removing now
     # Test loss
-    test_loss = 0
-    with torch.no_grad():
-        for t_features, t_targets in test_loader:
-            t_features = t_features.to(DEVICE)
-            t_targets = t_targets.to(DEVICE).long()
-            all_preds_t = trained_model(t_features)
-            mean_logits = F.interpolate(all_preds_t.mean(dim=0),
-                                        size=(224, 224), mode='bilinear')
-            test_loss += criterion(mean_logits, t_targets).item()
-    avg_test_loss = test_loss / len(test_loader)
+    #test_loss = 0
+    #with torch.no_grad():
+    #    for t_features, t_targets in test_loader:
+    #        t_features = t_features.to(DEVICE)
+    #        t_targets = t_targets.to(DEVICE).long()
+    #        all_preds_t = trained_model(t_features)
+    #        mean_logits = F.interpolate(all_preds_t.mean(dim=0),
+    #                                    size=(224, 224), mode='bilinear')
+    #        test_loss += criterion(mean_logits, t_targets).item()
+    #avg_test_loss = test_loss / len(test_loader)
+    avg_test_loss = 0
 
     # Log results
     log_msg(f"FINAL TEST RESULTS ({patch_count} patches):")
