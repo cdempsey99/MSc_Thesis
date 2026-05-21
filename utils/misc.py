@@ -303,8 +303,8 @@ def evaluate_test_set_old(trained_model, test_loader, criterion, args, run_name=
                 # Load raw image patch - memory efficient, only loads 224x224
                 raw_patch = None
                 if raw_img_path.exists():
-                    import rasterio
-                    from rasterio.windows import Window
+                    #import rasterio
+                    #from rasterio.windows import Window
                     with rasterio.open(raw_img_path) as src:
                         win = Window(x, y, 224, 224)
                         img = src.read([1, 2, 3], window=win).astype(np.float32)
@@ -457,8 +457,6 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                     # Load raw image patch
                     raw_patch = None
                     if raw_img_path.exists():
-                        import rasterio
-                        from rasterio.windows import Window
                         with rasterio.open(raw_img_path) as src:
                             win = Window(x, y, 224, 224)
                             img = src.read([1, 2, 3], window=win).astype(np.float32)
