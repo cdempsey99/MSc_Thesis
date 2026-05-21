@@ -442,7 +442,11 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                     raw_img_path = data_dir / f"{img_stem}.tif"
 
                     # Reconstruct x, y coordinates
-                    patches_per_row = (7300 - 224) // args.stride
+                    #patches_per_row = (7300 - 224) // args.stride
+                    #x = (local_idx % patches_per_row) * args.stride
+                    #y = (local_idx // patches_per_row) * args.stride
+
+                    patches_per_row = len(range(0, 7300 - 224, args.stride))
                     x = (local_idx % patches_per_row) * args.stride
                     y = (local_idx // patches_per_row) * args.stride
 
