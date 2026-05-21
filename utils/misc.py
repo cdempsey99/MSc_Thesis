@@ -10,6 +10,7 @@ import json
 import os
 import gc
 import matplotlib.pyplot as plt
+import math
 
 def log_msg(message):
     t_stamp = time.strftime("%H:%M:%S")
@@ -67,7 +68,8 @@ def get_ece(y_pred, y_true, unc_map_flat):
 # Maybe TODO : this is calculating the mean and comparing all heads to that, is that the best?
 # Ok I think it is for the moment anyway
 # Fn to compute pairwise Jenson Shannon Divergence between M decoder heads
-def js_divergence_loss(all_preds):
+# all_preds : [M, B, C, H, W] tensor
+def js_divergence_loss_old(all_preds):
     # all_preds shape: [M, B, C, H, W]
     M = all_preds.shape[0]
 
@@ -91,6 +93,35 @@ def js_divergence_loss(all_preds):
         total_kl += kl / (all_probs.size(1) * all_probs.size(3) * all_probs.size(4))
 
     return total_kl / M
+
+
+def js_divergence_loss(all_preds):
+
+    M = all_preds.shape[0]
+    # Softmax predictions to get probabilities
+    all_probs = torch.softmax(all_preds, dims=2) # [M, B, C, H, W]
+
+    total_jsd = 0
+    count = 0
+    for i in range(M):
+        for j in range(i + 1, M):
+            # midpoint of the two distributions
+            avg_ij = 0.5 (all_probs[i] + all_probs[j])
+
+            kl_i = F.kl_div(torch.log(avg_ij + 1e-10), all_probs[i], reduction="sum")
+            kl_j = F.kl_div(torch.log(avg_ij + 1e-10), all_probs[j], reduction="sum")
+
+            n_pixels = all_probs.size(1) * all_probs.size(3) * all_probs.size(4)
+            # JSD is a symmetrised version of KLD
+            jsd = 0.5 (kl_i + kl_j) / n_pixels
+
+            total_jsd += jsd
+            count += 1
+
+    # return JSD averaged over all the pairs
+    # we want higher loss to be bad, mean less diversity between heads
+    # now 0 = max diversity, ln(2) = no diversity
+    return math.log(2) - total_jsd / count
 
 
 # Fn to calculate some metrics for accuracy and uncertainty

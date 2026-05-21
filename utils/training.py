@@ -73,15 +73,11 @@ def train_model_old(decoder_model, train_loader, val_loader, criterion, optimize
             if enforce_diversity:
                 # Convert to probs for JSD
                 # Adding in temperature to soften prob profiles ?
-                all_probs = torch.softmax(all_preds, dim=2)
-
-                div_loss = js_divergence_loss(all_probs)
+                div_loss = js_divergence_loss(all_preds)
 
             # 4. Total Loss Calculation
-            # Higher div_loss = More diverse = Lower total_loss
-            # Keep in mind here the names are maybe not ideal, a higher div_loss is good as it means the heads are more diverse
-            # this is then subtracted to make the total loss smaller
-            total_loss = task_loss - (lambda_div * div_loss)
+            # Have swapped the convention to the standard so we use a plus sign
+            total_loss = task_loss + (lambda_div * div_loss)
             total_loss.backward()
             optimizer.step()
 
