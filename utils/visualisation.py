@@ -38,7 +38,7 @@ def visualise_encoder_output(grid_features, save_name="encoder_heatmap.png"):
     # plt.show()
 
 # The 5 pane figure showing the ground truth, class predictions, variance, entropy and mutual information
-def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map, ground_truth, hide_unlabelled, save_name="all_metrics"):
+def visualise_all_metrics_old(class_map, variance_map, total_entropy, mi_map, ground_truth, hide_unlabelled, save_name="all_metrics"):
     """
     Displays a comprehensive 5-pane figure showing
     ground truth, class prediction, average variance, entropy and mutual information
@@ -107,6 +107,80 @@ def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map, ground
     full_file_path = os.path.join(save_path, save_name)
     plt.savefig(full_file_path, bbox_inches='tight', dpi=300)
     # plt.show()
+
+def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map,
+                          ground_truth, hide_unlabelled, save_name="all_metrics",
+                          raw_patch=None, patch_info=""):
+
+    save_path = os.path.join(BASE_OUT, "metrics")
+    ensure_dir(save_path)
+
+    to_np = lambda x: x.cpu().numpy() if hasattr(x, 'cpu') else x
+
+    class_map = np.squeeze(to_np(class_map))
+    variance_map = np.squeeze(to_np(variance_map))
+    total_entropy = np.squeeze(to_np(total_entropy))
+    mi_map = np.squeeze(to_np(mi_map))
+    ground_truth = np.squeeze(to_np(ground_truth))
+
+    # Determine number of panels
+    n_panels = 6 if raw_patch is not None else 5
+    fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 5))
+
+    hide_unlabelled = True
+    if hide_unlabelled:
+        ignore_mask = (ground_truth == 0)
+        class_map_masked = np.ma.masked_where(to_np(ignore_mask), to_np(class_map))
+    else:
+        class_map_masked = class_map
+
+    panel = 0
+
+    # --- 0. Raw Image (if available) ---
+    if raw_patch is not None:
+        axes[panel].imshow(raw_patch)
+        axes[panel].set_title(f"Raw Image\n{patch_info}", fontsize=8)
+        axes[panel].axis('off')
+        panel += 1
+
+    # --- Ground Truth ---
+    axes[panel].imshow(ground_truth, cmap='tab20', vmin=0, vmax=24)
+    axes[panel].set_title("Ground Truth")
+    axes[panel].axis('off')
+    panel += 1
+
+    # --- Predicted Classes ---
+    axes[panel].imshow(class_map_masked, cmap='tab20', vmin=0, vmax=24)
+    axes[panel].set_title("Predicted Classes")
+    axes[panel].axis('off')
+    panel += 1
+
+    # --- Variance ---
+    im2 = axes[panel].imshow(variance_map, cmap='magma')
+    axes[panel].set_title("Ensemble Variance")
+    fig.colorbar(im2, ax=axes[panel], fraction=0.046, pad=0.04)
+    axes[panel].axis('off')
+    panel += 1
+
+    # --- Total Entropy ---
+    im3 = axes[panel].imshow(total_entropy, cmap='magma', vmin=0, vmax=3.22)
+    axes[panel].set_title("Total Entropy (H)")
+    fig.colorbar(im3, ax=axes[panel], fraction=0.046, pad=0.04)
+    axes[panel].axis('off')
+    panel += 1
+
+    # --- Mutual Information ---
+    im4 = axes[panel].imshow(mi_map, cmap='magma')
+    axes[panel].set_title("Mutual Information (MI)")
+    fig.colorbar(im4, ax=axes[panel], fraction=0.046, pad=0.04)
+    axes[panel].axis('off')
+
+    plt.tight_layout()
+    current_time = datetime.now().strftime("%Y%m%d%H%M")
+    save_name += f"_{current_time}.png"
+    full_file_path = os.path.join(save_path, save_name)
+    plt.savefig(full_file_path, bbox_inches='tight', dpi=300)
+    plt.close('all')
 
 
 # Fn to print dictionary of the proportions of each smenatic category in a given ground_truth map

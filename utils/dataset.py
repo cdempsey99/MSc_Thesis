@@ -187,3 +187,11 @@ class BakedFeatureDataset(Dataset):
             self._current_data = torch.load(path, map_location="cpu", mmap=True)
 
         return self._current_data['features'][local_idx], self._current_data['masks'][local_idx]
+
+    def get_patch_info(self, idx):
+        """Returns (image_path, local_patch_idx) for a given global index."""
+
+        file_idx = bisect.bisect_right(self.cumulative_sizes, idx)
+        local_idx = idx - (self.cumulative_sizes[file_idx - 1] if file_idx > 0 else 0)
+
+        return self.file_paths[file_idx], local_idx

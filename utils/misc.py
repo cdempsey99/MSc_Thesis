@@ -9,6 +9,7 @@ from utils.visualisation import *
 import json
 import os
 import gc
+import matplotlib.pyplot as plt
 
 def log_msg(message):
     t_stamp = time.strftime("%H:%M:%S")
@@ -245,6 +246,31 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
 
             # Save visualisation for selected batches (first item in batch only)
             if batch_idx in vis_indices:
+                # Get patch info for first item in this batch
+                global_idx = batch_idx * test_loader.batch_size
+                img_pt_path, local_idx = test_loader.dataset.get_patch_info(global_idx)
+
+                # Derive raw image path and coordinates
+                img_stem = img_pt_path.stem.replace('_embeddings', '')
+                data_dir = Path(img_pt_path).parent.parent.parent.parent.parent / "data"
+                raw_img_path = data_dir / f"{img_stem}.tif"
+
+                # GF2 standard dimensions: width=7300, height=6908
+                patches_per_row = (7300 - 224) // args.stride  # columns (width direction)
+                x = (local_idx % patches_per_row) * args.stride
+                y = (local_idx // patches_per_row) * args.stride
+
+                # Load raw image patch - memory efficient, only loads 224x224
+                raw_patch = None
+                if raw_img_path.exists():
+                    import rasterio
+                    from rasterio.windows import Window
+                    with rasterio.open(raw_img_path) as src:
+                        win = Window(x, y, 224, 224)
+                        img = src.read([1, 2, 3], window=win).astype(np.float32)
+                        img = (img - img.min()) / (img.max() - img.min() + 1e-10)
+                        raw_patch = np.transpose(img, (1, 2, 0))  # HWC for matplotlib
+
                 single_feat = test_features[0].unsqueeze(0)
                 mean_probs_vis, class_map_vis, var_map, ent_map, mi_map = get_decoder_output_maps(trained_model, single_feat)
                 gt_vis = test_masks[0].squeeze().cpu().numpy()
@@ -255,7 +281,9 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                     mi_map=mi_map,
                     ground_truth=gt_vis,
                     hide_unlabelled=args.hide_unlabelled_pixels,
-                    save_name=f"{run_name}_test_patch_{batch_idx}"
+                    save_name=f"{run_name}_test_patch_{batch_idx}",
+                    raw_patch=raw_patch,
+                    patch_info = f"{img_stem} x={x} y={y}"
                 )
                 del mean_probs_vis, class_map_vis, var_map, ent_map, mi_map
                 plt.close('all')
