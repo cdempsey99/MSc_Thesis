@@ -293,6 +293,10 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                 x = (local_idx % patches_per_row) * args.stride
                 y = (local_idx // patches_per_row) * args.stride
 
+                log_msg(
+                    f"batch_idx={batch_idx} global_idx={global_idx} local_idx={local_idx} patches_per_row={patches_per_row} x={x} y={y}")
+                log_msg(f"cumulative_sizes first 5: {test_loader.dataset.cumulative_sizes[:5]}")
+
                 # Load raw image patch - memory efficient, only loads 224x224
                 raw_patch = None
                 if raw_img_path.exists():
