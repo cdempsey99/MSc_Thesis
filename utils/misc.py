@@ -254,13 +254,14 @@ def save_checkpoint(state, out_dir, filename="last_checkpoint.pth"):
     torch.save(state, last_path)
     log_msg(f"=> Saving checkpoint to {last_path}")
 
-def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="test"):
+def evaluate_test_set_old(trained_model, test_loader, criterion, args, run_name="test"):
     trained_model.eval()
 
     all_preds_global = []
     all_gts_global = []
     all_conf_global = []
     patch_count = 0
+
 
     # Pick 3 random batch indices for visualisation
     vis_indices = random.sample(range(len(test_loader)), min(3, len(test_loader)))
@@ -394,3 +395,140 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
     log_msg(f"Results saved to {results_path}")
 
     return results
+
+
+def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="test"):
+    trained_model.eval()
+
+    all_preds_global = []
+    all_gts_global = []
+    all_conf_global = []
+    patch_count = 0
+
+    # Pick 3 random GLOBAL indices from entire test set for visualisation
+    vis_global_indices = set(random.sample(
+        range(len(test_loader.dataset)),
+        min(3, len(test_loader.dataset))
+    ))
+    vis_count = 0
+
+    with torch.no_grad():
+        for batch_idx, (test_features, test_masks) in enumerate(test_loader):
+            test_features = test_features.to(DEVICE)
+
+            # Batched forward pass
+            all_preds = trained_model(test_features)
+            mean_logits = all_preds.mean(dim=0)
+            mean_logits_high = F.interpolate(mean_logits, size=(224, 224), mode='bilinear', align_corners=False)
+            mean_probs = torch.softmax(mean_logits_high, dim=1)
+            class_maps = torch.argmax(mean_probs, dim=1).cpu().numpy()
+            conf_maps = torch.max(mean_probs, dim=1)[0].cpu().numpy()
+
+            # Check each item in batch for visualisation
+            for b_offset in range(test_features.shape[0]):
+                g_idx = batch_idx * test_loader.batch_size + b_offset
+
+                if g_idx in vis_global_indices and vis_count < 3:
+                    img_pt_path, local_idx = test_loader.dataset.get_patch_info(g_idx)
+
+                    img_stem = img_pt_path.stem.replace('_embeddings', '')
+                    data_dir = Path(img_pt_path).parent.parent.parent.parent.parent / "data"
+                    raw_img_path = data_dir / f"{img_stem}.tif"
+
+                    # Reconstruct x, y coordinates
+                    patches_per_row = (7300 - 224) // args.stride
+                    x = (local_idx % patches_per_row) * args.stride
+                    y = (local_idx // patches_per_row) * args.stride
+
+                    log_msg(f"Vis patch: {img_stem} local_idx={local_idx} x={x} y={y}")
+
+                    # Load raw image patch
+                    raw_patch = None
+                    if raw_img_path.exists():
+                        import rasterio
+                        from rasterio.windows import Window
+                        with rasterio.open(raw_img_path) as src:
+                            win = Window(x, y, 224, 224)
+                            img = src.read([1, 2, 3], window=win).astype(np.float32)
+                            img = (img - img.min()) / (img.max() - img.min() + 1e-10)
+                            raw_patch = np.transpose(img, (1, 2, 0))
+
+                    # Get single feature for visualisation
+                    single_feat = test_features[b_offset].unsqueeze(0)
+                    mean_probs_vis, class_map_vis, var_map, ent_map, mi_map = get_decoder_output_maps(
+                        trained_model, single_feat
+                    )
+                    gt_vis = test_masks[b_offset].squeeze().cpu().numpy()
+
+                    visualise_all_metrics(
+                        class_map=class_map_vis,
+                        variance_map=var_map,
+                        total_entropy=ent_map,
+                        mi_map=mi_map,
+                        ground_truth=gt_vis,
+                        hide_unlabelled=args.hide_unlabelled_pixels,
+                        save_name=f"{run_name}_test_patch_{g_idx}",
+                        raw_patch=raw_patch,
+                        patch_info=f"{img_stem} x={x} y={y}"
+                    )
+                    del mean_probs_vis, class_map_vis, var_map, ent_map, mi_map, raw_patch
+                    plt.close('all')
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    vis_count += 1
+
+            # Accumulate metrics for each item in batch
+            for b in range(test_features.shape[0]):
+                gt = test_masks[b].squeeze().cpu().numpy()
+                if (gt > 0).sum() < 100:
+                    continue
+                mask = gt > 0
+                all_preds_global.append(class_maps[b][mask])
+                all_gts_global.append(gt[mask])
+                all_conf_global.append(conf_maps[b][mask])
+                patch_count += 1
+
+        # Convert to arrays
+        all_preds_arr = np.concatenate(all_preds_global)
+        all_gts_arr = np.concatenate(all_gts_global)
+        all_conf_arr = np.concatenate(all_conf_global)
+
+        # Global metrics
+        global_miou = jaccard_score(all_gts_arr, all_preds_arr,
+                                    average="macro", labels=np.unique(all_gts_arr))
+        global_acc = np.mean(all_preds_arr == all_gts_arr)
+        global_ece = get_ece(all_preds_arr, all_gts_arr, all_conf_arr)
+
+        # Per class IoU
+        per_class_iou = jaccard_score(all_gts_arr, all_preds_arr,
+                                      average=None, labels=list(range(1, 25)))
+
+        avg_test_loss = 0
+
+        # Log results
+        log_msg(f"FINAL TEST RESULTS ({patch_count} patches):")
+        log_msg(
+            f"Global mIoU: {global_miou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f} | Loss: {avg_test_loss:.4f}")
+        log_msg("Per-class IoU:")
+        for class_idx, iou in enumerate(per_class_iou):
+            log_msg(f"  {FBP_CLASSES[class_idx + 1]}: {iou:.4f}")
+
+        # Save to JSON
+        runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
+        os.makedirs(runs_dir, exist_ok=True)
+        results = {
+            "run_name": run_name,
+            "global_miou": float(global_miou),
+            "global_accuracy": float(global_acc),
+            "global_ece": float(global_ece),
+            "test_loss": float(avg_test_loss),
+            "num_patches": patch_count,
+            "per_class_iou": {FBP_CLASSES[i + 1]: float(iou)
+                              for i, iou in enumerate(per_class_iou)}
+        }
+        results_path = os.path.join(runs_dir, f"{run_name}_results.json")
+        with open(results_path, "w") as f:
+            json.dump(results, f, indent=2)
+        log_msg(f"Results saved to {results_path}")
+
+        return results
