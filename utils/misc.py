@@ -106,14 +106,14 @@ def js_divergence_loss(all_preds):
     for i in range(M):
         for j in range(i + 1, M):
             # midpoint of the two distributions
-            avg_ij = 0.5 (all_probs[i] + all_probs[j])
+            avg_ij = 0.5 * (all_probs[i] + all_probs[j])
 
             kl_i = F.kl_div(torch.log(avg_ij + 1e-10), all_probs[i], reduction="sum")
             kl_j = F.kl_div(torch.log(avg_ij + 1e-10), all_probs[j], reduction="sum")
 
             n_pixels = all_probs.size(1) * all_probs.size(3) * all_probs.size(4)
             # JSD is a symmetrised version of KLD
-            jsd = 0.5 (kl_i + kl_j) / n_pixels
+            jsd = 0.5 * (kl_i + kl_j) / n_pixels
 
             total_jsd += jsd
             count += 1
