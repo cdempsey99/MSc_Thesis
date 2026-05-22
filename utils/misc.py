@@ -171,7 +171,7 @@ def pearson_diversity_loss(all_preds):
     mask = torch.triu(torch.ones(M, M, device=all_preds.device), diagonal=1).bool()
     pairwise_corr = corr_mean[mask]  # [M*(M-1)/2]
 
-    return pairwise_corr.mean()
+    return (pairwise_corr ** 2).mean()
 
 
 # Fn to calculate some metrics for accuracy and uncertainty
