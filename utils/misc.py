@@ -107,7 +107,8 @@ def js_divergence_loss(all_preds):
         return torch.tensor(0.0, device=all_preds.device)
 
     # Softmax predictions to get probabilities
-    all_probs = torch.softmax(all_preds, dim=2) # [M, B, C, H, W]
+    # Move these to CPU to avoid GPU OOM
+    all_probs = torch.softmax(all_preds, dim=2).cpu() # [M, B, C, H, W]
 
     total_jsd = 0
     count = 0
@@ -116,8 +117,8 @@ def js_divergence_loss(all_preds):
             # midpoint of the two distributions
             avg_ij = 0.5 * (all_probs[i] + all_probs[j])
 
-            kl_i = F.kl_div(torch.log(avg_ij + 1e-10), all_probs[i], reduction="sum").cpu()
-            kl_j = F.kl_div(torch.log(avg_ij + 1e-10), all_probs[j], reduction="sum").cpu()
+            kl_i = F.kl_div(torch.log(avg_ij + 1e-10), all_probs[i], reduction="sum")
+            kl_j = F.kl_div(torch.log(avg_ij + 1e-10), all_probs[j], reduction="sum")
 
             del avg_ij
 
