@@ -431,6 +431,10 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
         os.makedirs(runs_dir, exist_ok=True)
         results = {
             "run_name": run_name,
+            "diversity_methods": args.diversity_methods,
+            "lam_jsd": args.lam_jsd,
+            "lam_pearson": args.lam_pearson,
+            "lam_orth": args.lam_orth,
             "global_miou": float(global_miou),
             "global_accuracy": float(global_acc),
             "global_ece": float(global_ece),

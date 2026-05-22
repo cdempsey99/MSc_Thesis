@@ -78,13 +78,18 @@ def run_training(args):
     # 4. Model Training
     # Pack parameters into your input_dict for the training function
     input_dict = vars(args)
-    input_dict["lambda_div"] = args.lam  # Mapping arg name to dict key
+    i#nput_dict["diversity_methods"] = args.diversity_methods
+    i#nput_dict["lam_jsd"] = args.lam_jsd
+    i#nput_dict["lam_pearson"] = args.lam_pearson
+    i#nput_dict["lam_orth"] = args.lam_orth
+    #input_dict["lambda_div"] = args.lam  # Mapping arg name to dict key
     input_dict["in_channels"] = args.decoder_in_channels
     input_dict["embed_dim"] = args.decoder_embed_dim
     input_dict["device"] = DEVICE
     input_dict["learning_rate"] = args.lr
     input_dict["run_name"] = run_name
-    input_dict["checkpoint_path"] = args.checkpoint_path
+    #nput_dict["checkpoint_path"] = args.checkpoint_path
+
 
     start_time = time.time()
     trained_model = full_decoder_training_run(input_dict, train_loader, val_loader)
@@ -121,10 +126,15 @@ if __name__ == "__main__":
     parser.add_argument("--num_epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=0.0001)
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--lam", type=float, default=0.1, help="Lambda diversity")
-    parser.add_argument("--enforce_diversity", action="store_true")
     parser.add_argument("--hide_unlabelled_pixels", action="store_true")
-
+    #parser.add_argument("--lam", type=float, default=0.1, help="Lambda diversity")
+    #parser.add_argument("--enforce_diversity", action="store_true")
+    parser.add_argument("--diversity_methods", type=str, nargs="+", default=[], choices=["jsd", "pearson", "orthogonality"],
+                        help="One or more diversity methods to combine")
+    parser.add_argument("--lam_jsd", type=float, default=0.1)
+    parser.add_argument("--lam_pearson", type=float, default=0.1)
+    parser.add_argument("--lam_orth", type=float, default=0.01)
+    # Misc
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--run_name", type=str, default="run")
     parser.add_argument("--max_images", type=int, default=None)

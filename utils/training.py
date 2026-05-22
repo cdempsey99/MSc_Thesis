@@ -7,9 +7,13 @@ from datetime import datetime
 
 def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, input_dict):
     num_epochs = input_dict["num_epochs"]
-    lambda_div = input_dict["lambda_div"]
-    enforce_diversity = input_dict["enforce_diversity"]
+    #lambda_div = input_dict["lambda_div"]
+    #enforce_diversity = input_dict["enforce_diversity"]
     resume = input_dict["resume"]
+    diversity_methods = input_dict.get("diversity_methods", [])
+    lam_jsd = input_dict.get("lam_jsd", 0.0)
+    lam_pearson = input_dict.get("lam_pearson", 0.0)
+    lam_orth = input_dict.get("lam_orth", 0.0)
 
     run_name = input_dict.get("run_name", "run")
     runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
@@ -51,8 +55,12 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
     for epoch in range(start_epoch, num_epochs):
         log_msg(f"Starting epoch {epoch+1}...")
+        #epoch_task_loss = 0
+        #epoch_div_loss = 0
         epoch_task_loss = 0
-        epoch_div_loss = 0
+        epoch_jsd_loss = 0
+        epoch_pearson_loss = 0
+        epoch_orth_loss = 0
 
         decoder_model.train()
 
@@ -74,32 +82,54 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
             total_task_loss += criterion(mean_logits_high, targets)
             task_loss = total_task_loss / (decoder_model.M + 1)
 
-            div_loss = 0
-            if enforce_diversity:
+            #div_loss = 0
+            #if enforce_diversity:
                 # Various diversity options
-                div_loss = js_divergence_loss(all_preds)
+            #    div_loss = js_divergence_loss(all_preds)
                 #div_loss = pearson_diversity_loss(all_preds)
 
             # Make sure that for all diversity options, more loss is a bad thing, as our sign convention below needs to be respected
-            total_loss = task_loss + (lambda_div * div_loss)
+            # total_loss = task_loss + (lambda_div * div_loss)
+
+            div_loss_jsd = 0.0
+            div_loss_pearson = 0.0
+            div_loss_orth = 0.0
+
+            if "jsd" in diversity_methods:
+                div_loss_jsd = js_divergence_loss(all_preds)
+
+            if "pearson" in diversity_methods:
+                div_loss_pearson = pearson_diversity_loss(all_preds)
+
+            #if "orth" in diversity_methods:
+            #    div_loss_orth = orthogonal_loss(all_preds)
+
+            # Make sure that for all diversity options, more loss is a bad thing, as our sign convention below needs to be respected
+            total_loss = task_loss \
+                + lam_jsd * div_loss_jsd \
+                + lam_pearson * div_loss_pearson
+                #+ lam_orth * div_loss_orth
+
             total_loss.backward()
             optimizer.step()
 
-            if torch.is_tensor(div_loss):
-                epoch_div_loss += div_loss.item()
-            else:
-                epoch_div_loss += div_loss
+            epoch_task_loss += task_loss.item() if torch.is_tensor(task_loss) else task_loss
+            epoch_jsd_loss += div_loss_jsd.item() if torch.is_tensor(div_loss_jsd) else div_loss_jsd
+            epoch_pearson_loss += div_loss_pearson.item() if torch.is_tensor(div_loss_pearson) else div_loss_pearson
+            epoch_orth_loss += div_loss_orth.item() if torch.is_tensor(div_loss_orth) else div_loss_orth
 
-            if torch.is_tensor(task_loss):
-                epoch_task_loss += task_loss.item()
-            else:
-                epoch_task_loss += task_loss
-
+        #avg_task = epoch_task_loss / len(train_loader)
+        #avg_div = epoch_div_loss / len(train_loader)
+        #loss_history["train"].append(avg_task)
         avg_task = epoch_task_loss / len(train_loader)
-        avg_div = epoch_div_loss / len(train_loader)
+        avg_jsd = epoch_jsd_loss / len(train_loader)
+        avg_pearson = epoch_pearson_loss / len(train_loader)
+        avg_orth = epoch_orth_loss / len(train_loader)
+
         loss_history["train"].append(avg_task)
 
-        log_msg(f"Epoch [{epoch+1}/{num_epochs}] - Task Loss: {avg_task:.8f}, Div Loss: {avg_div:.8f}")
+        #log_msg(f"Epoch [{epoch+1}/{num_epochs}] - Task Loss: {avg_task:.8f}, Div Loss: {avg_div:.8f}")
+        log_msg(f"Epoch [{epoch + 1}/{num_epochs}] - Task: {avg_task:.4f} | JSD: {avg_jsd:.4f} | Pearson: {avg_pearson:.4f} | Orth: {avg_orth:.4f}")
 
         if val_loader is not None:
             decoder_model.eval()
