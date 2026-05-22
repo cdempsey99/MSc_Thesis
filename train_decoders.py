@@ -131,9 +131,9 @@ if __name__ == "__main__":
     #parser.add_argument("--enforce_diversity", action="store_true")
     parser.add_argument("--diversity_methods", type=str, nargs="+", default=[], choices=["jsd", "pearson", "orthogonality"],
                         help="One or more diversity methods to combine")
-    parser.add_argument("--lam_jsd", type=float, default=0.1)
-    parser.add_argument("--lam_pearson", type=float, default=0.1)
-    parser.add_argument("--lam_orth", type=float, default=0.01)
+    parser.add_argument("--lam_jsd", type=float, default=0.)
+    parser.add_argument("--lam_pearson", type=float, default=0.)
+    parser.add_argument("--lam_orth", type=float, default=0.0)
     # Misc
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--run_name", type=str, default="run")
