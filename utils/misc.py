@@ -137,6 +137,48 @@ def js_divergence_loss(all_preds):
     # now 0 = max diversity, ln(2) = no diversity
     return math.log(2) - total_jsd / count
 
+# Fn to compute diversity loss based on Pearson correlation between decoder heads
+# For each class C, computes correlation between head spatial activation maps
+# all_preds: [M, B, C, H, W] raw logits
+def pearson_diversity_loss(all_preds):
+
+
+    M, B, C, H, W, = all_preds.shape
+
+    if M == 1:
+        return torch.tensor(0.0, device=all_preds.device)
+
+    # Get probabilities from raw logits
+    all_probs = torch.softmax(all_preds, dim=2) # [M, B, C, H, W]
+
+    total_corr = 0
+    count = 0
+
+    # For each class C:
+    for c in range(C):
+
+        # Get spatial maps for this class across all heads
+        class_maps = all_probs[:, :, c, :, :].reshape(M, -1) # [M, B*H*W]
+
+        #Compute pairwise Pearson correlation between heads
+        for i in range(M):
+            for j in range(i + 1, M):
+                c = class_maps[i]  # [B*H*W]
+                y = class_maps[j]  # [B*H*W]
+
+                x_mean = x.mean()
+                y_mean = y.mean()
+
+                x_centred = x - x_mean
+                y_centred = y - y_mean
+
+                corr = (x_centred * y_centred).sum() / ( torch.sqrt((x_centred ** 2).sum()) * torch.sqrt((y_centred ** 2).sum()) + 1e-10)
+
+                total_corr += corr
+                count += 1
+
+    return total_corr / count
+
 
 # Fn to calculate some metrics for accuracy and uncertainty
 # TODO : These could probably be upgraded in future
