@@ -199,7 +199,7 @@ def get_decoder_output_maps(trained_decoder_model, grid_features, save_name="hea
             os.makedirs(save_path)
 
         current_time = datetime.now().strftime("%Y%m%d%H%M")
-        full_file_path = os.path.join(save_path, f"ensemble_heads_{current_time}.png")
+        full_file_path = os.path.join(save_path, f"ensemble_heads_{save_name}_{current_time}.png")
         plt.savefig(full_file_path, bbox_inches='tight', dpi=150)
         # plt.show()
         plt.close()
@@ -329,7 +329,7 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                     # Get single feature for visualisation
                     single_feat = test_features[b_offset].unsqueeze(0)
                     mean_probs_vis, class_map_vis, var_map, ent_map, mi_map = get_decoder_output_maps(
-                        trained_model, single_feat
+                        trained_model, single_feat, save_name=f"{run_name}_patch_{g_idx}"
                     )
                     gt_vis = test_masks[b_offset].squeeze().cpu().numpy()
 
