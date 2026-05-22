@@ -4,7 +4,7 @@ from configs.config import *
 
 
 # Note the choice of decoder embedding dim of 256 is arbitrary
-class SegFormerDecoderHead(nn.Module):
+class SegFormerDecoderHeadOld(nn.Module):
 
     def __init__(self, in_channels=1024, embed_dim=256, num_classes=NUM_CLASSES, p_drop=0.1):
         super().__init__()
@@ -46,7 +46,7 @@ class SegFormerDecoderHead(nn.Module):
         return x
 
 
-class SegFormerDecoderHeadImproved(nn.Module):
+class SegFormerDecoderHead(nn.Module):
 
     def __init__(self, in_channels=1024, embed_dim=512, num_classes=NUM_CLASSES, p_drop=0.1):
         super().__init__()
