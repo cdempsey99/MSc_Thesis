@@ -108,7 +108,7 @@ def js_divergence_loss(all_preds):
 
     # Softmax predictions to get probabilities
     # Move these to CPU to avoid GPU OOM
-    all_probs = torch.softmax(all_preds, dim=2). # [M, B, C, H, W]
+    all_probs = torch.softmax(all_preds, dim=2) # [M, B, C, H, W]
 
     total_jsd = 0
     count = 0
