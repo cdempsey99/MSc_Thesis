@@ -108,19 +108,22 @@ def js_divergence_loss(all_preds):
 
     # Softmax predictions to get probabilities
     # Move these to CPU to avoid GPU OOM
-    all_probs = torch.softmax(all_preds, dim=2).cpu() # [M, B, C, H, W]
+    all_probs = torch.softmax(all_preds, dim=2). # [M, B, C, H, W]
 
     total_jsd = 0
     count = 0
     for i in range(M):
         for j in range(i + 1, M):
             # midpoint of the two distributions
-            avg_ij = 0.5 * (all_probs[i] + all_probs[j])
+            p_i = all_probs[i].detach()
+            p_j = all_probs[j].detach()
+            avg_ij = 0.5 * (p_i + p_j)
 
             kl_i = F.kl_div(torch.log(avg_ij + 1e-10), all_probs[i], reduction="sum")
             kl_j = F.kl_div(torch.log(avg_ij + 1e-10), all_probs[j], reduction="sum")
 
-            del avg_ij
+            del avg_ij, p_i, p_j
+            torch.cuda.empty_cache()
 
             n_pixels = all_probs.size(1) * all_probs.size(3) * all_probs.size(4)
             # JSD is a symmetrised version of KLD
