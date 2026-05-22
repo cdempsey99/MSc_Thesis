@@ -78,17 +78,17 @@ def run_training(args):
     # 4. Model Training
     # Pack parameters into your input_dict for the training function
     input_dict = vars(args)
-    i#nput_dict["diversity_methods"] = args.diversity_methods
-    i#nput_dict["lam_jsd"] = args.lam_jsd
-    i#nput_dict["lam_pearson"] = args.lam_pearson
-    i#nput_dict["lam_orth"] = args.lam_orth
+    #input_dict["diversity_methods"] = args.diversity_methods
+    #input_dict["lam_jsd"] = args.lam_jsd
+    #input_dict["lam_pearson"] = args.lam_pearson
+    #input_dict["lam_orth"] = args.lam_orth
     #input_dict["lambda_div"] = args.lam  # Mapping arg name to dict key
     input_dict["in_channels"] = args.decoder_in_channels
     input_dict["embed_dim"] = args.decoder_embed_dim
     input_dict["device"] = DEVICE
     input_dict["learning_rate"] = args.lr
     input_dict["run_name"] = run_name
-    #nput_dict["checkpoint_path"] = args.checkpoint_path
+    #input_dict["checkpoint_path"] = args.checkpoint_path
 
 
     start_time = time.time()
