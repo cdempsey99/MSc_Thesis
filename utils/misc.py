@@ -174,6 +174,37 @@ def pearson_diversity_loss(all_preds):
     return (pairwise_corr ** 2).mean()
 
 
+# Computes pairwise orthogonality loss between weights of the different decoder models
+# Uses squared cosine similarity between flattened weight vectors
+# 0 = perfectly orthogonal, 1 = identical
+def orthogonality_loss(decoder_ensemble):
+
+    M = decoder_ensemble.M
+
+    if M == 1 :
+        return torch.tensor(0.0, device=next(decoder_ensemble.parameters()).device)
+
+    # Get classifier weights for each head
+    weights = [head.classifier.weight for head in decoder_ensemble.heads]
+
+    total_orth = 0.0
+    count = 0
+
+    for i in range(M):
+        for j in range(i + 1, M):
+
+            # Flatten weight matrices to vectors
+            w_i = weights[i].flatten()  # [num_classes * embed_dim]
+            w_j = weights[j].flatten()  # [num_classes * embed_dim]
+
+            # Squared cosine similarity
+            cos_sim = F.cosine_similarity(w_i.unsqueeze(0), w_j.unsqueeze(0))
+            total_orth += cos_sim ** 2
+            count += 1
+
+    return total_orth / count
+
+
 # Fn to calculate some metrics for accuracy and uncertainty
 # TODO : These could probably be upgraded in future
 def evaluate_metrics(class_map, ground_truth, unc_map):
