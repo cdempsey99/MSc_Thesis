@@ -202,7 +202,7 @@ def pearson_diversity_loss_vectorised(all_preds):
 
     # Compute full [M, M] correlation matrix for each class C
     # normed [M, C, B*H*W] --> corr [C, M, M]
-    corr = torch.einsum('mcd,ndc->cnm', normed, normed) / (B * H * W)  # [C, M, M]
+    corr = torch.einsum('mcd,ncd->cmn', normed, normed) / (B * H * W)  # [C, M, M]
 
     # Average over classes
     corr_mean = corr.mean(dim=0)  # [M, M]
