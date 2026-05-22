@@ -180,6 +180,40 @@ def pearson_diversity_loss(all_preds):
     return total_corr / count
 
 
+def pearson_diversity_loss_vectorised(all_preds):
+
+    M, B, C, H, W = all_preds.shape
+
+    if M == 1:
+        return torch.tensor(0.0, device=all_preds.device)
+
+    all_probs = torch.softmax(all_preds, dim=2)  # [M, B, C, H, W]
+
+    # Reshape to [M, C, B*H*W]
+    all_probs = all_probs.permute(0, 2, 1, 3, 4).reshape(M, C, -1)
+
+    # Centre each vector
+    mean = all_probs.mean(dim=2, keepdim=True)  # [M, C, 1]
+    centred = all_probs - mean  # [M, C, B*H*W]
+
+    # Normalise by std
+    std = torch.sqrt((centred ** 2).sum(dim=2, keepdim=True) + 1e-10)
+    normed = centred / std
+
+    # Compute full [M, M] correlation matrix for each class C
+    # normed [M, C, B*H*W] --> corr [C, M, M]
+    corr = torch.einsum('mcd,ndc->cnm', normed, normed) / (B * H * W)  # [C, M, M]
+
+    # Average over classes
+    corr_mean = corr.mean(dim=0)  # [M, M]
+
+    # Extract upper triangle
+    mask = torch.triu(torch.ones(M, M, device=all_preds.device), diagonal=1).bool()
+    pairwise_corr = corr_mean[mask]  # [M*(M-1)/2]
+
+    return pairwise_corr.mean()
+
+
 # Fn to calculate some metrics for accuracy and uncertainty
 # TODO : These could probably be upgraded in future
 def evaluate_metrics(class_map, ground_truth, unc_map):
