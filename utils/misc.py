@@ -163,7 +163,7 @@ def pearson_diversity_loss(all_preds):
         #Compute pairwise Pearson correlation between heads
         for i in range(M):
             for j in range(i + 1, M):
-                c = class_maps[i]  # [B*H*W]
+                x = class_maps[i]  # [B*H*W]
                 y = class_maps[j]  # [B*H*W]
 
                 x_mean = x.mean()
