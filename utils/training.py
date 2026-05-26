@@ -242,7 +242,7 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
     # Training of the Decoder ensemble
     optimizer = torch.optim.AdamW(this_ensemble.parameters(), lr=learning_rate, weight_decay=0.05)
     criterion = nn.CrossEntropyLoss(ignore_index=0) # ignore index 0 because these are pixels not labelled by humans
-    scheduler = torch.optim.lr.scheduler.CosineAnnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
 
     # Train
     trained_decoder_model = train_model(
