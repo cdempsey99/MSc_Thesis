@@ -27,6 +27,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
     decoder_model.to(DEVICE)
     start_epoch = 0
     best_val_loss = float('inf')
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
 
     loss_history = {"train": [], "val": []}
 
@@ -230,7 +231,6 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
     ensemble_size = input_dict["ensemble_size"]
     num_classes = input_dict["num_classes"]
     learning_rate = input_dict["learning_rate"]
-    num_epochs = input_dict["num_epochs"]
 
     # Instantiate Decoder Ensemble
     log_msg("Instantiating model")
@@ -242,7 +242,6 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
     # Training of the Decoder ensemble
     optimizer = torch.optim.AdamW(this_ensemble.parameters(), lr=learning_rate, weight_decay=0.05)
     criterion = nn.CrossEntropyLoss(ignore_index=0) # ignore index 0 because these are pixels not labelled by humans
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
 
     # Train
     trained_decoder_model = train_model(
