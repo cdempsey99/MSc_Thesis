@@ -199,6 +199,8 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
             with open(loss_path, "w") as f:
                 json.dump(loss_history, f, indent=2)
 
+        scheduler.step()
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     final_state = {
         'epoch': num_epochs,
@@ -228,6 +230,7 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
     ensemble_size = input_dict["ensemble_size"]
     num_classes = input_dict["num_classes"]
     learning_rate = input_dict["learning_rate"]
+    num_epochs = input_dict["num_epochs"]
 
     # Instantiate Decoder Ensemble
     log_msg("Instantiating model")
@@ -237,8 +240,9 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
     this_ensemble.to(DEVICE)
 
     # Training of the Decoder ensemble
-    optimizer = torch.optim.Adam(this_ensemble.parameters(), lr=learning_rate)
+    optimizer = torch.optim.AdamW(this_ensemble.parameters(), lr=learning_rate, weight_decay=0.05)
     criterion = nn.CrossEntropyLoss(ignore_index=0) # ignore index 0 because these are pixels not labelled by humans
+    scheduler = torch.optim.lr.scheduler.CosineAnnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
 
     # Train
     trained_decoder_model = train_model(
