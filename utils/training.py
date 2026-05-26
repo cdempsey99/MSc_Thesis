@@ -26,6 +26,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
     save_interval = 5
     decoder_model.to(DEVICE)
     start_epoch = 0
+    best_val_loss = float('inf')
 
     loss_history = {"train": [], "val": []}
 
@@ -171,6 +172,17 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
                     val_task_loss += v_loss.item()
             avg_val_loss = val_task_loss / len(val_loader)
+
+            # Save best model (on validation data) up until this point
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'model_state_dict': decoder_model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                }, str(CHECKPOINT_DIR), filename=f"{run_name}_best_model.pth")
+                log_msg(f"New best val loss {best_val_loss:.6f} — best model saved")
+
             loss_history["val"].append(avg_val_loss)
             log_msg(f"Validation Loss: {avg_val_loss:.8f}")
 
