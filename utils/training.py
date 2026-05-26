@@ -131,6 +131,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         #log_msg(f"Epoch [{epoch+1}/{num_epochs}] - Task Loss: {avg_task:.8f}, Div Loss: {avg_div:.8f}")
         log_msg(f"Epoch [{epoch + 1}/{num_epochs}] - Task: {avg_task:.4f} | JSD: {avg_jsd:.4f} | Pearson: {avg_pearson:.4f} | Orth: {avg_orth:.4f}")
 
+        """
         if val_loader is not None:
             decoder_model.eval()
             val_task_loss = 0
@@ -144,6 +145,31 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                     v_loss = criterion(mean_logits_high, v_targets)
                     val_task_loss += v_loss.item()
 
+            avg_val_loss = val_task_loss / len(val_loader)
+            loss_history["val"].append(avg_val_loss)
+            log_msg(f"Validation Loss: {avg_val_loss:.8f}")
+            
+            """
+        if val_loader is not None:
+            decoder_model.eval()
+            val_task_loss = 0
+            with torch.no_grad():
+                for v_features, v_targets in val_loader:
+                    v_features = v_features.to(DEVICE)
+                    v_targets = v_targets.to(DEVICE).long()
+                    all_preds = decoder_model(v_features)
+
+                    total_val_loss = 0
+                    for head_idx in range(decoder_model.M):
+                        head_high = F.interpolate(all_preds[head_idx], size=(224, 224),
+                                                  mode='bilinear', align_corners=False)
+                        total_val_loss += criterion(head_high, v_targets)
+                    mean_logits_low = all_preds.mean(dim=0)
+                    mean_logits_high = F.interpolate(mean_logits_low, size=(224, 224), mode='bilinear')
+                    total_val_loss += criterion(mean_logits_high, v_targets)
+                    v_loss = total_val_loss / (decoder_model.M + 1)
+
+                    val_task_loss += v_loss.item()
             avg_val_loss = val_task_loss / len(val_loader)
             loss_history["val"].append(avg_val_loss)
             log_msg(f"Validation Loss: {avg_val_loss:.8f}")
