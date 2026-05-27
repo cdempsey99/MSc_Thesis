@@ -101,6 +101,17 @@ def run_training(args):
                                      f"{run_name}_loss_history.json")
     plot_loss_curves(loss_history_path, save_name=f"{run_name}_loss_curves")
 
+    # Load best model for evaluation instead of final model
+    best_model_path = Path(os.getenv("OUT_DIR", "results")) / "checkpoints" / f"{run_name}_best_model.pth"
+
+    if best_model_path.exists():
+        log_msg(f"Loading best model from {best_model_path} for evaluation")
+        checkpoint = torch.load(best_model_path, map_location=DEVICE)
+        trained_model.load_state_dict(checkpoint['model_state_dict'])
+        log_msg("Best model loaded successfully")
+    else:
+        log_msg("No best model found, evaluating final model")
+
     results = evaluate_test_set(
         trained_model, test_loader,
         nn.CrossEntropyLoss(ignore_index=0),
