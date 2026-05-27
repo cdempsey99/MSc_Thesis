@@ -8,26 +8,6 @@ import json
 import numpy as np
 
 # Fn to ingest FBP images, taking the image found at 'path'
-def ingest_fbp_patch_OLD(path, x_offset=1000, y_offset=1000):
-    with rasterio.open(path) as src:
-        # Open a 224 x 224 window so we don't overload RAM
-        win = Window(x_offset, y_offset, 224, 224)
-
-        # Read the four bands, normally in order NIR R G B
-        img = src.read(window=win)
-
-        # Convert to float and normalise
-        # (it will be currently 0-255 but Clay expects 0-1)
-        img_tensor = torch.from_numpy(img).float() / 255.0
-
-        # Normalise?
-        mean = torch.tensor([0.485, 0.456, 0.406, 0.406]).view(4, 1, 1)  # Adjust for 4 bands
-        std = torch.tensor([0.229, 0.224, 0.225, 0.225]).view(4, 1, 1)
-        img_tensor = (img_tensor - mean) / std
-
-    # Add a batch dim, so [1, 4, 224, 224]
-    return img_tensor.unsqueeze(0)
-
 def ingest_fbp_patch(path, x_offset=1000, y_offset=1000):
     with rasterio.open(path) as src:
         win = Window(x_offset, y_offset, 224, 224)
@@ -40,24 +20,6 @@ def ingest_fbp_patch(path, x_offset=1000, y_offset=1000):
         img_tensor = torch.from_numpy(img).float()
 
     return img_tensor.unsqueeze(0)
-
-# x and y here are the offsets to give us the tile location
-def ingest_paired_patch_OLD(img_path, mask_path, x, y):
-    # 1. Grab the Image Patch
-    with rasterio.open(img_path) as src:
-        win = Window(x, y, 224, 224)
-        img = src.read(window=win)
-        # ... (your existing normalization code) ...
-        img_tensor = torch.from_numpy(img).float() / 255.0
-
-    # 2. Grab the Mask Patch from the EXACT SAME window
-    # Note: We use PIL or Rasterio here; I'll stick to Rasterio for consistency
-    with rasterio.open(mask_path) as src_mask:
-        mask = src_mask.read(1, window=win)  # Read only the 1st band (the labels)
-        mask_tensor = torch.from_numpy(mask).long()  # Labels must be Long integers
-
-    return img_tensor.unsqueeze(0), mask_tensor.unsqueeze(0)
-
 
 def ingest_paired_patch(img_path, mask_path, x, y):
     with rasterio.open(img_path) as src:
@@ -76,6 +38,35 @@ def ingest_paired_patch(img_path, mask_path, x, y):
         mask_tensor = torch.from_numpy(mask).long()
 
     return img_tensor.unsqueeze(0), mask_tensor.unsqueeze(0)
+
+
+def random_augment(features, mask):
+    """
+    Applies random spatial augmentations to feature maps and masks.
+    Same transform applied to both to maintain alignment.
+
+    Args:
+        features: [1024, 28, 28] tensor
+        mask: [224, 224] tensor
+    Returns:
+        augmented features and mask
+    """
+    # Random horizontal flip
+    if torch.rand(1) > 0.5:
+        features = torch.flip(features, dims=[2])
+        mask = torch.flip(mask, dims=[1])
+
+    # Random vertical flip
+    if torch.rand(1) > 0.5:
+        features = torch.flip(features, dims=[1])
+        mask = torch.flip(mask, dims=[0])
+
+    # Random 90 degree rotation (0, 90, 180, 270)
+    k = torch.randint(0, 4, (1,)).item()
+    features = torch.rot90(features, k, dims=[1, 2])
+    mask = torch.rot90(mask, k, dims=[0, 1])
+
+    return features, mask
 
 
 class FBPPatchDataset(Dataset):
@@ -153,8 +144,9 @@ class FBPPatchDataset(Dataset):
 
 
 class BakedFeatureDataset(Dataset):
-    def __init__(self, file_paths):
+    def __init__(self, file_paths, augment=False):
         self.file_paths = sorted(file_paths)
+        self.augment = augment
 
         # Read patches_per_image from metadata
         meta_path = self.file_paths[0].parent / "metadata.json"
@@ -187,7 +179,13 @@ class BakedFeatureDataset(Dataset):
             self._current_file_path = path
             self._current_data = torch.load(path, map_location="cpu", mmap=True)
 
-        return self._current_data['features'][local_idx], self._current_data['masks'][local_idx]
+        features = self._current_data['features'][local_idx]
+        mask = self._current_data['masks'][local_idx]
+
+        if self.augment:
+            features, mask = random_augment(features, mask)
+
+        return features, mask
 
     def get_patch_info(self, idx):
         """Returns (image_path, local_patch_idx) for a given global index."""

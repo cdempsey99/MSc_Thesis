@@ -64,11 +64,11 @@ def run_training(args):
     # 3. Data Loaders (The "Safe" Config)
     # We pass the list of files to the Dataset
     log_msg("Initialising train dataset...")
-    train_ds = BakedFeatureDataset(train_files)
+    train_ds = BakedFeatureDataset(train_files, augment=True)
     log_msg("Initialising valid dataset...")
-    val_ds = BakedFeatureDataset(val_files)
+    val_ds = BakedFeatureDataset(val_files, augment=False)
     log_msg("Initialising test dataset...")
-    test_ds = BakedFeatureDataset(test_files)
+    test_ds = BakedFeatureDataset(test_files, augment=False)
     log_msg("All datasets initialised")
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
