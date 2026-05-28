@@ -14,7 +14,7 @@ import os
 import gc
 
 from utils.dataset_e2e import FBPRawDataset
-from utils.misc import log_msg, save_checkpoint, evaluate_test_set
+from utils.misc import log_msg, save_checkpoint
 from utils.visualisation import plot_loss_curves
 from models.ensemble import DecoderEnsemble
 from models.lora_encoder import (
