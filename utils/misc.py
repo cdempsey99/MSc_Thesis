@@ -199,10 +199,13 @@ def orthogonality_loss(decoder_ensemble):
 
             # Squared cosine similarity
             cos_sim = F.cosine_similarity(w_i.unsqueeze(0), w_j.unsqueeze(0))
+            log_msg(f"pair ({i}, {j}) cos_sim={cos_sim.item():.6f} cos_sim^2={cos_sim.item()**2:.8f}")
             total_orth += cos_sim ** 2
             count += 1
 
-    return total_orth / count
+    result = total_orth/count
+    log_msg(f"orthogonality_loss result={result.item():.8f}")
+    return result
 
 
 # Fn to calculate some metrics for accuracy and uncertainty
