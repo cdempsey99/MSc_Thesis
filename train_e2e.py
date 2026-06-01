@@ -123,6 +123,9 @@ def train_e2e(args):
     # 6. Resume Logic
     start_epoch = 0
     if args.resume:
+        log_msg(f"Resume decoder path: {args.resume_decoder_path}")
+        log_msg(f"Path exists: {Path(args.resume_decoder_path).exists() if args.resume_decoder_path else 'None'}")
+
         if args.resume_decoder_path and Path(args.resume_decoder_path).exists():
             log_msg(f"Resuming decoder from {args.resume_decoder_path}...")
             checkpoint = torch.load(args.resume_decoder_path, map_location=DEVICE)
@@ -151,7 +154,7 @@ def train_e2e(args):
 
     log_msg("Starting training...")
 
-    for epoch in range(args.num_epochs):
+    for epoch in range(start_epoch, args.num_epochs):
         log_msg(f"Starting epoch {epoch + 1}...")
         epoch_task_loss = 0
 
