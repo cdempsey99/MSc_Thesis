@@ -117,11 +117,37 @@ def train_e2e(args):
 
     criterion = nn.CrossEntropyLoss(ignore_index=0)
 
-    # 6. Training loop
-    best_val_loss = float('inf')
-    loss_history = {"train": [], "val": []}
     runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
     os.makedirs(runs_dir, exist_ok=True)
+
+    # 6. Resume Logic
+    start_epoch = 0
+    if args.resume:
+        if args.resume_decoder_path and Path(args.resume_decoder_path).exists():
+            log_msg(f"Resuming decoder from {args.resume_decoder_path}...")
+            checkpoint = torch.load(args.resume_decoder_path, map_location=DEVICE)
+            decoder.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            log_msg("Decoder weights loaded successfully")
+
+        if args.resume_lora_path and Path(args.resume_lora_path).exists():
+            log_msg(f"Resuming LoRA weights from {args.resume_lora_path}...")
+            lora_encoder.load_adapter(args.resume_lora_path, adapter_name="default")
+            log_msg("LoRA weights loaded successfully")
+
+        start_epoch = args.resume_epoch
+
+        loss_path = os.path.join(runs_dir, f"{args.run_name}_loss_history.json")
+        if os.path.exists(loss_path):
+            with open(loss_path) as f:
+                loss_history = json.load(f)
+            log_msg(f"Loss history loaded — {len(loss_history['train'])} epochs so far")
+
+        log_msg(f"Resuming from epoch {start_epoch + 1}")
+
+    # 7. Training loop
+    best_val_loss = float('inf')
+    loss_history = {"train": [], "val": []}
 
     log_msg("Starting training...")
 
@@ -366,6 +392,11 @@ if __name__ == "__main__":
 
     # Misc
     parser.add_argument("--run_name", type=str, default="e2e_run")
+
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--resume_decoder_path", type=str, default=None)
+    parser.add_argument("--resume_lora_path", type=str, default=None)
+    parser.add_argument("--resume_epoch", type=int, default=0)
 
     args = parser.parse_args()
     train_e2e(args)
