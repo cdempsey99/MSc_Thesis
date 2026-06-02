@@ -35,6 +35,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def train_e2e(args):
     run_name = f"{args.run_name}_{time.strftime('%Y%m%d_%H%M')}"
     log_msg(f"Run name: {run_name}")
+    log_msg(f"Running E2E training with inputs:\n {vars(args)}")
 
     # 1. Data discovery
     data_dir = Path(args.data_dir)
