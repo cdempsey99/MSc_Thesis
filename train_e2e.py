@@ -12,8 +12,11 @@ import random
 import numpy as np
 import os
 import gc
-from utils.misc import get_ece
+import matplotlib.pyplot as plt
+import rasterio
+from rasterio.windows import Window
 
+from utils.misc import get_ece
 from utils.dataset_e2e import FBPRawDataset
 from utils.misc import log_msg, save_checkpoint
 from utils.visualisation import plot_loss_curves
@@ -23,6 +26,8 @@ from models.lora_encoder import (
     get_encoder_representation_grad,
     save_lora_weights
 )
+from utils.visualisation import *
+from utils.misc import get_decoder_output_maps
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -347,6 +352,12 @@ def evaluate_test_set_e2e(base_encoder, lora_encoder, decoder, test_loader, crit
     all_conf_global = []
     patch_count = 0
 
+    vis_global_indices = set(random.sample(
+        range(len(test_loader.dataset)),
+        min(3, len(test_loader.dataset))
+    ))
+    vis_count = 0
+
     with torch.no_grad():
         for batch_idx, (test_imgs, test_masks) in enumerate(test_loader):
             test_imgs = test_imgs.to(DEVICE)
@@ -362,6 +373,48 @@ def evaluate_test_set_e2e(base_encoder, lora_encoder, decoder, test_loader, crit
                 conf_maps = torch.max(mean_probs, dim=1)[0].cpu().numpy()
 
             for b in range(test_imgs.shape[0]):
+                for b in range(test_imgs.shape[0]):
+                    g_idx = batch_idx * test_loader.batch_size + b
+
+                    if g_idx in vis_global_indices and vis_count < 3:
+                        img_p, mask_p, x, y = test_loader.dataset.get_patch_info(g_idx)
+                        img_stem = Path(img_p).stem
+
+                        log_msg(f"Vis patch: {img_stem} x={x} y={y}")
+
+                        # Load raw image patch for visualisation
+                        raw_patch = None
+                        if Path(img_p).exists():
+                            with rasterio.open(img_p) as src:
+                                win = Window(x, y, 224, 224)
+                                img = src.read([1, 2, 3], window=win).astype(np.float32)
+                                img = (img - img.min()) / (img.max() - img.min() + 1e-10)
+                                raw_patch = np.transpose(img, (1, 2, 0))
+
+                        single_feat = features[b].unsqueeze(0)
+                        mean_probs_vis, class_map_vis, var_map, ent_map, mi_map = get_decoder_output_maps(
+                            decoder, single_feat, save_name=f"{run_name}_patch_{g_idx}"
+                        )
+                        gt_vis = test_masks[b].squeeze().cpu().numpy()
+
+                        visualise_all_metrics(
+                            class_map=class_map_vis,
+                            variance_map=var_map,
+                            total_entropy=ent_map,
+                            mi_map=mi_map,
+                            ground_truth=gt_vis,
+                            hide_unlabelled=args.hide_unlabelled_pixels,
+                            save_name=f"{run_name}_test_patch_{g_idx}",
+                            raw_patch=raw_patch,
+                            patch_info=f"{img_stem} x={x} y={y}"
+                        )
+                        del mean_probs_vis, class_map_vis, var_map, ent_map, mi_map, raw_patch
+                        plt.close('all')
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                        vis_count += 1
+
+
                 gt = test_masks[b].squeeze().cpu().numpy()
                 if (gt > 0).sum() < 100:
                     continue

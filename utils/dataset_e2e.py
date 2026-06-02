@@ -67,3 +67,7 @@ class FBPRawDataset(Dataset):
         img = torch.rot90(img, k, dims=[1, 2])
         mask = torch.rot90(mask, k, dims=[0, 1])
         return img, mask
+
+    def get_patch_info(self, idx):
+        img_p, mask_p, x, y = self.samples[idx]
+        return img_p, mask_p, x, y
