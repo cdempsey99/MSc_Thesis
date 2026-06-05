@@ -298,6 +298,131 @@ def get_decoder_output_maps(trained_decoder_model, grid_features, save_name="hea
 
     return mean_probs, class_map, variance_map, total_entropy, mutual_info
 
+def endd_loss(student_alphas, teacher_logits, temperature=1.0):
+    """
+    Ensemble Distribution Distillation loss: Dirichlet NLL.
+
+    Trains the student to output Dirichlet parameters α that assign high probability
+    to the teacher ensemble's predictive distributions, capturing not just the mean
+    prediction but the full spread of teacher opinions.
+
+    student_alphas:  [B, K, H, W]  concentration parameters, all > 0
+    teacher_logits:  [M, B, K, H, W]  raw logits from the frozen teacher ensemble
+    temperature:     T applied to teacher logits before softmax; anneal from T_start→1
+                     to soften targets early in training for stability
+
+    Returns: scalar mean NLL
+    """
+    M = teacher_logits.shape[0]
+
+    with torch.no_grad():
+        teacher_probs = torch.softmax(teacher_logits / temperature, dim=2)  # [M, B, K, H, W]
+
+    alpha = student_alphas.clamp(min=1e-6)   # [B, K, H, W]
+    alpha0 = alpha.sum(dim=1)                # [B, H, W]
+
+    # Log-normaliser: lgamma(Σα_k) - Σ lgamma(α_k)  →  [B, H, W]
+    log_norm = torch.lgamma(alpha0) - torch.lgamma(alpha).sum(dim=1)
+
+    # Expected log-likelihood averaged over M teachers
+    # Σ_k (α_k - 1) * log(π_m,k), summed over K, averaged over M  →  [B, H, W]
+    log_teacher = torch.log(teacher_probs + 1e-10)              # [M, B, K, H, W]
+    ll_terms = ((alpha.unsqueeze(0) - 1) * log_teacher).sum(dim=2).mean(dim=0)  # [B, H, W]
+
+    return (-(log_norm + ll_terms)).mean()
+
+
+def evaluate_student_test_set(student_model, test_loader, args, run_name="student_test"):
+    """
+    Evaluate a trained StudentHead on the test split.
+    The student outputs Dirichlet alphas [B, K, H, W]; class predictions come from
+    the Dirichlet mean α / Σα_k, and confidence from its max value.
+    """
+    student_model.eval()
+
+    all_preds_global = []
+    all_gts_global = []
+    all_conf_global = []
+    patch_count = 0
+
+    vis_global_indices = set(random.sample(
+        range(len(test_loader.dataset)),
+        min(3, len(test_loader.dataset))
+    ))
+    vis_count = 0
+
+    with torch.no_grad():
+        for batch_idx, (test_features, test_masks) in enumerate(test_loader):
+            test_features = test_features.to(DEVICE)
+
+            alphas = student_model(test_features)                        # [B, K, H, W]
+            mean_probs = alphas / alphas.sum(dim=1, keepdim=True)       # Dirichlet mean
+            class_maps = torch.argmax(mean_probs, dim=1).cpu().numpy()  # [B, H, W]
+            conf_maps = torch.max(mean_probs, dim=1)[0].cpu().numpy()   # [B, H, W]
+
+            if vis_count < 3:
+                entropy_maps = (-mean_probs * torch.log(mean_probs + 1e-10)).sum(dim=1)  # [B, H, W]
+
+            for b in range(test_features.shape[0]):
+                g_idx = batch_idx * test_loader.batch_size + b
+                gt = test_masks[b].squeeze().cpu().numpy()
+
+                if g_idx in vis_global_indices and vis_count < 3:
+                    ent_map = entropy_maps[b].cpu().numpy()
+                    zero_map = np.zeros_like(ent_map)
+                    visualise_all_metrics(
+                        class_map=class_maps[b],
+                        variance_map=zero_map,
+                        total_entropy=torch.tensor(ent_map),
+                        mi_map=torch.zeros_like(torch.tensor(ent_map)),
+                        ground_truth=gt,
+                        hide_unlabelled=args.hide_unlabelled_pixels,
+                        save_name=f"{run_name}_patch_{g_idx}",
+                    )
+                    plt.close('all')
+                    vis_count += 1
+
+                if (gt > 0).sum() < 100:
+                    continue
+                mask = gt > 0
+                all_preds_global.append(class_maps[b][mask])
+                all_gts_global.append(gt[mask])
+                all_conf_global.append(conf_maps[b][mask])
+                patch_count += 1
+
+    all_preds_arr = np.concatenate(all_preds_global)
+    all_gts_arr = np.concatenate(all_gts_global)
+    all_conf_arr = np.concatenate(all_conf_global)
+
+    global_miou = jaccard_score(all_gts_arr, all_preds_arr, average="macro", labels=np.unique(all_gts_arr))
+    global_acc = np.mean(all_preds_arr == all_gts_arr)
+    global_ece = get_ece(all_preds_arr, all_gts_arr, all_conf_arr)
+    per_class_iou = jaccard_score(all_gts_arr, all_preds_arr, average=None, labels=list(range(1, 25)))
+
+    log_msg(f"STUDENT TEST RESULTS ({patch_count} patches):")
+    log_msg(f"Global mIoU: {global_miou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f}")
+    log_msg("Per-class IoU:")
+    for class_idx, iou in enumerate(per_class_iou):
+        log_msg(f"  {FBP_CLASSES[class_idx + 1]}: {iou:.4f}")
+
+    runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
+    os.makedirs(runs_dir, exist_ok=True)
+    results = {
+        "run_name": run_name,
+        "global_miou": float(global_miou),
+        "global_accuracy": float(global_acc),
+        "global_ece": float(global_ece),
+        "num_patches": patch_count,
+        "per_class_iou": {FBP_CLASSES[i + 1]: float(iou) for i, iou in enumerate(per_class_iou)}
+    }
+    results_path = os.path.join(runs_dir, f"{run_name}_results.json")
+    with open(results_path, "w") as f:
+        json.dump(results, f, indent=2)
+    log_msg(f"Student results saved to {results_path}")
+
+    return results
+
+
 # Unsure if this is a good idea or not
 # Fn to make sure we initialise weights with very small values to ensure some class doesn't accidentally start off as
 # being picked and then the model becomes confident on this class only because of a random fluctuation
