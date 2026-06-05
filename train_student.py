@@ -177,7 +177,7 @@ def train_student(teacher_model, student_model, train_loader, val_loader, args, 
 
 def run_student_training(args):
     version_str = f"patch{args.patch_size}_stride{args.stride}"
-    embedding_dir = Path(args.data_dir) / "embeddings" / "clay_v1" / version_str
+    embedding_dir = BASE_OUT / "embeddings" / "clay_v1" / version_str
 
     meta_path = embedding_dir / "metadata.json"
     if not meta_path.exists():
