@@ -21,10 +21,9 @@ from utils.dataset_e2e import FBPRawDataset
 from utils.misc import log_msg, save_checkpoint
 from utils.visualisation import plot_loss_curves
 from models.ensemble import DecoderEnsemble
-from models.lora_encoder import (
-    initialize_clay_encoder_with_lora,
-    get_encoder_representation_grad,
-    save_lora_weights
+from models.encoder import (
+    initialize_clay_encoder_partial_unfreeze,
+    get_encoder_representation_partial
 )
 from utils.visualisation import *
 from utils.misc import get_decoder_output_maps
@@ -74,17 +73,17 @@ def train_e2e(args):
     # 3. Datasets and loaders
     log_msg("Initialising datasets...")
     train_ds = FBPRawDataset(train_imgs, train_masks,
-                              patch_size=args.patch_size,
-                              stride=args.stride,
-                              augment=True)
+                             patch_size=args.patch_size,
+                             stride=args.stride,
+                             augment=True)
     val_ds = FBPRawDataset(val_imgs, val_masks,
+                           patch_size=args.patch_size,
+                           stride=args.stride,
+                           augment=False)
+    test_ds = FBPRawDataset(test_imgs, test_masks,
                             patch_size=args.patch_size,
                             stride=args.stride,
                             augment=False)
-    test_ds = FBPRawDataset(test_imgs, test_masks,
-                             patch_size=args.patch_size,
-                             stride=args.stride,
-                             augment=False)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
                               shuffle=True, num_workers=4, pin_memory=True)
@@ -93,15 +92,11 @@ def train_e2e(args):
     test_loader = DataLoader(test_ds, batch_size=args.batch_size,
                              shuffle=False, num_workers=4, pin_memory=True)
 
-    # 4. Initialise LoRA encoder and decoder ensemble
-    log_msg("Initialising LoRA encoder...")
-    base_encoder, lora_encoder = initialize_clay_encoder_with_lora(
-        r=args.lora_rank,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout
+    # 4. Initialise partially unfrozen encoder and decoder ensemble
+    log_msg(f"Initialising encoder with {args.n_unfrozen_blocks} unfrozen blocks...")
+    encoder_model = initialize_clay_encoder_partial_unfreeze(
+        n_unfrozen_blocks=args.n_unfrozen_blocks
     )
-    base_encoder.to(DEVICE)
-    lora_encoder.to(DEVICE)
 
     log_msg("Initialising decoder ensemble...")
     decoder = DecoderEnsemble(
@@ -112,9 +107,10 @@ def train_e2e(args):
     )
     decoder.to(DEVICE)
 
-    # 5. Optimiser — separate LR for encoder and decoder
+    # 5. Optimiser — separate LR for unfrozen encoder params and decoder
+    trainable_encoder_params = [p for p in encoder_model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW([
-        {'params': lora_encoder.parameters(), 'lr': args.lr_encoder, 'weight_decay': 0.01},
+        {'params': trainable_encoder_params, 'lr': args.lr_encoder, 'weight_decay': 0.01},
         {'params': decoder.parameters(), 'lr': args.lr_decoder, 'weight_decay': 0.05}
     ])
 
@@ -123,32 +119,33 @@ def train_e2e(args):
     )
 
     scaler = torch.cuda.amp.GradScaler()
-
     criterion = nn.CrossEntropyLoss(ignore_index=0)
 
     runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
     os.makedirs(runs_dir, exist_ok=True)
 
-    # 6. Resume Logic
+    # 6. Resume logic
     start_epoch = 0
+    loss_history = {"train": [], "val": []}
+
     if args.resume:
-        log_msg(f"Resume decoder path: {args.resume_decoder_path}")
-        log_msg(f"Path exists: {Path(args.resume_decoder_path).exists() if args.resume_decoder_path else 'None'}")
+        decoder_ckpt = Path(args.resume_decoder_path) if args.resume_decoder_path else None
+        encoder_ckpt = Path(args.resume_encoder_path) if args.resume_encoder_path else None
 
-        if args.resume_decoder_path and Path(args.resume_decoder_path).exists():
-            log_msg(f"Resuming decoder from {args.resume_decoder_path}...")
-            checkpoint = torch.load(args.resume_decoder_path, map_location=DEVICE)
-            decoder.load_state_dict(checkpoint['model_state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            log_msg("Decoder weights loaded successfully")
+        if decoder_ckpt and decoder_ckpt.exists():
+            log_msg(f"Resuming decoder from {decoder_ckpt}...")
+            ckpt = torch.load(decoder_ckpt, map_location=DEVICE)
+            decoder.load_state_dict(ckpt['model_state_dict'])
+            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            log_msg("Decoder weights loaded.")
 
-        if args.resume_lora_path and Path(args.resume_lora_path).exists():
-            log_msg(f"Resuming LoRA weights from {args.resume_lora_path}...")
-            lora_encoder.load_adapter(args.resume_lora_path, adapter_name="default")
-            log_msg("LoRA weights loaded successfully")
+        if encoder_ckpt and encoder_ckpt.exists():
+            log_msg(f"Resuming encoder from {encoder_ckpt}...")
+            enc_ckpt = torch.load(encoder_ckpt, map_location=DEVICE)
+            encoder_model.load_state_dict(enc_ckpt['encoder_state_dict'], strict=False)
+            log_msg("Encoder weights loaded.")
 
         start_epoch = args.resume_epoch
-
         loss_path = os.path.join(runs_dir, f"{args.run_name}_loss_history.json")
         if os.path.exists(loss_path):
             with open(loss_path) as f:
@@ -159,46 +156,14 @@ def train_e2e(args):
 
     # 7. Training loop
     best_val_loss = float('inf')
-    loss_history = {"train": [], "val": []}
-
     log_msg("Starting training...")
 
     for epoch in range(start_epoch, args.num_epochs):
         log_msg(f"Starting epoch {epoch + 1}...")
         epoch_task_loss = 0
 
-        lora_encoder.train()
+        encoder_model.train()
         decoder.train()
-
-        """
-        for batch_imgs, batch_masks in train_loader:
-            optimizer.zero_grad()
-
-            batch_imgs = batch_imgs.to(DEVICE)
-            batch_masks = batch_masks.to(DEVICE).long()
-
-            # Forward pass through LoRA encoder
-            features = get_encoder_representation_grad(
-                batch_imgs, base_encoder, lora_encoder
-            )  # [B, 1024, 28, 28]
-
-            # Forward pass through decoder ensemble
-            all_preds = decoder(features)  # [M, B, 25, 224, 224]
-
-            # Loss — per head + mean
-            total_task_loss = 0
-            for head_idx in range(decoder.M):
-                total_task_loss += criterion(all_preds[head_idx], batch_masks)
-
-            mean_logits = all_preds.mean(dim=0)
-            total_task_loss += criterion(mean_logits, batch_masks)
-            task_loss = total_task_loss / (decoder.M + 1)
-
-            task_loss.backward()
-            optimizer.step()
-
-            epoch_task_loss += task_loss.item()
-            """
 
         for batch_imgs, batch_masks in train_loader:
             optimizer.zero_grad()
@@ -206,9 +171,7 @@ def train_e2e(args):
             batch_masks = batch_masks.to(DEVICE).long()
 
             with torch.cuda.amp.autocast():
-                features = get_encoder_representation_grad(
-                    batch_imgs, base_encoder, lora_encoder
-                )
+                features = get_encoder_representation_partial(batch_imgs, encoder_model)
                 all_preds = decoder(features)
 
                 total_task_loss = 0
@@ -229,28 +192,9 @@ def train_e2e(args):
         log_msg(f"Epoch [{epoch + 1}/{args.num_epochs}] - Task Loss: {avg_task:.4f}")
 
         # Validation
-        lora_encoder.eval()
+        encoder_model.eval()
         decoder.eval()
         val_loss = 0
-
-        """
-        with torch.no_grad():
-            for v_imgs, v_masks in val_loader:
-                v_imgs = v_imgs.to(DEVICE)
-                v_masks = v_masks.to(DEVICE).long()
-
-                features = get_encoder_representation_grad(
-                    v_imgs, base_encoder, lora_encoder
-                )
-                all_preds = decoder(features)
-
-                total_val_loss = 0
-                for head_idx in range(decoder.M):
-                    total_val_loss += criterion(all_preds[head_idx], v_masks)
-                mean_logits = all_preds.mean(dim=0)
-                total_val_loss += criterion(mean_logits, v_masks)
-                val_loss += (total_val_loss / (decoder.M + 1)).item()
-        """
 
         with torch.no_grad():
             for v_imgs, v_masks in val_loader:
@@ -258,9 +202,7 @@ def train_e2e(args):
                 v_masks = v_masks.to(DEVICE).long()
 
                 with torch.cuda.amp.autocast():
-                    features = get_encoder_representation_grad(
-                        v_imgs, base_encoder, lora_encoder
-                    )
+                    features = get_encoder_representation_partial(v_imgs, encoder_model)
                     all_preds = decoder(features)
 
                     total_val_loss = 0
@@ -276,29 +218,29 @@ def train_e2e(args):
         loss_history["val"].append(avg_val_loss)
         log_msg(f"Validation Loss: {avg_val_loss:.8f}")
 
-        # Best model saving
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            # Save decoder weights
             save_checkpoint({
                 'epoch': epoch + 1,
                 'model_state_dict': decoder.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
             }, str(CHECKPOINT_DIR), filename=f"{run_name}_best_decoder.pth")
-            # Save LoRA weights
-            save_lora_weights(lora_encoder,
-                              str(CHECKPOINT_DIR / f"{run_name}_best_lora"))
+            save_checkpoint({
+                'epoch': epoch + 1,
+                'encoder_state_dict': encoder_model.state_dict(),
+            }, str(CHECKPOINT_DIR), filename=f"{run_name}_best_encoder.pth")
             log_msg(f"New best val loss {best_val_loss:.6f} — saved best model")
 
-        # Periodic save every 5 epochs
         if (epoch + 1) % 5 == 0:
             save_checkpoint({
                 'epoch': epoch + 1,
                 'model_state_dict': decoder.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
             }, str(CHECKPOINT_DIR), filename=f"{run_name}_last_decoder.pth")
-            save_lora_weights(lora_encoder,
-                              str(CHECKPOINT_DIR / f"{run_name}_last_lora"))
+            save_checkpoint({
+                'epoch': epoch + 1,
+                'encoder_state_dict': encoder_model.state_dict(),
+            }, str(CHECKPOINT_DIR), filename=f"{run_name}_last_encoder.pth")
             loss_path = os.path.join(runs_dir, f"{run_name}_loss_history.json")
             with open(loss_path, "w") as f:
                 json.dump(loss_history, f, indent=2)
@@ -306,46 +248,45 @@ def train_e2e(args):
         scheduler.step()
 
     # Final save
+    timestamp = time.strftime("%Y%m%d_%H%M")
     save_checkpoint({
         'epoch': args.num_epochs,
         'model_state_dict': decoder.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
-    }, str(CHECKPOINT_DIR), filename=f"{run_name}_final_decoder.pth")
-    save_lora_weights(lora_encoder, str(CHECKPOINT_DIR / f"{run_name}_final_lora"))
+    }, str(CHECKPOINT_DIR), filename=f"{run_name}_final_decoder_{timestamp}.pth")
+    save_checkpoint({
+        'epoch': args.num_epochs,
+        'encoder_state_dict': encoder_model.state_dict(),
+    }, str(CHECKPOINT_DIR), filename=f"{run_name}_final_encoder_{timestamp}.pth")
 
     loss_path = os.path.join(runs_dir, f"{run_name}_loss_history.json")
     with open(loss_path, "w") as f:
         json.dump(loss_history, f, indent=2)
 
     log_msg("Training completed.")
-
-    # Plot loss curves
     plot_loss_curves(loss_path, save_name=f"{run_name}_loss_curves")
 
     # Load best model for evaluation
     best_decoder_path = CHECKPOINT_DIR / f"{run_name}_best_decoder.pth"
     if best_decoder_path.exists():
         log_msg("Loading best decoder for evaluation...")
-        checkpoint = torch.load(best_decoder_path, map_location=DEVICE)
-        decoder.load_state_dict(checkpoint['model_state_dict'])
+        ckpt = torch.load(best_decoder_path, map_location=DEVICE)
+        decoder.load_state_dict(ckpt['model_state_dict'])
 
-    # Evaluation — need a wrapper that runs encoder first
+    best_encoder_path = CHECKPOINT_DIR / f"{run_name}_best_encoder.pth"
+    if best_encoder_path.exists():
+        log_msg("Loading best encoder for evaluation...")
+        enc_ckpt = torch.load(best_encoder_path, map_location=DEVICE)
+        encoder_model.load_state_dict(enc_ckpt['encoder_state_dict'], strict=False)
+
     log_msg("Running evaluation...")
-    results = evaluate_test_set_e2e(
-        base_encoder, lora_encoder, decoder,
-        test_loader, criterion, args, run_name
-    )
+    evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, run_name)
 
-    return decoder, lora_encoder
+    return decoder, encoder_model
 
 
-def evaluate_test_set_e2e(base_encoder, lora_encoder, decoder, test_loader, criterion, args, run_name):
-    """
-    Evaluation for end-to-end model — runs raw images through
-    LoRA encoder before decoder evaluation.
-    """
-    base_encoder.eval()
-    lora_encoder.eval()
+def evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, run_name):
+    encoder_model.eval()
     decoder.eval()
 
     all_preds_global = []
@@ -364,9 +305,7 @@ def evaluate_test_set_e2e(base_encoder, lora_encoder, decoder, test_loader, crit
             test_imgs = test_imgs.to(DEVICE)
 
             with torch.cuda.amp.autocast():
-                features = get_encoder_representation_grad(
-                    test_imgs, base_encoder, lora_encoder
-                )
+                features = get_encoder_representation_partial(test_imgs, encoder_model)
                 all_preds = decoder(features)
                 mean_logits = all_preds.mean(dim=0)
                 mean_probs = torch.softmax(mean_logits, dim=1)
@@ -374,47 +313,44 @@ def evaluate_test_set_e2e(base_encoder, lora_encoder, decoder, test_loader, crit
                 conf_maps = torch.max(mean_probs, dim=1)[0].cpu().numpy()
 
             for b in range(test_imgs.shape[0]):
-                for b in range(test_imgs.shape[0]):
-                    g_idx = batch_idx * test_loader.batch_size + b
+                g_idx = batch_idx * test_loader.batch_size + b
 
-                    if g_idx in vis_global_indices and vis_count < 3:
-                        img_p, mask_p, x, y = test_loader.dataset.get_patch_info(g_idx)
-                        img_stem = Path(img_p).stem
+                if g_idx in vis_global_indices and vis_count < 3:
+                    img_p, mask_p, x, y = test_loader.dataset.get_patch_info(g_idx)
+                    img_stem = Path(img_p).stem
 
-                        log_msg(f"Vis patch: {img_stem} x={x} y={y}")
+                    log_msg(f"Vis patch: {img_stem} x={x} y={y}")
 
-                        # Load raw image patch for visualisation
-                        raw_patch = None
-                        if Path(img_p).exists():
-                            with rasterio.open(img_p) as src:
-                                win = Window(x, y, 224, 224)
-                                img = src.read([1, 2, 3], window=win).astype(np.float32)
-                                img = (img - img.min()) / (img.max() - img.min() + 1e-10)
-                                raw_patch = np.transpose(img, (1, 2, 0))
+                    raw_patch = None
+                    if Path(img_p).exists():
+                        with rasterio.open(img_p) as src:
+                            win = Window(x, y, 224, 224)
+                            img = src.read([1, 2, 3], window=win).astype(np.float32)
+                            img = (img - img.min()) / (img.max() - img.min() + 1e-10)
+                            raw_patch = np.transpose(img, (1, 2, 0))
 
-                        single_feat = features[b].unsqueeze(0)
-                        mean_probs_vis, class_map_vis, var_map, ent_map, mi_map = get_decoder_output_maps(
-                            decoder, single_feat, save_name=f"{run_name}_patch_{g_idx}"
-                        )
-                        gt_vis = test_masks[b].squeeze().cpu().numpy()
+                    single_feat = features[b].unsqueeze(0)
+                    mean_probs_vis, class_map_vis, var_map, ent_map, mi_map = get_decoder_output_maps(
+                        decoder, single_feat, save_name=f"{run_name}_patch_{g_idx}"
+                    )
+                    gt_vis = test_masks[b].squeeze().cpu().numpy()
 
-                        visualise_all_metrics(
-                            class_map=class_map_vis,
-                            variance_map=var_map,
-                            total_entropy=ent_map,
-                            mi_map=mi_map,
-                            ground_truth=gt_vis,
-                            hide_unlabelled=args.hide_unlabelled_pixels,
-                            save_name=f"{run_name}_test_patch_{g_idx}",
-                            raw_patch=raw_patch,
-                            patch_info=f"{img_stem} x={x} y={y}"
-                        )
-                        del mean_probs_vis, class_map_vis, var_map, ent_map, mi_map, raw_patch
-                        plt.close('all')
-                        torch.cuda.empty_cache()
-                        gc.collect()
-                        vis_count += 1
-
+                    visualise_all_metrics(
+                        class_map=class_map_vis,
+                        variance_map=var_map,
+                        total_entropy=ent_map,
+                        mi_map=mi_map,
+                        ground_truth=gt_vis,
+                        hide_unlabelled=args.hide_unlabelled_pixels,
+                        save_name=f"{run_name}_test_patch_{g_idx}",
+                        raw_patch=raw_patch,
+                        patch_info=f"{img_stem} x={x} y={y}"
+                    )
+                    del mean_probs_vis, class_map_vis, var_map, ent_map, mi_map, raw_patch
+                    plt.close('all')
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    vis_count += 1
 
                 gt = test_masks[b].squeeze().cpu().numpy()
                 if (gt > 0).sum() < 100:
@@ -433,7 +369,6 @@ def evaluate_test_set_e2e(base_encoder, lora_encoder, decoder, test_loader, crit
                                 average="macro", labels=np.unique(all_gts_arr),
                                 zero_division=0)
     global_acc = np.mean(all_preds_arr == all_gts_arr)
-
     global_ece = get_ece(all_preds_arr, all_gts_arr, all_conf_arr)
 
     log_msg(f"FINAL TEST RESULTS ({patch_count} patches):")
@@ -465,7 +400,7 @@ def evaluate_test_set_e2e(base_encoder, lora_encoder, decoder, test_loader, crit
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="End-to-end LoRA encoder + decoder training")
+    parser = argparse.ArgumentParser(description="End-to-end partial-unfreeze encoder + decoder training")
 
     # Paths
     parser.add_argument("--data_dir", type=str, required=True)
@@ -481,15 +416,15 @@ if __name__ == "__main__":
     parser.add_argument("--decoder_embed_dim", type=int, default=512)
     parser.add_argument("--num_classes", type=int, default=25)
 
-    # LoRA
-    parser.add_argument("--lora_rank", type=int, default=16)
-    parser.add_argument("--lora_alpha", type=int, default=32)
-    parser.add_argument("--lora_dropout", type=float, default=0.1)
+    # Encoder fine-tuning
+    parser.add_argument("--n_unfrozen_blocks", type=int, default=4,
+                        help="Number of final transformer blocks to unfreeze (plus norm layer)")
 
     # Training
     parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--lr_encoder", type=float, default=1e-5)
+    parser.add_argument("--lr_encoder", type=float, default=1e-6,
+                        help="LR for unfrozen encoder blocks — keep low to avoid disrupting Clay features")
     parser.add_argument("--lr_decoder", type=float, default=1e-4)
     parser.add_argument("--hide_unlabelled_pixels", action="store_true")
 
@@ -501,14 +436,11 @@ if __name__ == "__main__":
     parser.add_argument("--lam_orth", type=float, default=0.0)
 
     # Misc
-    parser.add_argument("--run_name", type=str, default="e2e_run")
-
+    parser.add_argument("--run_name", type=str, default="e2e_partial_unfreeze")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--resume_decoder_path", type=str, default=None)
-    parser.add_argument("--resume_lora_path", type=str, default=None)
+    parser.add_argument("--resume_encoder_path", type=str, default=None)
     parser.add_argument("--resume_epoch", type=int, default=0)
 
     args = parser.parse_args()
     train_e2e(args)
-
-

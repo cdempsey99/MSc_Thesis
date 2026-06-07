@@ -60,6 +60,68 @@ def get_encoder_representation(input_tensor, encoder_model):
     return grid_features
 
 
+def initialize_clay_encoder_partial_unfreeze(n_unfrozen_blocks=2):
+    """
+    Loads Clay encoder, freezes all parameters, then unfreezes the last
+    n_unfrozen_blocks transformer blocks and the final LayerNorm.
+    More stable than LoRA on small datasets — pretrained features are
+    mostly preserved, only the top layers adapt.
+    """
+    encoder_model = initialize_clay_encoder()
+    if encoder_model is None:
+        return None
+
+    for param in encoder_model.parameters():
+        param.requires_grad = False
+
+    transformer = encoder_model.model.encoder.transformer
+    total_blocks = len(transformer.layers)
+
+    for block in transformer.layers[total_blocks - n_unfrozen_blocks:]:
+        for param in block.parameters():
+            param.requires_grad = True
+
+    for param in transformer.norm.parameters():
+        param.requires_grad = True
+
+    trainable = sum(p.numel() for p in encoder_model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in encoder_model.parameters())
+    log_msg(f"Partial unfreeze: last {n_unfrozen_blocks}/{total_blocks} blocks + norm | "
+            f"trainable: {trainable:,} / {total:,} ({100 * trainable / total:.3f}%)")
+
+    return encoder_model
+
+
+def get_encoder_representation_partial(input_tensor, encoder_model):
+    """
+    Forward pass through the partially unfrozen encoder with gradients.
+    Patch embedding and positional encoding run under no_grad (always frozen).
+    The transformer runs normally — unfrozen blocks accumulate gradients,
+    frozen blocks do not (requires_grad=False params are skipped by autograd).
+    """
+    waves = torch.tensor([0.842, 0.665, 0.560], dtype=torch.float32).to(DEVICE)
+    input_tensor = input_tensor.to(DEVICE)
+
+    with torch.no_grad():
+        patches, _ = encoder_model.model.encoder.to_patch_embed(input_tensor, waves)
+        if hasattr(encoder_model.model.encoder, "pos_embed"):
+            pos_embed = encoder_model.model.encoder.pos_embed
+            if pos_embed.shape[1] > patches.shape[1]:
+                patches = patches + pos_embed[:, 1:, :]
+            else:
+                patches = patches + pos_embed
+
+    features = encoder_model.model.encoder.transformer(patches)
+
+    if hasattr(encoder_model.model.encoder.transformer, "norm"):
+        features = encoder_model.model.encoder.transformer.norm(features)
+    elif hasattr(encoder_model.model.encoder, "norm"):
+        features = encoder_model.model.encoder.norm(features)
+
+    batch_size = features.shape[0]
+    return features.transpose(1, 2).reshape(batch_size, 1024, 28, 28)
+
+
 def bake_features(loader, encoder_model, mask_dir, image_name):
     """
     Runs the full dataset through the frozen encoder once and saves
