@@ -219,7 +219,7 @@ def run_student_training(args):
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
-    test_loader = DataLoader(test_ds, batch_size=64, shuffle=False, num_workers=0, pin_memory=True)
+    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
 
     # Load teacher ensemble (frozen)
     log_msg(f"Loading teacher ensemble (M={args.teacher_ensemble_size}) from {args.teacher_checkpoint}")
@@ -255,6 +255,10 @@ def run_student_training(args):
         os.path.join(os.getenv("OUT_DIR", "results"), "runs", f"{run_name}_loss_history.json"),
         save_name=f"{run_name}_loss_curves"
     )
+
+    # Free teacher from GPU before evaluation — not needed from here on
+    teacher_model.to("cpu")
+    torch.cuda.empty_cache()
 
     # Load best model for evaluation
     best_model_path = CHECKPOINT_DIR / f"{run_name}_best_model.pth"
