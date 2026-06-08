@@ -162,7 +162,13 @@ def train_e2e(args):
         log_msg(f"Starting epoch {epoch + 1}...")
         epoch_task_loss = 0
 
-        encoder_model.train()
+        # Only unfrozen layers in train mode — frozen blocks stay in eval
+        # so their dropout (if any) is not activated during training
+        encoder_model.eval()
+        transformer = encoder_model.model.encoder.transformer
+        for block in transformer.layers[-args.n_unfrozen_blocks:]:
+            block.train()
+        transformer.norm.train()
         decoder.train()
 
         for batch_imgs, batch_masks in train_loader:
@@ -182,6 +188,12 @@ def train_e2e(args):
                 task_loss = total_task_loss / (decoder.M + 1)
 
             scaler.scale(task_loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in encoder_model.parameters() if p.requires_grad] +
+                list(decoder.parameters()),
+                max_norm=1.0
+            )
             scaler.step(optimizer)
             scaler.update()
 
