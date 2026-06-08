@@ -32,7 +32,7 @@ def log_msg(message):
 
 
 # Aux fn to calculate ECE
-def get_ece(y_pred, y_true, unc_map_flat):
+def get_ece(y_pred, y_true, unc_map_flat, save_name="reliability_diagram"):
 
     # Bin the unc values
     num_bins = 10
@@ -63,7 +63,7 @@ def get_ece(y_pred, y_true, unc_map_flat):
 
             ece += np.abs(bin_accuracy - bin_confidence) * prop_in_bin
 
-    plot_reliability_diagram(bin_accs, bin_props)
+    plot_reliability_diagram(bin_accs, bin_props, save_name=save_name)
 
     return ece
 
@@ -355,26 +355,31 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
         for batch_idx, (test_features, test_masks) in enumerate(test_loader):
             test_features = test_features.to(DEVICE)
 
-            alphas = student_model(test_features)                        # [B, K, H, W]
-            mean_probs = alphas / alphas.sum(dim=1, keepdim=True)       # Dirichlet mean
-            class_maps = torch.argmax(mean_probs, dim=1).cpu().numpy()  # [B, H, W]
-            conf_maps = torch.max(mean_probs, dim=1)[0].cpu().numpy()   # [B, H, W]
+            alphas = student_model(test_features)                          # [B, K, H, W]
+            alpha0 = alphas.sum(dim=1, keepdim=True)                      # [B, 1, H, W]
+            mean_probs = alphas / alpha0                                   # [B, K, H, W]
+            alpha0_sq = alpha0.squeeze(1)                                  # [B, H, W]
 
-            if vis_count < 3:
-                entropy_maps = (-mean_probs * torch.log(mean_probs + 1e-10)).sum(dim=1)  # [B, H, W]
+            class_maps = torch.argmax(mean_probs, dim=1).cpu().numpy()    # [B, H, W]
+            conf_maps = torch.max(mean_probs, dim=1)[0].cpu().numpy()     # [B, H, W]
+
+            # Dirichlet uncertainty decomposition
+            total_entropy = -(mean_probs * torch.log(mean_probs + 1e-10)).sum(dim=1)       # [B, H, W]
+            aleatoric = (torch.digamma(alpha0_sq + 1)
+                         - (mean_probs * torch.digamma(alphas + 1)).sum(dim=1))            # [B, H, W]
+            epistemic = (total_entropy - aleatoric).clamp(min=0)                           # [B, H, W]
 
             for b in range(test_features.shape[0]):
                 g_idx = batch_idx * test_loader.batch_size + b
                 gt = test_masks[b].squeeze().cpu().numpy()
 
                 if g_idx in vis_global_indices and vis_count < 3:
-                    ent_map = entropy_maps[b].cpu().numpy()
-                    zero_map = np.zeros_like(ent_map)
-                    visualise_all_metrics(
+                    visualise_student_uncertainty(
                         class_map=class_maps[b],
-                        variance_map=zero_map,
-                        total_entropy=torch.tensor(ent_map),
-                        mi_map=torch.zeros_like(torch.tensor(ent_map)),
+                        total_entropy=total_entropy[b],
+                        aleatoric=aleatoric[b],
+                        epistemic=epistemic[b],
+                        alpha0_map=alpha0_sq[b],
                         ground_truth=gt,
                         hide_unlabelled=args.hide_unlabelled_pixels,
                         save_name=f"{run_name}_patch_{g_idx}",
@@ -396,7 +401,7 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
 
     global_miou = jaccard_score(all_gts_arr, all_preds_arr, average="macro", labels=np.unique(all_gts_arr))
     global_acc = np.mean(all_preds_arr == all_gts_arr)
-    global_ece = get_ece(all_preds_arr, all_gts_arr, all_conf_arr)
+    global_ece = get_ece(all_preds_arr, all_gts_arr, all_conf_arr, save_name=f"{run_name}_reliability")
     per_class_iou = jaccard_score(all_gts_arr, all_preds_arr, average=None, labels=list(range(1, 25)))
 
     log_msg(f"STUDENT TEST RESULTS ({patch_count} patches):")

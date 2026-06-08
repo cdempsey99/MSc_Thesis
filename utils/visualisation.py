@@ -266,6 +266,65 @@ def plot_lambda_results(lams, mious, overall_accs, avg_uncs, save_name="lambda_c
     plt.savefig(os.path.join("results/lambda_curves", save_name), bbox_inches='tight')
     # plt.show()
 
+def visualise_student_uncertainty(class_map, total_entropy, aleatoric, epistemic, alpha0_map,
+                                   ground_truth, hide_unlabelled, save_name="student_unc"):
+    """
+    6-panel Dirichlet uncertainty figure for the EnDD student:
+    GT | Prediction | Total H(p̄) | Aleatoric E[H[p]] | Epistemic MI | Concentration α₀
+    """
+    save_path = os.path.join(BASE_OUT, "metrics")
+    ensure_dir(save_path)
+
+    to_np = lambda x: x.cpu().numpy() if hasattr(x, 'cpu') else x
+
+    class_map    = np.squeeze(to_np(class_map))
+    total_entropy = np.squeeze(to_np(total_entropy))
+    aleatoric    = np.squeeze(to_np(aleatoric))
+    epistemic    = np.squeeze(to_np(epistemic))
+    alpha0_map   = np.squeeze(to_np(alpha0_map))
+    ground_truth = np.squeeze(to_np(ground_truth))
+
+    if hide_unlabelled:
+        class_map = np.ma.masked_where(ground_truth == 0, class_map)
+
+    fig, axes = plt.subplots(1, 6, figsize=(36, 5))
+
+    axes[0].imshow(ground_truth, cmap='tab20', vmin=0, vmax=24)
+    axes[0].set_title("Ground Truth")
+    axes[0].axis('off')
+
+    axes[1].imshow(class_map, cmap='tab20', vmin=0, vmax=24)
+    axes[1].set_title("Predicted Classes")
+    axes[1].axis('off')
+
+    im2 = axes[2].imshow(total_entropy, cmap='magma', vmin=0, vmax=3.22)
+    axes[2].set_title("Total Entropy H(p̄)")
+    fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+    axes[2].axis('off')
+
+    im3 = axes[3].imshow(aleatoric, cmap='magma')
+    axes[3].set_title("Aleatoric E[H[p]]")
+    fig.colorbar(im3, ax=axes[3], fraction=0.046, pad=0.04)
+    axes[3].axis('off')
+
+    im4 = axes[4].imshow(epistemic, cmap='magma')
+    axes[4].set_title("Epistemic MI")
+    fig.colorbar(im4, ax=axes[4], fraction=0.046, pad=0.04)
+    axes[4].axis('off')
+
+    # alpha0 uses viridis (high = certain) to visually distinguish from the uncertainty maps
+    im5 = axes[5].imshow(alpha0_map, cmap='viridis')
+    axes[5].set_title("Concentration α₀")
+    fig.colorbar(im5, ax=axes[5], fraction=0.046, pad=0.04)
+    axes[5].axis('off')
+
+    plt.tight_layout()
+    current_time = datetime.now().strftime("%Y%m%d%H%M")
+    full_file_path = os.path.join(save_path, f"{save_name}_{current_time}.png")
+    plt.savefig(full_file_path, bbox_inches='tight', dpi=300)
+    plt.close('all')
+
+
 def plot_loss_curves(loss_history_path, save_name="loss_curves"):
     save_path = os.path.join(BASE_OUT, "losses")
     ensure_dir(save_path)
