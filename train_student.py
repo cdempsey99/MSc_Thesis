@@ -187,7 +187,10 @@ def run_student_training(args):
     if meta["patch_size"] != args.patch_size:
         raise ValueError(f"Metadata mismatch: data extracted with patch {meta['patch_size']}")
 
-    run_name = f"{args.run_name}_{time.strftime('%Y%m%d_%H%M')}"
+    if args.resume:
+        run_name = args.run_name  # use exact name to locate existing checkpoint
+    else:
+        run_name = f"{args.run_name}_{time.strftime('%Y%m%d_%H%M')}"
     log_msg(f"Run name: {run_name}")
 
     # Identical split to train_decoders.py — same seed and ordering
