@@ -374,6 +374,22 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
                 gt = test_masks[b].squeeze().cpu().numpy()
 
                 if g_idx in vis_global_indices and vis_count < 3:
+                    img_pt_path, local_idx = test_loader.dataset.get_patch_info(g_idx)
+                    img_stem = Path(img_pt_path).stem.replace('_embeddings', '')
+                    data_dir = Path(img_pt_path).parent.parent.parent.parent.parent / "data"
+                    raw_img_path = data_dir / f"{img_stem}.tif"
+
+                    patches_per_row = len(range(0, 7300 - 224, args.stride))
+                    x = (local_idx % patches_per_row) * args.stride
+                    y = (local_idx // patches_per_row) * args.stride
+
+                    raw_patch = None
+                    if raw_img_path.exists():
+                        with rasterio.open(raw_img_path) as src:
+                            img = src.read([1, 2, 3], window=Window(x, y, 224, 224)).astype(np.float32)
+                            img = (img - img.min()) / (img.max() - img.min() + 1e-10)
+                            raw_patch = np.transpose(img, (1, 2, 0))
+
                     visualise_student_uncertainty(
                         class_map=class_maps[b],
                         total_entropy=total_entropy[b],
@@ -383,6 +399,8 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
                         ground_truth=gt,
                         hide_unlabelled=args.hide_unlabelled_pixels,
                         save_name=f"{run_name}_patch_{g_idx}",
+                        raw_patch=raw_patch,
+                        patch_info=f"{img_stem} x={x} y={y}",
                     )
                     plt.close('all')
                     vis_count += 1

@@ -267,56 +267,72 @@ def plot_lambda_results(lams, mious, overall_accs, avg_uncs, save_name="lambda_c
     # plt.show()
 
 def visualise_student_uncertainty(class_map, total_entropy, aleatoric, epistemic, alpha0_map,
-                                   ground_truth, hide_unlabelled, save_name="student_unc"):
+                                   ground_truth, hide_unlabelled, save_name="student_unc",
+                                   raw_patch=None, patch_info=""):
     """
-    6-panel Dirichlet uncertainty figure for the EnDD student:
-    GT | Prediction | Total H(p̄) | Aleatoric E[H[p]] | Epistemic MI | Concentration α₀
+    Dirichlet uncertainty figure for the EnDD student.
+    6 panels by default; 7 when raw_patch is provided (prepended as first panel):
+    [Raw Image] | GT | Prediction | Total H(p̄) | Aleatoric E[H[p]] | Epistemic MI | Concentration α₀
     """
     save_path = os.path.join(BASE_OUT, "metrics")
     ensure_dir(save_path)
 
     to_np = lambda x: x.cpu().numpy() if hasattr(x, 'cpu') else x
 
-    class_map    = np.squeeze(to_np(class_map))
+    class_map     = np.squeeze(to_np(class_map))
     total_entropy = np.squeeze(to_np(total_entropy))
-    aleatoric    = np.squeeze(to_np(aleatoric))
-    epistemic    = np.squeeze(to_np(epistemic))
-    alpha0_map   = np.squeeze(to_np(alpha0_map))
-    ground_truth = np.squeeze(to_np(ground_truth))
+    aleatoric     = np.squeeze(to_np(aleatoric))
+    epistemic     = np.squeeze(to_np(epistemic))
+    alpha0_map    = np.squeeze(to_np(alpha0_map))
+    ground_truth  = np.squeeze(to_np(ground_truth))
 
     if hide_unlabelled:
         class_map = np.ma.masked_where(ground_truth == 0, class_map)
 
-    fig, axes = plt.subplots(1, 6, figsize=(36, 5))
+    n_panels = 7 if raw_patch is not None else 6
+    fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 5))
+    panel = 0
 
-    axes[0].imshow(ground_truth, cmap='tab20', vmin=0, vmax=24)
-    axes[0].set_title("Ground Truth")
-    axes[0].axis('off')
+    if raw_patch is not None:
+        axes[panel].imshow(raw_patch)
+        axes[panel].imshow(ground_truth, cmap='tab20', vmin=0, vmax=24, alpha=0.3)
+        axes[panel].set_title(f"Raw Image\n{patch_info}", fontsize=8)
+        axes[panel].axis('off')
+        panel += 1
 
-    axes[1].imshow(class_map, cmap='tab20', vmin=0, vmax=24)
-    axes[1].set_title("Predicted Classes")
-    axes[1].axis('off')
+    axes[panel].imshow(ground_truth, cmap='tab20', vmin=0, vmax=24)
+    axes[panel].set_title("Ground Truth")
+    axes[panel].axis('off')
+    panel += 1
 
-    im2 = axes[2].imshow(total_entropy, cmap='magma', vmin=0, vmax=3.22)
-    axes[2].set_title("Total Entropy H(p̄)")
-    fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
-    axes[2].axis('off')
+    axes[panel].imshow(class_map, cmap='tab20', vmin=0, vmax=24)
+    axes[panel].set_title("Predicted Classes")
+    axes[panel].axis('off')
+    panel += 1
 
-    im3 = axes[3].imshow(aleatoric, cmap='magma')
-    axes[3].set_title("Aleatoric E[H[p]]")
-    fig.colorbar(im3, ax=axes[3], fraction=0.046, pad=0.04)
-    axes[3].axis('off')
+    im2 = axes[panel].imshow(total_entropy, cmap='magma', vmin=0, vmax=3.22)
+    axes[panel].set_title("Total Entropy H(p̄)")
+    fig.colorbar(im2, ax=axes[panel], fraction=0.046, pad=0.04)
+    axes[panel].axis('off')
+    panel += 1
 
-    im4 = axes[4].imshow(epistemic, cmap='magma')
-    axes[4].set_title("Epistemic MI")
-    fig.colorbar(im4, ax=axes[4], fraction=0.046, pad=0.04)
-    axes[4].axis('off')
+    im3 = axes[panel].imshow(aleatoric, cmap='magma')
+    axes[panel].set_title("Aleatoric E[H[p]]")
+    fig.colorbar(im3, ax=axes[panel], fraction=0.046, pad=0.04)
+    axes[panel].axis('off')
+    panel += 1
 
-    # alpha0 uses viridis (high = certain) to visually distinguish from the uncertainty maps
-    im5 = axes[5].imshow(alpha0_map, cmap='viridis')
-    axes[5].set_title("Concentration α₀")
-    fig.colorbar(im5, ax=axes[5], fraction=0.046, pad=0.04)
-    axes[5].axis('off')
+    im4 = axes[panel].imshow(epistemic, cmap='magma')
+    axes[panel].set_title("Epistemic MI")
+    fig.colorbar(im4, ax=axes[panel], fraction=0.046, pad=0.04)
+    axes[panel].axis('off')
+    panel += 1
+
+    # viridis (high = certain) to visually distinguish from the uncertainty maps
+    im5 = axes[panel].imshow(alpha0_map, cmap='viridis')
+    axes[panel].set_title("Concentration α₀")
+    fig.colorbar(im5, ax=axes[panel], fraction=0.046, pad=0.04)
+    axes[panel].axis('off')
 
     plt.tight_layout()
     current_time = datetime.now().strftime("%Y%m%d%H%M")
