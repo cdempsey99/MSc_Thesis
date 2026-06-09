@@ -301,9 +301,13 @@ def evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, 
     encoder_model.eval()
     decoder.eval()
 
-    all_preds_global = []
-    all_gts_global = []
-    all_conf_global = []
+    num_classes = args.num_classes
+    conf_matrix = np.zeros((num_classes, num_classes), dtype=np.int64)
+    num_bins = 10
+    bin_boundaries = np.linspace(0, 1, num_bins + 1)
+    bin_conf_sums = np.zeros(num_bins)
+    bin_acc_sums = np.zeros(num_bins, dtype=np.int64)
+    bin_counts = np.zeros(num_bins, dtype=np.int64)
     patch_count = 0
 
     vis_global_indices = set(random.sample(
@@ -368,30 +372,47 @@ def evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, 
                 if (gt > 0).sum() < 100:
                     continue
                 mask = gt > 0
-                all_preds_global.append(class_maps[b][mask])
-                all_gts_global.append(gt[mask])
-                all_conf_global.append(conf_maps[b][mask])
+                pred_flat = class_maps[b][mask]
+                true_flat = gt[mask]
+                conf_flat = conf_maps[b][mask]
+
+                np.add.at(conf_matrix, (true_flat, pred_flat), 1)
+
+                bin_indices = np.digitize(conf_flat, bin_boundaries[1:-1])
+                for bin_idx in range(num_bins):
+                    in_bin = bin_indices == bin_idx
+                    if in_bin.sum() > 0:
+                        bin_conf_sums[bin_idx] += conf_flat[in_bin].sum()
+                        bin_acc_sums[bin_idx] += (pred_flat[in_bin] == true_flat[in_bin]).sum()
+                        bin_counts[bin_idx] += in_bin.sum()
+
                 patch_count += 1
 
-    all_preds_arr = np.concatenate(all_preds_global)
-    all_gts_arr = np.concatenate(all_gts_global)
-    all_conf_arr = np.concatenate(all_conf_global)
+    iou_per_class = np.zeros(num_classes - 1)
+    for c in range(1, num_classes):
+        tp = conf_matrix[c, c]
+        fp = conf_matrix[:, c].sum() - tp
+        fn = conf_matrix[c, :].sum() - tp
+        denom = tp + fp + fn
+        if denom > 0:
+            iou_per_class[c - 1] = tp / denom
 
-    global_miou = jaccard_score(all_gts_arr, all_preds_arr,
-                                average="macro", labels=np.unique(all_gts_arr),
-                                zero_division=0)
-    global_acc = np.mean(all_preds_arr == all_gts_arr)
-    global_ece = get_ece(all_preds_arr, all_gts_arr, all_conf_arr)
+    present = conf_matrix[1:, :].sum(axis=1) > 0
+    global_miou = iou_per_class[present].mean() if present.any() else 0.0
+    global_acc = np.diag(conf_matrix).sum() / conf_matrix.sum()
+
+    bin_accs = np.where(bin_counts > 0, bin_acc_sums / bin_counts, 0.0)
+    bin_confs = np.where(bin_counts > 0, bin_conf_sums / bin_counts, 0.0)
+    total_samples = bin_counts.sum()
+    global_ece = (np.sum(bin_counts * np.abs(bin_accs - bin_confs)) / total_samples
+                  if total_samples > 0 else 0.0)
+    plot_reliability_diagram(bin_accs, bin_counts, save_name=f"{run_name}_reliability")
 
     log_msg(f"FINAL TEST RESULTS ({patch_count} patches):")
     log_msg(f"Global mIoU: {global_miou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f}")
 
-    per_class = jaccard_score(all_gts_arr, all_preds_arr,
-                              average=None, labels=list(range(1, 25)),
-                              zero_division=0)
-
     log_msg("Per-class IoU:")
-    for class_idx, iou in enumerate(per_class):
+    for class_idx, iou in enumerate(iou_per_class):
         log_msg(f"  {FBP_CLASSES[class_idx + 1]}: {iou:.4f}")
 
     runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
@@ -401,7 +422,7 @@ def evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, 
         "global_accuracy": float(global_acc),
         "global_ece": float(global_ece),
         "num_patches": patch_count,
-        "per_class_iou": {FBP_CLASSES[i + 1]: float(iou) for i, iou in enumerate(per_class)}
+        "per_class_iou": {FBP_CLASSES[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)}
     }
     results_path = os.path.join(runs_dir, f"{run_name}_results.json")
     with open(results_path, "w") as f:
