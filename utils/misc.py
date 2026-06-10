@@ -184,23 +184,18 @@ def orthogonality_loss(decoder_ensemble):
     if M == 1 :
         return torch.tensor(0.0, device=next(decoder_ensemble.parameters()).device)
 
-    # Get classifier weights for each head
-    weights = [head.classifier.weight for head in decoder_ensemble.heads]
+    layer_names = ['linear_fusion', 'spatial_refine1', 'spatial_refine2', 'bottleneck', 'classifier']
 
     total_orth = 0.0
     count = 0
 
-    for i in range(M):
-        for j in range(i + 1, M):
-
-            # Flatten weight matrices to vectors
-            w_i = weights[i].flatten()  # [num_classes * embed_dim]
-            w_j = weights[j].flatten()  # [num_classes * embed_dim]
-
-            # Squared cosine similarity
-            cos_sim = F.cosine_similarity(w_i.unsqueeze(0), w_j.unsqueeze(0))
-            total_orth += cos_sim ** 2
-            count += 1
+    for name in layer_names:
+        weights = [getattr(head, name).weight.flatten() for head in decoder_ensemble.heads]
+        for i in range(M):
+            for j in range(i + 1, M):
+                cos_sim = F.cosine_similarity(weights[i].unsqueeze(0), weights[j].unsqueeze(0))
+                total_orth += cos_sim ** 2
+                count += 1
 
     return total_orth / count
 
