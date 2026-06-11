@@ -103,7 +103,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
             if "pearson" in diversity_methods:
                 div_loss_pearson = pearson_diversity_loss(all_preds)
 
-            if "orth" in diversity_methods:
+            if "orthogonality" in diversity_methods:
                 div_loss_orth = orthogonality_loss(decoder_model)
 
             # Make sure that for all diversity options, more loss is a bad thing, as our sign convention below needs to be respected
