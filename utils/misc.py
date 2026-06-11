@@ -190,11 +190,14 @@ def orthogonality_loss(decoder_ensemble):
     count = 0
 
     for name in layer_names:
-        weights = [getattr(head, name).weight.flatten() for head in decoder_ensemble.heads]
+        # [out_channels, -1] so each row is one filter (one output channel flattened)
+        weights = [getattr(head, name).weight.view(getattr(head, name).weight.shape[0], -1)
+                   for head in decoder_ensemble.heads]
         for i in range(M):
             for j in range(i + 1, M):
-                cos_sim = F.cosine_similarity(weights[i].unsqueeze(0), weights[j].unsqueeze(0))
-                total_orth += cos_sim ** 2
+                # cos similarity per corresponding filter pair, averaged over out_channels
+                cos_sims = F.cosine_similarity(weights[i], weights[j], dim=1)  # [out_channels]
+                total_orth += (cos_sims ** 2).mean()
                 count += 1
 
     return total_orth / count
