@@ -34,7 +34,10 @@ def run_training(args):
         if meta["patch_size"] != args.patch_size:
             raise ValueError(f"Metadata mismatch! Data was extracted with patch {meta['patch_size']}")
 
-    run_name = f"{args.run_name}_{time.strftime('%Y%m%d_%H%M')}"
+    if args.resume:
+        run_name = args.run_name
+    else:
+        run_name = f"{args.run_name}_{time.strftime('%Y%m%d_%H%M')}"
     log_msg(f"Run name: {run_name}")
 
     # 2. Split Discovery
