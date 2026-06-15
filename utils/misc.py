@@ -223,6 +223,7 @@ def compute_class_weights(train_loader, num_classes, ignore_index=0):
     weights = torch.zeros(num_classes)
     present = counts > 0
     weights[present] = 1.0 / torch.log(1.0 + mu[present])
+    weights.clamp_(max=10.0)
     return weights
 
 
