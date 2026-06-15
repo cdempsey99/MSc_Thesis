@@ -241,7 +241,11 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
 
     # Training of the Decoder ensemble
     optimizer = torch.optim.AdamW(this_ensemble.parameters(), lr=learning_rate, weight_decay=0.05)
-    criterion = nn.CrossEntropyLoss(ignore_index=0) # ignore index 0 because these are pixels not labelled by humans
+
+    log_msg("Computing class weights (median frequency balancing)...")
+    class_weights = compute_class_weights(train_loader, num_classes, ignore_index=0).to(DEVICE)
+    log_msg(f"Class weights — min: {class_weights[class_weights>0].min():.3f}, median: {class_weights[class_weights>0].median():.3f}, max: {class_weights.max():.3f}")
+    criterion = nn.CrossEntropyLoss(weight=class_weights, ignore_index=0)
 
     # Train
     trained_decoder_model = train_model(
