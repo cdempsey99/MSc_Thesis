@@ -205,8 +205,8 @@ def orthogonality_loss(decoder_ensemble):
 
 def compute_class_weights(train_loader, num_classes, ignore_index=0):
     """
-    Median frequency balancing (SegNet): W_k = median(freq) / freq_k
-    where freq_k = pixels_of_class_k / total_labelled_pixels.
+    Log-damped inverse frequency weighting (Tong et al.): W_k = 1 / log(1 + mu_k)
+    where mu_k = pixels_of_class_k / total_labelled_pixels.
     Classes absent from training or equal to ignore_index get weight 0.
     """
     counts = torch.zeros(num_classes)
@@ -214,17 +214,15 @@ def compute_class_weights(train_loader, num_classes, ignore_index=0):
         for c in range(num_classes):
             counts[c] += (targets == c).sum().item()
 
-    counts[ignore_index] = 0  # exclude unlabelled pixels
+    counts[ignore_index] = 0
     total = counts.sum().item()
     if total == 0:
         return torch.ones(num_classes)
 
-    freq = counts / total
-    present = counts > 0
-    median_freq = freq[present].median()
-
+    mu = counts / total
     weights = torch.zeros(num_classes)
-    weights[present] = median_freq / freq[present]
+    present = counts > 0
+    weights[present] = 1.0 / torch.log(1.0 + mu[present])
     return weights
 
 
