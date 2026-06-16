@@ -551,9 +551,16 @@ def save_checkpoint(state, out_dir, filename="last_checkpoint.pth"):
 def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="test"):
     trained_model.eval()
 
-    all_preds_global = []
-    all_gts_global = []
-    all_conf_global = []
+    num_classes = args.num_classes
+    conf_matrix = np.zeros((num_classes, num_classes), dtype=np.int64)
+
+    # Running ECE bins — avoids storing all confidence values in memory
+    num_bins = 10
+    bin_boundaries = np.linspace(0, 1, num_bins + 1)
+    bin_conf_sums = np.zeros(num_bins)
+    bin_acc_sums  = np.zeros(num_bins, dtype=np.int64)
+    bin_counts    = np.zeros(num_bins, dtype=np.int64)
+
     patch_count = 0
 
     # Pick 3 random GLOBAL indices from entire test set for visualisation
@@ -593,15 +600,12 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
 
                     log_msg(f"Vis patch: {img_stem} local_idx={local_idx} x={x} y={y}")
 
-                    # ADD DEBUG CHECK
-
                     mask_path = data_dir / f"{img_stem}_24label.png"
                     if mask_path.exists():
                         with rasterio.open(mask_path) as src:
                             mask_check = src.read(1, window=Window(x, y, 224, 224))
                             log_msg(f"Mask from disk unique values: {np.unique(mask_check)}")
-                            log_msg(
-                                f"Mask from dataset unique values: {np.unique(test_masks[b_offset].squeeze().cpu().numpy())}")
+                            log_msg(f"Mask from dataset unique values: {np.unique(test_masks[b_offset].squeeze().cpu().numpy())}")
 
                     # Load raw image patch
                     raw_patch = None
@@ -636,62 +640,84 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                     gc.collect()
                     vis_count += 1
 
-            # Accumulate metrics for each item in batch
+            # Accumulate metrics via confusion matrix — O(num_classes²) total memory
             for b in range(test_features.shape[0]):
                 gt = test_masks[b].squeeze().cpu().numpy()
                 if (gt > 0).sum() < 100:
                     continue
                 mask = gt > 0
-                all_preds_global.append(class_maps[b][mask])
-                all_gts_global.append(gt[mask])
-                all_conf_global.append(conf_maps[b][mask])
+                pred_flat = class_maps[b][mask]
+                true_flat = gt[mask].astype(np.int64)
+                conf_flat = conf_maps[b][mask]
+
+                np.add.at(conf_matrix, (true_flat, pred_flat), 1)
+
+                for bin_idx in range(num_bins):
+                    in_bin = (conf_flat >= bin_boundaries[bin_idx]) & (conf_flat < bin_boundaries[bin_idx + 1])
+                    n = in_bin.sum()
+                    if n > 0:
+                        bin_conf_sums[bin_idx] += conf_flat[in_bin].sum()
+                        bin_acc_sums[bin_idx]  += (true_flat[in_bin] == pred_flat[in_bin]).sum()
+                        bin_counts[bin_idx]    += n
+
                 patch_count += 1
 
-        # Convert to arrays
-        all_preds_arr = np.concatenate(all_preds_global)
-        all_gts_arr = np.concatenate(all_gts_global)
-        all_conf_arr = np.concatenate(all_conf_global)
+    # mIoU from confusion matrix — only average over classes present in ground truth
+    iou_per_class = np.zeros(num_classes - 1)
+    present = []
+    for c in range(1, num_classes):
+        if conf_matrix[c, :].sum() > 0:
+            tp    = conf_matrix[c, c]
+            fp    = conf_matrix[:, c].sum() - tp
+            fn    = conf_matrix[c, :].sum() - tp
+            denom = tp + fp + fn
+            iou_per_class[c - 1] = tp / denom if denom > 0 else 0.0
+            present.append(c - 1)
+    global_miou = float(np.mean(iou_per_class[present])) if present else 0.0
 
-        # Global metrics
-        global_miou = jaccard_score(all_gts_arr, all_preds_arr,
-                                    average="macro", labels=np.unique(all_gts_arr))
-        global_acc = np.mean(all_preds_arr == all_gts_arr)
-        global_ece = get_ece(all_preds_arr, all_gts_arr, all_conf_arr)
+    # Overall accuracy (labelled pixels only)
+    global_acc = float(np.diag(conf_matrix)[1:].sum() / max(conf_matrix[1:, :].sum(), 1))
 
-        # Per class IoU
-        per_class_iou = jaccard_score(all_gts_arr, all_preds_arr,
-                                      average=None, labels=list(range(1, 25)))
+    # ECE and reliability diagram from running bins
+    bin_accs  = np.zeros(num_bins)
+    bin_props = np.zeros(num_bins)
+    ece = 0.0
+    total_px = bin_counts.sum()
+    if total_px > 0:
+        for i in range(num_bins):
+            if bin_counts[i] > 0:
+                avg_conf = bin_conf_sums[i] / bin_counts[i]
+                avg_acc  = bin_acc_sums[i]  / bin_counts[i]
+                prop     = bin_counts[i] / total_px
+                bin_accs[i]  = avg_acc
+                bin_props[i] = prop
+                ece += abs(avg_acc - avg_conf) * prop
+    plot_reliability_diagram(bin_accs, bin_props, save_name=f"{run_name}_reliability")
+    global_ece = float(ece)
 
-        avg_test_loss = 0
+    log_msg(f"FINAL TEST RESULTS ({patch_count} patches):")
+    log_msg(f"Global mIoU: {global_miou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f}")
+    log_msg("Per-class IoU:")
+    for class_idx, iou in enumerate(iou_per_class):
+        log_msg(f"  {FBP_CLASSES[class_idx + 1]}: {iou:.4f}")
 
-        # Log results
-        log_msg(f"FINAL TEST RESULTS ({patch_count} patches):")
-        log_msg(
-            f"Global mIoU: {global_miou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f} | Loss: {avg_test_loss:.4f}")
-        log_msg("Per-class IoU:")
-        for class_idx, iou in enumerate(per_class_iou):
-            log_msg(f"  {FBP_CLASSES[class_idx + 1]}: {iou:.4f}")
+    runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
+    os.makedirs(runs_dir, exist_ok=True)
+    results = {
+        "run_name": run_name,
+        "diversity_methods": args.diversity_methods,
+        "lam_jsd": args.lam_jsd,
+        "lam_pearson": args.lam_pearson,
+        "lam_orth": args.lam_orth,
+        "global_miou": global_miou,
+        "global_accuracy": global_acc,
+        "global_ece": global_ece,
+        "num_patches": patch_count,
+        "per_class_iou": {FBP_CLASSES[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)}
+    }
+    results_path = os.path.join(runs_dir, f"{run_name}_results.json")
+    with open(results_path, "w") as f:
+        json.dump(results, f, indent=2)
+    log_msg(f"Results saved to {results_path}")
 
-        # Save to JSON
-        runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
-        os.makedirs(runs_dir, exist_ok=True)
-        results = {
-            "run_name": run_name,
-            "diversity_methods": args.diversity_methods,
-            "lam_jsd": args.lam_jsd,
-            "lam_pearson": args.lam_pearson,
-            "lam_orth": args.lam_orth,
-            "global_miou": float(global_miou),
-            "global_accuracy": float(global_acc),
-            "global_ece": float(global_ece),
-            "test_loss": float(avg_test_loss),
-            "num_patches": patch_count,
-            "per_class_iou": {FBP_CLASSES[i + 1]: float(iou)
-                              for i, iou in enumerate(per_class_iou)}
-        }
-        results_path = os.path.join(runs_dir, f"{run_name}_results.json")
-        with open(results_path, "w") as f:
-            json.dump(results, f, indent=2)
-        log_msg(f"Results saved to {results_path}")
-
-        return results
+    return results
