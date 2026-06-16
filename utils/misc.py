@@ -376,7 +376,7 @@ def endd_loss(student_alphas, teacher_logits, temperature=1.0):
     return (-(log_norm + ll_terms)).mean()
 
 
-def evaluate_student_test_set(student_model, test_loader, args, run_name="student_test"):
+def evaluate_student_test_set(student_model, test_loader, args, run_name="student_test", class_names=FBP_CLASSES):
     """
     Evaluate a trained StudentHead on the test split.
     The student outputs Dirichlet alphas [B, K, H, W]; class predictions come from
@@ -515,7 +515,7 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
     log_msg(f"Global mIoU: {global_miou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f}")
     log_msg("Per-class IoU:")
     for class_idx, iou in enumerate(iou_per_class):
-        log_msg(f"  {FBP_CLASSES[class_idx + 1]}: {iou:.4f}")
+        log_msg(f"  {class_names[class_idx + 1]}: {iou:.4f}")
 
     runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
     os.makedirs(runs_dir, exist_ok=True)
@@ -525,7 +525,7 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
         "global_accuracy": global_acc,
         "global_ece": global_ece,
         "num_patches": patch_count,
-        "per_class_iou": {FBP_CLASSES[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)}
+        "per_class_iou": {class_names[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)}
     }
     results_path = os.path.join(runs_dir, f"{run_name}_results.json")
     with open(results_path, "w") as f:
@@ -573,7 +573,7 @@ def save_checkpoint(state, out_dir, filename="last_checkpoint.pth"):
     torch.save(state, last_path)
     log_msg(f"=> Saving checkpoint to {last_path}")
 
-def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="test"):
+def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="test", class_names=FBP_CLASSES):
     trained_model.eval()
 
     num_classes = args.num_classes
@@ -724,7 +724,7 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
     log_msg(f"Global mIoU: {global_miou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f}")
     log_msg("Per-class IoU:")
     for class_idx, iou in enumerate(iou_per_class):
-        log_msg(f"  {FBP_CLASSES[class_idx + 1]}: {iou:.4f}")
+        log_msg(f"  {class_names[class_idx + 1]}: {iou:.4f}")
 
     runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
     os.makedirs(runs_dir, exist_ok=True)
@@ -738,7 +738,7 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
         "global_accuracy": global_acc,
         "global_ece": global_ece,
         "num_patches": patch_count,
-        "per_class_iou": {FBP_CLASSES[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)}
+        "per_class_iou": {class_names[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)}
     }
     results_path = os.path.join(runs_dir, f"{run_name}_results.json")
     with open(results_path, "w") as f:

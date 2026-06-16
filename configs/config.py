@@ -46,6 +46,34 @@ FBP_CLASSES = [
 # Create the dictionary: {0: "Unlabeled", 1: "Industrial", ...}
 FBP_CLASSES_DICT = {i: name for i, name in enumerate(FBP_CLASSES)}
 
+# reBEN — CORINE Land Cover 19-class nomenclature (same as BigEarthNet)
+# Index 0 = no data / unlabelled in the pixel-level reference map
+# TODO: verify exact class index assignments from reference map when data arrives
+REBEN_CLASSES = [
+    "No Data",
+    "Urban Fabric",
+    "Industrial or Commercial Units",
+    "Arable Land",
+    "Permanent Crops",
+    "Pastures",
+    "Complex Cultivation Patterns",
+    "Land Principally Occupied by Agriculture",
+    "Agro-Forestry Areas",
+    "Broad-Leaved Forest",
+    "Coniferous Forest",
+    "Mixed Forest",
+    "Natural Grassland and Sparsely Vegetated Areas",
+    "Moors, Heathland and Sclerophyllous Vegetation",
+    "Transitional Woodland and Shrub",
+    "Beaches, Dunes and Sands",
+    "Inland Wetlands",
+    "Coastal Wetlands",
+    "Inland Waters",
+    "Marine Waters",
+]
+
+REBEN_CLASSES_DICT = {i: name for i, name in enumerate(REBEN_CLASSES)}
+
 # Kaggle API token
 KAGGLE_API_TOKEN="REDACTED"
 
