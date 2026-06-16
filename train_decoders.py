@@ -153,6 +153,8 @@ if __name__ == "__main__":
     parser.add_argument("--run_name", type=str, default="run")
     parser.add_argument("--max_images", type=int, default=None)
     parser.add_argument("--checkpoint_path", type=str, default=None)
+    parser.add_argument("--use_focal_loss", action="store_true", help="Use focal loss instead of cross-entropy")
+    parser.add_argument("--focal_gamma", type=float, default=2.0, help="Focal loss gamma (focusing parameter)")
 
     args = parser.parse_args()
     run_training(args)

@@ -203,6 +203,31 @@ def orthogonality_loss(decoder_ensemble):
     return total_orth / count
 
 
+class FocalLoss(nn.Module):
+    """
+    Focal loss for multi-class segmentation.
+    FL(p_t) = -(1 - p_t)^gamma * log(p_t)
+    gamma=0 reduces to standard cross-entropy.
+    gamma=2 is the standard value from Lin et al. (RetinaNet).
+    Automatically handles class imbalance by downweighting confident/easy pixels,
+    forcing the model to focus on hard/rare ones.
+    """
+    def __init__(self, gamma=2.0, ignore_index=0):
+        super().__init__()
+        self.gamma = gamma
+        self.ignore_index = ignore_index
+
+    def forward(self, input, target):
+        # Per-pixel CE loss — 0 for ignored pixels
+        ce_loss = F.cross_entropy(input, target, ignore_index=self.ignore_index, reduction='none')
+        # p_t = probability assigned to the correct class
+        p_t = torch.exp(-ce_loss)
+        focal_loss = ((1 - p_t) ** self.gamma) * ce_loss
+        # Average only over labelled pixels
+        mask = target != self.ignore_index
+        return focal_loss[mask].mean() if mask.sum() > 0 else focal_loss.mean()
+
+
 def compute_class_weights(train_loader, num_classes, ignore_index=0):
     """
     Log-damped inverse frequency weighting (Tong et al.): W_k = 1 / log(1 + mu_k)
