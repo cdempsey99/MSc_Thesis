@@ -155,6 +155,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_path", type=str, default=None)
     parser.add_argument("--use_focal_loss", action="store_true", help="Use focal loss instead of cross-entropy")
     parser.add_argument("--focal_gamma", type=float, default=2.0, help="Focal loss gamma (focusing parameter)")
+    parser.add_argument("--use_dice_loss", action="store_true", help="Use Dice loss instead of cross-entropy")
 
     args = parser.parse_args()
     run_training(args)

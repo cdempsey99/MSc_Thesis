@@ -243,10 +243,14 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
     optimizer = torch.optim.AdamW(this_ensemble.parameters(), lr=learning_rate, weight_decay=0.05)
 
     use_focal = input_dict.get("use_focal_loss", False)
+    use_dice  = input_dict.get("use_dice_loss", False)
     if use_focal:
         gamma = input_dict.get("focal_gamma", 2.0)
         criterion = FocalLoss(gamma=gamma, ignore_index=0)
         log_msg(f"Using Focal Loss (gamma={gamma})")
+    elif use_dice:
+        criterion = DiceLoss(ignore_index=0)
+        log_msg("Using Dice Loss")
     else:
         log_msg("Computing class weights (log-damped inverse frequency, capped at 10)...")
         class_weights = compute_class_weights(train_loader, num_classes, ignore_index=0).to(DEVICE)

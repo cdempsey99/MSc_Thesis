@@ -203,6 +203,42 @@ def orthogonality_loss(decoder_ensemble):
     return total_orth / count
 
 
+class DiceLoss(nn.Module):
+    def __init__(self, ignore_index=0, smooth=1.0):
+        super().__init__()
+        self.ignore_index = ignore_index
+        self.smooth = smooth
+
+    def forward(self, input, target):
+        num_classes = input.shape[1]
+        probs = torch.softmax(input, dim=1)  # [B, C, H, W]
+
+        valid = (target != self.ignore_index)  # [B, H, W]
+        target_safe = target.clone()
+        target_safe[~valid] = 0  # avoid out-of-range before one_hot
+
+        target_one_hot = F.one_hot(target_safe, num_classes).permute(0, 3, 1, 2).float()
+        mask = valid.unsqueeze(1).float()
+        probs = probs * mask
+        target_one_hot = target_one_hot * mask
+
+        dice_scores = []
+        for c in range(1, num_classes):  # skip ignore_index class (0)
+            p = probs[:, c].reshape(-1)
+            t = target_one_hot[:, c].reshape(-1)
+            if t.sum() == 0:
+                continue
+            intersection = (p * t).sum()
+            dice_scores.append(
+                (2.0 * intersection + self.smooth) / (p.sum() + t.sum() + self.smooth)
+            )
+
+        if not dice_scores:
+            return torch.tensor(0.0, device=input.device, requires_grad=True)
+
+        return 1.0 - torch.stack(dice_scores).mean()
+
+
 class FocalLoss(nn.Module):
     """
     Focal loss for multi-class segmentation.
