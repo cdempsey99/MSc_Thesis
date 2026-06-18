@@ -19,7 +19,7 @@ from rasterio.windows import Window
 
 from utils.misc import get_ece
 from utils.dataset_e2e import FBPRawDataset
-from utils.misc import log_msg, save_checkpoint
+from utils.misc import log_msg, save_checkpoint, FocalLoss
 from utils.visualisation import plot_loss_curves
 from models.ensemble import DecoderEnsemble
 from models.encoder import (
@@ -124,7 +124,12 @@ def train_e2e(args):
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     scaler = torch.cuda.amp.GradScaler()
-    criterion = nn.CrossEntropyLoss(ignore_index=0)
+    if args.use_focal_loss:
+        criterion = FocalLoss(gamma=args.focal_gamma, ignore_index=0)
+        log_msg(f"Using Focal Loss (gamma={args.focal_gamma})")
+    else:
+        criterion = nn.CrossEntropyLoss(ignore_index=0)
+        log_msg("Using CrossEntropyLoss")
 
     runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
     os.makedirs(runs_dir, exist_ok=True)
@@ -485,6 +490,10 @@ if __name__ == "__main__":
     parser.add_argument("--resume_decoder_path", type=str, default=None)
     parser.add_argument("--resume_encoder_path", type=str, default=None)
     parser.add_argument("--resume_epoch", type=int, default=0)
+
+    # Loss
+    parser.add_argument("--use_focal_loss", action="store_true")
+    parser.add_argument("--focal_gamma", type=float, default=2.0)
 
     args = parser.parse_args()
     train_e2e(args)
