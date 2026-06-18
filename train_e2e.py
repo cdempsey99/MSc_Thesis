@@ -12,6 +12,7 @@ import random
 import numpy as np
 import os
 import gc
+import math
 import matplotlib.pyplot as plt
 import rasterio
 from rasterio.windows import Window
@@ -114,9 +115,13 @@ def train_e2e(args):
         {'params': decoder.parameters(), 'lr': args.lr_decoder, 'weight_decay': 0.05}
     ])
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.num_epochs, eta_min=1e-6
-    )
+    def lr_lambda(epoch):
+        if epoch < args.warmup_epochs:
+            return float(epoch + 1) / float(max(1, args.warmup_epochs))
+        progress = float(epoch - args.warmup_epochs) / float(max(1, args.num_epochs - args.warmup_epochs))
+        return max(0.01, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     scaler = torch.cuda.amp.GradScaler()
     criterion = nn.CrossEntropyLoss(ignore_index=0)
@@ -153,6 +158,8 @@ def train_e2e(args):
             log_msg(f"Loss history loaded — {len(loss_history['train'])} epochs so far")
 
         log_msg(f"Resuming from epoch {start_epoch + 1}")
+        for _ in range(start_epoch):
+            scheduler.step()
 
     # 7. Training loop
     best_val_loss = float('inf')
@@ -201,7 +208,9 @@ def train_e2e(args):
 
         avg_task = epoch_task_loss / len(train_loader)
         loss_history["train"].append(avg_task)
-        log_msg(f"Epoch [{epoch + 1}/{args.num_epochs}] - Task Loss: {avg_task:.4f}")
+        enc_lr = optimizer.param_groups[0]['lr']
+        dec_lr = optimizer.param_groups[1]['lr']
+        log_msg(f"Epoch [{epoch + 1}/{args.num_epochs}] - Task Loss: {avg_task:.4f} | LR encoder: {enc_lr:.2e} decoder: {dec_lr:.2e}")
 
         # Validation
         encoder_model.eval()
@@ -459,6 +468,8 @@ if __name__ == "__main__":
     parser.add_argument("--lr_encoder", type=float, default=1e-6,
                         help="LR for unfrozen encoder blocks — keep low to avoid disrupting Clay features")
     parser.add_argument("--lr_decoder", type=float, default=1e-4)
+    parser.add_argument("--warmup_epochs", type=int, default=5,
+                        help="Epochs to linearly ramp LR from 0 to target before cosine decay")
     parser.add_argument("--hide_unlabelled_pixels", action="store_true")
 
     # Diversity
