@@ -553,9 +553,10 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
 
     log_msg(f"STUDENT TEST RESULTS ({patch_count} patches):")
     log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f}")
-    log_msg("Per-class IoU:")
-    for class_idx, iou in enumerate(iou_per_class):
-        log_msg(f"  {class_names[class_idx + 1]}: {iou:.4f}")
+    log_msg("Per-class IoU (descending frequency):")
+    freq_order = np.argsort(class_pixel_counts)[::-1]
+    for class_idx in freq_order:
+        log_msg(f"  {class_names[class_idx + 1]}: {iou_per_class[class_idx]:.4f}")
 
     runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
     os.makedirs(runs_dir, exist_ok=True)
@@ -767,9 +768,10 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
 
     log_msg(f"FINAL TEST RESULTS ({patch_count} patches):")
     log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f}")
-    log_msg("Per-class IoU:")
-    for class_idx, iou in enumerate(iou_per_class):
-        log_msg(f"  {class_names[class_idx + 1]}: {iou:.4f}")
+    log_msg("Per-class IoU (descending frequency):")
+    freq_order = np.argsort(class_pixel_counts)[::-1]
+    for class_idx in freq_order:
+        log_msg(f"  {class_names[class_idx + 1]}: {iou_per_class[class_idx]:.4f}")
 
     runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
     os.makedirs(runs_dir, exist_ok=True)
