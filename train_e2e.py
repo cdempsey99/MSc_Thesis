@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.metrics import jaccard_score
+from sklearn.metrics import jaccard_score, roc_auc_score
 from configs.config import *
 from torch.utils.data import DataLoader
 from pathlib import Path
@@ -323,6 +323,11 @@ def evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, 
     bin_acc_sums = np.zeros(num_bins, dtype=np.int64)
     bin_counts = np.zeros(num_bins, dtype=np.int64)
     patch_count = 0
+    nll_sum = 0.0
+    nll_count = 0
+    auroc_entropy = []
+    auroc_errors = []
+    AUROC_MAX = 2_000_000
 
     vis_global_indices = set(random.sample(
         range(len(test_loader.dataset)),
@@ -341,6 +346,21 @@ def evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, 
                 mean_probs = torch.softmax(mean_logits, dim=1)
                 class_maps = torch.argmax(mean_probs, dim=1).cpu().numpy()
                 conf_maps = torch.max(mean_probs, dim=1)[0].cpu().numpy()
+
+            mean_probs_f32 = mean_probs.float()
+            test_masks_t = test_masks.to(DEVICE).long()
+            labelled_t = test_masks_t > 0
+            if labelled_t.any():
+                log_probs = torch.log(mean_probs_f32.clamp(min=1e-10))
+                gt_idx = test_masks_t.unsqueeze(1).clamp(0, num_classes - 1)
+                nll_sum += (-log_probs.gather(1, gt_idx).squeeze(1)[labelled_t]).sum().item()
+                nll_count += labelled_t.sum().item()
+                auroc_collected = sum(len(x) for x in auroc_entropy) if auroc_entropy else 0
+                if auroc_collected < AUROC_MAX:
+                    ent_t = -(mean_probs_f32 * torch.log(mean_probs_f32.clamp(min=1e-10))).sum(dim=1)
+                    err_t = (torch.argmax(mean_probs_f32, dim=1) != test_masks_t).float()
+                    auroc_entropy.append(ent_t[labelled_t].cpu().numpy())
+                    auroc_errors.append(err_t[labelled_t].cpu().numpy())
 
             for b in range(test_imgs.shape[0]):
                 g_idx = batch_idx * test_loader.batch_size + b
@@ -418,6 +438,14 @@ def evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, 
     total_labelled = class_pixel_counts.sum()
     fw_iou = float((class_pixel_counts / max(total_labelled, 1) * iou_per_class).sum())
 
+    global_nll = nll_sum / max(nll_count, 1)
+    if auroc_entropy:
+        all_ent = np.concatenate(auroc_entropy)
+        all_err = np.concatenate(auroc_errors)
+        global_auroc = float(roc_auc_score(all_err, all_ent)) if len(np.unique(all_err)) > 1 else 0.0
+    else:
+        global_auroc = 0.0
+
     global_acc = np.diag(conf_matrix).sum() / conf_matrix.sum()
 
     bin_accs = np.where(bin_counts > 0, bin_acc_sums / bin_counts, 0.0)
@@ -428,7 +456,7 @@ def evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, 
     plot_reliability_diagram(bin_accs, bin_counts, save_name=f"{run_name}_reliability")
 
     log_msg(f"FINAL TEST RESULTS ({patch_count} patches):")
-    log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f}")
+    log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f} | NLL: {global_nll:.4f} | AUROC: {global_auroc:.4f}")
 
     log_msg("Per-class IoU (descending frequency):")
     freq_order = np.argsort(class_pixel_counts)[::-1]
@@ -442,6 +470,8 @@ def evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, 
         "global_fwiou": fw_iou,
         "global_accuracy": float(global_acc),
         "global_ece": float(global_ece),
+        "global_nll": global_nll,
+        "global_auroc": global_auroc,
         "num_patches": patch_count,
         "per_class_iou": {FBP_CLASSES[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)}
     }

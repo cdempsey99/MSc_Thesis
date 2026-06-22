@@ -4,7 +4,7 @@ import time
 import inspect
 import psutil
 import torch.nn.functional as F
-from sklearn.metrics import jaccard_score
+from sklearn.metrics import jaccard_score, roc_auc_score
 from utils.visualisation import *
 import json
 import os
@@ -137,7 +137,7 @@ def js_divergence_loss(all_preds):
     # now 0 = max diversity, ln(2) = no diversity
     return math.log(2) - total_jsd / count
 
-# Fn to compute diversity loss based on Pearson No ecorrelation between decoder heads
+# Fn to compute diversity loss based on Pearson correlation between decoder heads
 # For each class C, computes correlation between head spatial activation maps
 # all_preds: [M, B, C, H, W] raw logits
 def pearson_diversity_loss(all_preds):
@@ -431,6 +431,11 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
     bin_counts    = np.zeros(num_bins, dtype=np.int64)
 
     patch_count = 0
+    nll_sum = 0.0
+    nll_count = 0
+    auroc_entropy = []
+    auroc_errors = []
+    AUROC_MAX = 2_000_000
 
     vis_global_indices = set(random.sample(
         range(len(test_loader.dataset)),
@@ -445,6 +450,20 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
             alphas = student_model(test_features)                          # [B, K, H, W]
             alpha0 = alphas.sum(dim=1, keepdim=True)                      # [B, 1, H, W]
             mean_probs = alphas / alpha0                                   # [B, K, H, W]
+
+            test_masks_t = test_masks.to(DEVICE).long()
+            labelled_t = test_masks_t > 0
+            if labelled_t.any():
+                log_probs = torch.log(mean_probs.clamp(min=1e-10))
+                gt_idx = test_masks_t.unsqueeze(1).clamp(0, num_classes - 1)
+                nll_sum += (-log_probs.gather(1, gt_idx).squeeze(1)[labelled_t]).sum().item()
+                nll_count += labelled_t.sum().item()
+                auroc_collected = sum(len(x) for x in auroc_entropy) if auroc_entropy else 0
+                if auroc_collected < AUROC_MAX:
+                    ent_t = -(mean_probs * torch.log(mean_probs.clamp(min=1e-10))).sum(dim=1)
+                    err_t = (torch.argmax(mean_probs, dim=1) != test_masks_t).float()
+                    auroc_entropy.append(ent_t[labelled_t].cpu().numpy())
+                    auroc_errors.append(err_t[labelled_t].cpu().numpy())
             alpha0_sq = alpha0.squeeze(1)                                  # [B, H, W]
 
             class_maps = torch.argmax(mean_probs, dim=1).cpu().numpy()    # [B, H, W]
@@ -531,6 +550,14 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
     total_labelled = class_pixel_counts.sum()
     fw_iou = float((class_pixel_counts / max(total_labelled, 1) * iou_per_class).sum())
 
+    global_nll = nll_sum / max(nll_count, 1)
+    if auroc_entropy:
+        all_ent = np.concatenate(auroc_entropy)
+        all_err = np.concatenate(auroc_errors)
+        global_auroc = float(roc_auc_score(all_err, all_ent)) if len(np.unique(all_err)) > 1 else 0.0
+    else:
+        global_auroc = 0.0
+
     # Overall accuracy (labelled pixels only)
     global_acc = float(np.diag(conf_matrix)[1:].sum() / max(conf_matrix[1:, :].sum(), 1))
 
@@ -552,7 +579,7 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
     global_ece = float(ece)
 
     log_msg(f"STUDENT TEST RESULTS ({patch_count} patches):")
-    log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f}")
+    log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f} | NLL: {global_nll:.4f} | AUROC: {global_auroc:.4f}")
     log_msg("Per-class IoU (descending frequency):")
     freq_order = np.argsort(class_pixel_counts)[::-1]
     for class_idx in freq_order:
@@ -566,6 +593,8 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
         "global_fwiou": fw_iou,
         "global_accuracy": global_acc,
         "global_ece": global_ece,
+        "global_nll": global_nll,
+        "global_auroc": global_auroc,
         "num_patches": patch_count,
         "per_class_iou": {class_names[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)}
     }
@@ -629,6 +658,11 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
     bin_counts    = np.zeros(num_bins, dtype=np.int64)
 
     patch_count = 0
+    nll_sum = 0.0
+    nll_count = 0
+    auroc_entropy = []
+    auroc_errors = []
+    AUROC_MAX = 2_000_000
 
     # Pick 3 random GLOBAL indices from entire test set for visualisation
     vis_global_indices = set(random.sample(
@@ -648,6 +682,20 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
             mean_probs = torch.softmax(mean_logits_high, dim=1)
             class_maps = torch.argmax(mean_probs, dim=1).cpu().numpy()
             conf_maps = torch.max(mean_probs, dim=1)[0].cpu().numpy()
+
+            test_masks_t = test_masks.to(DEVICE).long()
+            labelled_t = test_masks_t > 0
+            if labelled_t.any():
+                log_probs = torch.log(mean_probs.clamp(min=1e-10))
+                gt_idx = test_masks_t.unsqueeze(1).clamp(0, num_classes - 1)
+                nll_sum += (-log_probs.gather(1, gt_idx).squeeze(1)[labelled_t]).sum().item()
+                nll_count += labelled_t.sum().item()
+                auroc_collected = sum(len(x) for x in auroc_entropy) if auroc_entropy else 0
+                if auroc_collected < AUROC_MAX:
+                    ent_t = -(mean_probs * torch.log(mean_probs.clamp(min=1e-10))).sum(dim=1)
+                    err_t = (torch.argmax(mean_probs, dim=1) != test_masks_t).float()
+                    auroc_entropy.append(ent_t[labelled_t].cpu().numpy())
+                    auroc_errors.append(err_t[labelled_t].cpu().numpy())
 
             # Check each item in batch for visualisation
             for b_offset in range(test_features.shape[0]):
@@ -746,6 +794,14 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
     total_labelled = class_pixel_counts.sum()
     fw_iou = float((class_pixel_counts / max(total_labelled, 1) * iou_per_class).sum())
 
+    global_nll = nll_sum / max(nll_count, 1)
+    if auroc_entropy:
+        all_ent = np.concatenate(auroc_entropy)
+        all_err = np.concatenate(auroc_errors)
+        global_auroc = float(roc_auc_score(all_err, all_ent)) if len(np.unique(all_err)) > 1 else 0.0
+    else:
+        global_auroc = 0.0
+
     # Overall accuracy (labelled pixels only)
     global_acc = float(np.diag(conf_matrix)[1:].sum() / max(conf_matrix[1:, :].sum(), 1))
 
@@ -767,7 +823,7 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
     global_ece = float(ece)
 
     log_msg(f"FINAL TEST RESULTS ({patch_count} patches):")
-    log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f}")
+    log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f} | NLL: {global_nll:.4f} | AUROC: {global_auroc:.4f}")
     log_msg("Per-class IoU (descending frequency):")
     freq_order = np.argsort(class_pixel_counts)[::-1]
     for class_idx in freq_order:
@@ -785,6 +841,8 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
         "global_fwiou": fw_iou,
         "global_accuracy": global_acc,
         "global_ece": global_ece,
+        "global_nll": global_nll,
+        "global_auroc": global_auroc,
         "num_patches": patch_count,
         "per_class_iou": {class_names[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)}
     }
