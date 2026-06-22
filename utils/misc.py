@@ -137,7 +137,7 @@ def js_divergence_loss(all_preds):
     # now 0 = max diversity, ln(2) = no diversity
     return math.log(2) - total_jsd / count
 
-# Fn to compute diversity loss based on Pearson correlation between decoder heads
+# Fn to compute diversity loss based on Pearson No ecorrelation between decoder heads
 # For each class C, computes correlation between head spatial activation maps
 # all_preds: [M, B, C, H, W] raw logits
 def pearson_diversity_loss(all_preds):
@@ -527,6 +527,10 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
             present.append(c - 1)
     global_miou = float(np.mean(iou_per_class[present])) if present else 0.0
 
+    class_pixel_counts = conf_matrix[1:, :].sum(axis=1)
+    total_labelled = class_pixel_counts.sum()
+    fw_iou = float((class_pixel_counts / max(total_labelled, 1) * iou_per_class).sum())
+
     # Overall accuracy (labelled pixels only)
     global_acc = float(np.diag(conf_matrix)[1:].sum() / max(conf_matrix[1:, :].sum(), 1))
 
@@ -548,7 +552,7 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
     global_ece = float(ece)
 
     log_msg(f"STUDENT TEST RESULTS ({patch_count} patches):")
-    log_msg(f"Global mIoU: {global_miou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f}")
+    log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f}")
     log_msg("Per-class IoU:")
     for class_idx, iou in enumerate(iou_per_class):
         log_msg(f"  {class_names[class_idx + 1]}: {iou:.4f}")
@@ -558,6 +562,7 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
     results = {
         "run_name": run_name,
         "global_miou": global_miou,
+        "global_fwiou": fw_iou,
         "global_accuracy": global_acc,
         "global_ece": global_ece,
         "num_patches": patch_count,
@@ -736,6 +741,10 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
             present.append(c - 1)
     global_miou = float(np.mean(iou_per_class[present])) if present else 0.0
 
+    class_pixel_counts = conf_matrix[1:, :].sum(axis=1)
+    total_labelled = class_pixel_counts.sum()
+    fw_iou = float((class_pixel_counts / max(total_labelled, 1) * iou_per_class).sum())
+
     # Overall accuracy (labelled pixels only)
     global_acc = float(np.diag(conf_matrix)[1:].sum() / max(conf_matrix[1:, :].sum(), 1))
 
@@ -757,7 +766,7 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
     global_ece = float(ece)
 
     log_msg(f"FINAL TEST RESULTS ({patch_count} patches):")
-    log_msg(f"Global mIoU: {global_miou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f}")
+    log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f}")
     log_msg("Per-class IoU:")
     for class_idx, iou in enumerate(iou_per_class):
         log_msg(f"  {class_names[class_idx + 1]}: {iou:.4f}")
@@ -771,6 +780,7 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
         "lam_pearson": args.lam_pearson,
         "lam_orth": args.lam_orth,
         "global_miou": global_miou,
+        "global_fwiou": fw_iou,
         "global_accuracy": global_acc,
         "global_ece": global_ece,
         "num_patches": patch_count,

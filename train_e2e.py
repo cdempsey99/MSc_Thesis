@@ -413,6 +413,11 @@ def evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, 
 
     present = conf_matrix[1:, :].sum(axis=1) > 0
     global_miou = iou_per_class[present].mean() if present.any() else 0.0
+
+    class_pixel_counts = conf_matrix[1:, :].sum(axis=1)
+    total_labelled = class_pixel_counts.sum()
+    fw_iou = float((class_pixel_counts / max(total_labelled, 1) * iou_per_class).sum())
+
     global_acc = np.diag(conf_matrix).sum() / conf_matrix.sum()
 
     bin_accs = np.where(bin_counts > 0, bin_acc_sums / bin_counts, 0.0)
@@ -423,7 +428,7 @@ def evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, 
     plot_reliability_diagram(bin_accs, bin_counts, save_name=f"{run_name}_reliability")
 
     log_msg(f"FINAL TEST RESULTS ({patch_count} patches):")
-    log_msg(f"Global mIoU: {global_miou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f}")
+    log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f}")
 
     log_msg("Per-class IoU:")
     for class_idx, iou in enumerate(iou_per_class):
@@ -433,6 +438,7 @@ def evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, 
     results = {
         "run_name": run_name,
         "global_miou": float(global_miou),
+        "global_fwiou": fw_iou,
         "global_accuracy": float(global_acc),
         "global_ece": float(global_ece),
         "num_patches": patch_count,
