@@ -19,6 +19,7 @@ from rasterio.windows import Window
 
 from utils.misc import log_msg, save_checkpoint, FocalLoss
 from utils.dataset_e2e import load_reben_splits, ReBENRawDataset
+S2_WAVES = ReBENRawDataset.WAVELENGTHS  # [0.6646, 0.5598, 0.4924] μm — S2 B04/B03/B02
 from utils.visualisation import plot_loss_curves, visualise_all_metrics
 from models.ensemble import DecoderEnsemble
 from models.encoder import (
@@ -42,6 +43,7 @@ def train_e2e_reben(args):
         ref_root=args.ref_root,
         exclude_snow=not args.include_snow,
         exclude_cloud=not args.include_cloud,
+        max_patches=args.max_patches,
     )
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
@@ -139,7 +141,7 @@ def train_e2e_reben(args):
             batch_masks = batch_masks.to(DEVICE).long()
 
             with torch.cuda.amp.autocast():
-                features = get_encoder_representation_partial(batch_imgs, encoder_model)
+                features = get_encoder_representation_partial(batch_imgs, encoder_model, waves=S2_WAVES)
                 all_preds = decoder(features)
 
                 total_task_loss = 0
@@ -176,7 +178,7 @@ def train_e2e_reben(args):
                 v_imgs  = v_imgs.to(DEVICE)
                 v_masks = v_masks.to(DEVICE).long()
                 with torch.cuda.amp.autocast():
-                    features = get_encoder_representation_partial(v_imgs, encoder_model)
+                    features = get_encoder_representation_partial(v_imgs, encoder_model, waves=S2_WAVES)
                     all_preds = decoder(features)
                     total_val_loss = 0
                     for head_idx in range(decoder.M):
@@ -264,7 +266,7 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
             test_imgs = test_imgs.to(DEVICE)
 
             with torch.cuda.amp.autocast():
-                features  = get_encoder_representation_partial(test_imgs, encoder_model)
+                features  = get_encoder_representation_partial(test_imgs, encoder_model, waves=S2_WAVES)
                 all_preds = decoder(features)
                 mean_logits = all_preds.mean(dim=0)
                 mean_probs  = torch.softmax(mean_logits, dim=1)
@@ -409,7 +411,9 @@ if __name__ == "__main__":
     parser.add_argument("--resume_epoch",        type=int, default=0)
 
     # Misc
-    parser.add_argument("--run_name", type=str, default="reben_e2e")
+    parser.add_argument("--run_name",    type=str, default="reben_e2e")
+    parser.add_argument("--max_patches", type=int, default=None,
+                        help="Limit train patches for QA runs (val/test get max_patches//5)")
 
     args = parser.parse_args()
     train_e2e_reben(args)

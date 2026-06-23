@@ -141,10 +141,11 @@ class ReBENRawDataset(Dataset):
 
 
 def load_reben_splits(metadata_path, s2_root, ref_root,
-                      exclude_snow=True, exclude_cloud=True):
+                      exclude_snow=True, exclude_cloud=True, max_patches=None):
     """
     Reads metadata.parquet and returns train/val/test ReBENRawDataset objects
     using the official reBEN splits. Filters snowy/cloudy patches by default.
+    max_patches limits each split independently (useful for QA runs).
     """
     df = pd.read_parquet(metadata_path)
     if exclude_snow:
@@ -155,6 +156,11 @@ def load_reben_splits(metadata_path, s2_root, ref_root,
     train_ids = df[df.split == 'train'].patch_id.tolist()
     val_ids   = df[df.split == 'validation'].patch_id.tolist()
     test_ids  = df[df.split == 'test'].patch_id.tolist()
+
+    if max_patches:
+        train_ids = train_ids[:max_patches]
+        val_ids   = val_ids[:max_patches // 5]
+        test_ids  = test_ids[:max_patches // 5]
 
     log_msg(f"reBEN splits (exclude_snow={exclude_snow}, exclude_cloud={exclude_cloud}): "
             f"{len(train_ids)} train | {len(val_ids)} val | {len(test_ids)} test")

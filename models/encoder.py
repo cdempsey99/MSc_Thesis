@@ -92,14 +92,18 @@ def initialize_clay_encoder_partial_unfreeze(n_unfrozen_blocks=2):
     return encoder_model
 
 
-def get_encoder_representation_partial(input_tensor, encoder_model):
+def get_encoder_representation_partial(input_tensor, encoder_model, waves=None):
     """
     Forward pass through the partially unfrozen encoder with gradients.
     Patch embedding and positional encoding run under no_grad (always frozen).
     The transformer runs normally — unfrozen blocks accumulate gradients,
     frozen blocks do not (requires_grad=False params are skipped by autograd).
+    waves: band centre wavelengths in μm. Defaults to GF2 RGB (FBP dataset).
+           Pass ReBENRawDataset.WAVELENGTHS for Sentinel-2 B04/B03/B02.
     """
-    waves = torch.tensor([0.842, 0.665, 0.560], dtype=torch.float32).to(DEVICE)
+    if waves is None:
+        waves = torch.tensor([0.842, 0.665, 0.560], dtype=torch.float32)
+    waves = waves.to(DEVICE)
     input_tensor = input_tensor.to(DEVICE)
 
     with torch.no_grad():
