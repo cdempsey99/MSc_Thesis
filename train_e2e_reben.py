@@ -295,7 +295,7 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
                 gt = test_masks[b].squeeze().cpu().numpy()
                 if (gt > 0).sum() < 100:
                     continue
-                mask      = gt > 0
+                mask      = (gt > 0) & (gt < num_classes)
                 pred_flat = class_maps[b][mask]
                 true_flat = gt[mask]
                 conf_flat = conf_maps[b][mask]
