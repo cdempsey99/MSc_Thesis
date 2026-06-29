@@ -139,7 +139,6 @@ def train_e2e_reben(args):
             optimizer.zero_grad()
             batch_imgs  = batch_imgs.to(DEVICE)
             batch_masks = batch_masks.to(DEVICE).long()
-            batch_masks[batch_masks >= args.num_classes] = 0  # remap nodata (e.g. 255) to ignore_index
 
             with torch.cuda.amp.autocast():
                 features = get_encoder_representation_partial(batch_imgs, encoder_model, waves=S2_WAVES)
@@ -178,7 +177,6 @@ def train_e2e_reben(args):
             for v_imgs, v_masks in val_loader:
                 v_imgs  = v_imgs.to(DEVICE)
                 v_masks = v_masks.to(DEVICE).long()
-                v_masks[v_masks >= args.num_classes] = 0  # remap nodata to ignore_index
                 with torch.cuda.amp.autocast():
                     features = get_encoder_representation_partial(v_imgs, encoder_model, waves=S2_WAVES)
                     all_preds = decoder(features)
@@ -277,7 +275,6 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
 
             mean_probs_f32 = mean_probs.float()
             test_masks_t   = test_masks.to(DEVICE).long()
-            test_masks_t[test_masks_t >= num_classes] = 0  # remap nodata to ignore_index
             labelled_t     = test_masks_t > 0
             if labelled_t.any():
                 log_probs = torch.log(mean_probs_f32.clamp(min=1e-10))

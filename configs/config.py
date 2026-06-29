@@ -74,6 +74,30 @@ REBEN_CLASSES = [
 
 REBEN_CLASSES_DICT = {i: name for i, name in enumerate(REBEN_CLASSES)}
 
+# Maps raw CORINE Level-3 codes (as stored in reBEN reference .tif files) to
+# REBEN_CLASSES indices (0 = No Data / ignore). Any code not listed maps to 0.
+CORINE_TO_REBEN = {
+    111: 1, 112: 1,                          # Urban Fabric
+    121: 2, 122: 2, 123: 2, 124: 2,          # Industrial or Commercial Units
+    211: 3, 212: 3, 213: 3,                  # Arable Land
+    221: 4, 222: 4, 223: 4,                  # Permanent Crops
+    231: 5,                                   # Pastures
+    241: 6, 242: 6,                           # Complex Cultivation Patterns
+    243: 7,                                   # Land Principally Occupied by Agriculture
+    244: 8,                                   # Agro-Forestry Areas
+    311: 9,                                   # Broad-Leaved Forest
+    312: 10,                                  # Coniferous Forest
+    313: 11,                                  # Mixed Forest
+    321: 12, 333: 12, 334: 12,               # Natural Grassland and Sparsely Vegetated Areas
+    322: 13, 323: 13,                         # Moors, Heathland and Sclerophyllous Vegetation
+    324: 14,                                  # Transitional Woodland and Shrub
+    331: 15,                                  # Beaches, Dunes and Sands
+    411: 16, 412: 16,                         # Inland Wetlands
+    421: 17, 422: 17, 423: 17,               # Coastal Wetlands
+    511: 18, 512: 18,                         # Inland Waters
+    521: 19, 522: 19, 523: 19,               # Marine Waters
+}
+
 # Kaggle API token
 KAGGLE_API_TOKEN="REDACTED"
 

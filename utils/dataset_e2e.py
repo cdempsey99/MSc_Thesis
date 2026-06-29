@@ -7,6 +7,11 @@ from rasterio.windows import Window
 from torch.utils.data import Dataset
 from pathlib import Path
 from utils.misc import log_msg
+from configs.config import CORINE_TO_REBEN
+
+_CORINE_LUT = np.zeros(65536, dtype=np.int64)
+for corine_code, class_idx in CORINE_TO_REBEN.items():
+    _CORINE_LUT[corine_code] = class_idx
 
 
 class FBPRawDataset(Dataset):
@@ -111,7 +116,8 @@ class ReBENRawDataset(Dataset):
         ref_dir = self.ref_root / tile_id / patch_id
         ref_tif = next(ref_dir.glob("*.tif"))
         with rasterio.open(ref_tif) as src:
-            mask = src.read(1).astype(np.int64)
+            mask = src.read(1).astype(np.uint16)
+        mask = _CORINE_LUT[mask]  # CORINE codes → 0-indexed class labels (0 = ignore)
 
         mask_tensor = torch.from_numpy(mask).float().unsqueeze(0).unsqueeze(0)
         mask_tensor = F.interpolate(mask_tensor, size=(224, 224),
