@@ -109,7 +109,7 @@ class ReBENRawDataset(Dataset):
             with rasterio.open(tif) as src:
                 bands.append(src.read(1).astype(np.float32))
 
-        img_tensor = torch.from_numpy(np.stack(bands, axis=0))  # [3, 120, 120]
+        img_tensor = torch.from_numpy(np.stack(bands, axis=0)) / 10000.0  # [3, 120, 120] — S2 DN → reflectance
         img_tensor = F.interpolate(img_tensor.unsqueeze(0), size=(224, 224),
                                    mode='bilinear', align_corners=False).squeeze(0)
 
