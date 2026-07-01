@@ -12,7 +12,6 @@ import random
 import numpy as np
 import os
 import gc
-import math
 import matplotlib.pyplot as plt
 import rasterio
 from rasterio.windows import Window
@@ -44,6 +43,7 @@ def train_e2e_reben(args):
         exclude_snow=not args.include_snow,
         exclude_cloud=not args.include_cloud,
         max_patches=args.max_patches,
+        max_val_patches=args.max_val_patches,
     )
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
@@ -75,14 +75,13 @@ def train_e2e_reben(args):
         {'params': decoder.parameters(),  'lr': args.lr_decoder, 'weight_decay': 0.05},
     ])
 
-    def lr_lambda(epoch):
-        if epoch < args.warmup_epochs:
-            return float(epoch + 1) / float(max(1, args.warmup_epochs))
-        progress = float(epoch - args.warmup_epochs) / float(
-            max(1, args.num_epochs - args.warmup_epochs))
-        return max(0.01, 0.5 * (1.0 + math.cos(math.pi * progress)))
+    def warmup_lambda(epoch):
+        return float(epoch + 1) / float(max(1, args.warmup_epochs))
 
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lambda)
+    plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-8
+    )
     scaler = torch.cuda.amp.GradScaler()
 
     if args.use_focal_loss:
@@ -117,8 +116,8 @@ def train_e2e_reben(args):
             with open(loss_path) as f:
                 loss_history = json.load(f)
         log_msg(f"Resuming from epoch {start_epoch + 1}")
-        for _ in range(start_epoch):
-            scheduler.step()
+        for _ in range(min(start_epoch, args.warmup_epochs)):
+            warmup_scheduler.step()
 
     # 5. Training loop
     best_val_loss = float('inf')
@@ -211,7 +210,10 @@ def train_e2e_reben(args):
             with open(loss_path, "w") as f:
                 json.dump(loss_history, f, indent=2)
 
-        scheduler.step()
+        if epoch < args.warmup_epochs:
+            warmup_scheduler.step()
+        else:
+            plateau_scheduler.step(avg_val_loss)
 
     # Final save
     timestamp = time.strftime("%Y%m%d_%H%M")
@@ -414,6 +416,8 @@ if __name__ == "__main__":
     parser.add_argument("--run_name",    type=str, default="reben_e2e")
     parser.add_argument("--max_patches", type=int, default=None,
                         help="Limit train patches for QA runs (val/test get max_patches//5)")
+    parser.add_argument("--max_val_patches", type=int, default=None,
+                        help="Cap val patches independently of --max_patches")
 
     args = parser.parse_args()
     train_e2e_reben(args)

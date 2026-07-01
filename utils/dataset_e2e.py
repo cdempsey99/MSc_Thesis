@@ -147,7 +147,8 @@ class ReBENRawDataset(Dataset):
 
 
 def load_reben_splits(metadata_path, s2_root, ref_root,
-                      exclude_snow=True, exclude_cloud=True, max_patches=None):
+                      exclude_snow=True, exclude_cloud=True, max_patches=None,
+                      max_val_patches=None):
     """
     Reads metadata.parquet and returns train/val/test ReBENRawDataset objects
     using the official reBEN splits. Filters snowy/cloudy patches by default.
@@ -167,6 +168,8 @@ def load_reben_splits(metadata_path, s2_root, ref_root,
         train_ids = train_ids[:max_patches]
         val_ids   = val_ids[:max_patches // 5]
         test_ids  = test_ids[:max_patches // 5]
+    if max_val_patches:
+        val_ids = val_ids[:max_val_patches]
 
     log_msg(f"reBEN splits (exclude_snow={exclude_snow}, exclude_cloud={exclude_cloud}): "
             f"{len(train_ids)} train | {len(val_ids)} val | {len(test_ids)} test")
