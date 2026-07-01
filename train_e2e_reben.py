@@ -76,7 +76,7 @@ def train_e2e_reben(args):
     ])
 
     def warmup_lambda(epoch):
-        return float(epoch + 1) / float(max(1, args.warmup_epochs))
+        return min(1.0, float(epoch + 1) / float(max(1, args.warmup_epochs)))
 
     warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lambda)
     plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
