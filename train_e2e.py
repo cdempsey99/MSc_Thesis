@@ -12,7 +12,6 @@ import random
 import numpy as np
 import os
 import gc
-import math
 import matplotlib.pyplot as plt
 import rasterio
 from rasterio.windows import Window
@@ -115,13 +114,13 @@ def train_e2e(args):
         {'params': decoder.parameters(), 'lr': args.lr_decoder, 'weight_decay': 0.05}
     ])
 
-    def lr_lambda(epoch):
-        if epoch < args.warmup_epochs:
-            return float(epoch + 1) / float(max(1, args.warmup_epochs))
-        progress = float(epoch - args.warmup_epochs) / float(max(1, args.num_epochs - args.warmup_epochs))
-        return max(0.01, 0.5 * (1.0 + math.cos(math.pi * progress)))
+    def warmup_lambda(epoch):
+        return min(1.0, float(epoch + 1) / float(max(1, args.warmup_epochs)))
 
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lambda)
+    plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-8
+    )
 
     scaler = torch.cuda.amp.GradScaler()
     if args.use_focal_loss:
@@ -146,7 +145,8 @@ def train_e2e(args):
             log_msg(f"Resuming decoder from {decoder_ckpt}...")
             ckpt = torch.load(decoder_ckpt, map_location=DEVICE)
             decoder.load_state_dict(ckpt['model_state_dict'])
-            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            if not args.no_load_optimizer:
+                optimizer.load_state_dict(ckpt['optimizer_state_dict'])
             log_msg("Decoder weights loaded.")
 
         if encoder_ckpt and encoder_ckpt.exists():
@@ -163,11 +163,13 @@ def train_e2e(args):
             log_msg(f"Loss history loaded — {len(loss_history['train'])} epochs so far")
 
         log_msg(f"Resuming from epoch {start_epoch + 1}")
-        for _ in range(start_epoch):
-            scheduler.step()
+        if start_epoch < args.warmup_epochs:
+            for _ in range(start_epoch):
+                warmup_scheduler.step()
 
     # 7. Training loop
     best_val_loss = float('inf')
+    epochs_no_improve = 0
     log_msg("Starting training...")
 
     for epoch in range(start_epoch, args.num_epochs):
@@ -246,6 +248,7 @@ def train_e2e(args):
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
+            epochs_no_improve = 0
             save_checkpoint({
                 'epoch': epoch + 1,
                 'model_state_dict': decoder.state_dict(),
@@ -256,6 +259,9 @@ def train_e2e(args):
                 'encoder_state_dict': encoder_model.state_dict(),
             }, str(CHECKPOINT_DIR), filename=f"{run_name}_best_encoder.pth")
             log_msg(f"New best val loss {best_val_loss:.6f} — saved best model")
+        else:
+            epochs_no_improve += 1
+            log_msg(f"No improvement for {epochs_no_improve}/{args.early_stopping_patience} epochs")
 
         if (epoch + 1) % 5 == 0:
             save_checkpoint({
@@ -271,7 +277,14 @@ def train_e2e(args):
             with open(loss_path, "w") as f:
                 json.dump(loss_history, f, indent=2)
 
-        scheduler.step()
+        if epoch < args.warmup_epochs:
+            warmup_scheduler.step()
+        else:
+            plateau_scheduler.step(avg_val_loss)
+
+        if epochs_no_improve >= args.early_stopping_patience:
+            log_msg(f"Early stopping triggered at epoch {epoch + 1}")
+            break
 
     # Final save
     timestamp = time.strftime("%Y%m%d_%H%M")
@@ -505,13 +518,13 @@ if __name__ == "__main__":
                         help="Number of final transformer blocks to unfreeze (plus norm layer)")
 
     # Training
-    parser.add_argument("--num_epochs", type=int, default=50)
+    parser.add_argument("--num_epochs", type=int, default=200)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr_encoder", type=float, default=1e-6,
                         help="LR for unfrozen encoder blocks — keep low to avoid disrupting Clay features")
     parser.add_argument("--lr_decoder", type=float, default=1e-4)
     parser.add_argument("--warmup_epochs", type=int, default=5,
-                        help="Epochs to linearly ramp LR from 0 to target before cosine decay")
+                        help="Epochs to linearly ramp LR from 0 to target before plateau scheduling")
     parser.add_argument("--hide_unlabelled_pixels", action="store_true")
 
     # Diversity
@@ -527,6 +540,10 @@ if __name__ == "__main__":
     parser.add_argument("--resume_decoder_path", type=str, default=None)
     parser.add_argument("--resume_encoder_path", type=str, default=None)
     parser.add_argument("--resume_epoch", type=int, default=0)
+    parser.add_argument("--no_load_optimizer", action="store_true",
+                        help="Skip loading optimizer state on resume — useful for resetting LR")
+    parser.add_argument("--early_stopping_patience", type=int, default=20,
+                        help="Stop training if val loss does not improve for this many epochs")
 
     # Loss
     parser.add_argument("--use_focal_loss", action="store_true")
