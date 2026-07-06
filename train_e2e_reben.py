@@ -116,8 +116,9 @@ def train_e2e_reben(args):
             with open(loss_path) as f:
                 loss_history = json.load(f)
         log_msg(f"Resuming from epoch {start_epoch + 1}")
-        for _ in range(min(start_epoch, args.warmup_epochs)):
-            warmup_scheduler.step()
+        if start_epoch < args.warmup_epochs:
+            for _ in range(start_epoch):
+                warmup_scheduler.step()
 
     # 5. Training loop
     best_val_loss = float('inf')
