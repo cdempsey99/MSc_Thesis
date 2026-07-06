@@ -1,3 +1,4 @@
+import bisect
 import rasterio
 import numpy as np
 import torch
@@ -179,3 +180,59 @@ def load_reben_splits(metadata_path, s2_root, ref_root,
         ReBENRawDataset(val_ids,   s2_root, ref_root, augment=False),
         ReBENRawDataset(test_ids,  s2_root, ref_root, augment=False),
     )
+
+
+class BakedReBENDataset(Dataset):
+    """
+    Map-style dataset for pre-baked reBEN embeddings produced by extract_embeddings_reben.py.
+    Shards are memory-mapped so only accessed pages are loaded into RAM.
+    Variable shard sizes are handled by probing each shard at init (cheap with mmap=True).
+    """
+    def __init__(self, shard_dir, split, augment=False):
+        from utils.dataset import random_augment
+        self._augment_fn = random_augment
+        self.augment = augment
+
+        shard_dir = Path(shard_dir)
+        self.shard_files = sorted(shard_dir.glob(f"{split}_shard_*.pt"))
+
+        if not self.shard_files:
+            raise FileNotFoundError(f"No shards found for split '{split}' in {shard_dir}")
+
+        # Probe each shard for its actual size using mmap (reads only tensor metadata, not data)
+        self.shard_sizes = []
+        for sf in self.shard_files:
+            data = torch.load(sf, map_location='cpu', mmap=True)
+            self.shard_sizes.append(data['features'].shape[0])
+
+        self.cumulative = []
+        running = 0
+        for s in self.shard_sizes:
+            running += s
+            self.cumulative.append(running)
+
+        self._current_path = None
+        self._current_data = None
+
+        log_msg(f"BakedReBENDataset ({split}): {self.cumulative[-1]} patches, "
+                f"{len(self.shard_files)} shards")
+
+    def __len__(self):
+        return self.cumulative[-1] if self.cumulative else 0
+
+    def __getitem__(self, idx):
+        shard_idx = bisect.bisect_right(self.cumulative, idx)
+        local_idx = idx - (self.cumulative[shard_idx - 1] if shard_idx > 0 else 0)
+
+        path = self.shard_files[shard_idx]
+        if path != self._current_path:
+            self._current_path = path
+            self._current_data = torch.load(path, map_location='cpu', mmap=True)
+
+        features = self._current_data['features'][local_idx]       # [1024, 28, 28] float32
+        mask = self._current_data['masks'][local_idx].long()        # [224, 224]
+
+        if self.augment:
+            features, mask = self._augment_fn(features, mask)
+
+        return features, mask

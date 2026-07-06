@@ -18,7 +18,7 @@ def run_extraction(args):
 
     # 1. Path Management
     version_str = f"patch{args.patch_size}_stride{args.stride}"
-    output_base = Path(args.out_dir) / "embeddings" / "clay_v1" / version_str
+    output_base = Path(args.out_dir) / "embeddings" / "fbp" / "clay_v1" / version_str
 
     # 2. Data Discovery (Simplified Partition Logic)
     data_dir = Path(args.data_dir)

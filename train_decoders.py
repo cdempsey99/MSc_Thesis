@@ -23,7 +23,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def run_training(args):
     # 1. Locate Embeddings & Validate Metadata
     version_str = f"patch{args.patch_size}_stride{args.stride}"
-    embedding_dir = Path(args.data_dir) / "embeddings" / "clay_v1" / version_str
+    embedding_dir = Path(args.data_dir) / "embeddings" / "fbp" / "clay_v1" / version_str
 
     meta_path = embedding_dir / "metadata.json"
     if not meta_path.exists():
