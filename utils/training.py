@@ -5,7 +5,31 @@ import json
 from datetime import datetime
 
 
-def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, input_dict):
+def student_step(student_model, student_optimizer, features, teacher_logits_detached):
+    """Single batch update for the AS4 student. Teacher logits must already be detached."""
+    student_optimizer.zero_grad()
+    alphas = student_model(features)
+    loss = endd_loss(alphas, teacher_logits_detached)
+    loss.backward()
+    student_optimizer.step()
+    return loss.item()
+
+
+def student_val_epoch(student_model, teacher_model, val_loader):
+    """Compute student EnDD loss on the validation set."""
+    student_model.eval()
+    total_loss = 0.0
+    with torch.no_grad():
+        for features, _ in val_loader:
+            features = features.to(DEVICE)
+            teacher_logits = teacher_model(features)
+            alphas = student_model(features)
+            total_loss += endd_loss(alphas, teacher_logits).item()
+    return total_loss / len(val_loader)
+
+
+def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, input_dict,
+                student_model=None, student_optimizer=None, student_scheduler=None):
     num_epochs = input_dict["num_epochs"]
     #lambda_div = input_dict["lambda_div"]
     #enforce_diversity = input_dict["enforce_diversity"]
@@ -27,6 +51,8 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
     decoder_model.to(DEVICE)
     start_epoch = 0
     best_val_loss = float('inf')
+    best_student_val_loss = float('inf')
+    student_warmup_epochs = input_dict.get("student_warmup_epochs", 10)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
 
     loss_history = {"train": [], "val": []}
@@ -63,6 +89,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         epoch_jsd_loss = 0
         epoch_pearson_loss = 0
         epoch_orth_loss = 0
+        epoch_student_loss = 0.0
 
         decoder_model.train()
 
@@ -115,6 +142,9 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
             total_loss.backward()
             optimizer.step()
 
+            if student_model is not None and epoch >= student_warmup_epochs:
+                epoch_student_loss += student_step(student_model, student_optimizer, features, all_preds.detach())
+
             epoch_task_loss += task_loss.item() if torch.is_tensor(task_loss) else task_loss
             epoch_jsd_loss += div_loss_jsd.item() if torch.is_tensor(div_loss_jsd) else div_loss_jsd
             epoch_pearson_loss += div_loss_pearson.item() if torch.is_tensor(div_loss_pearson) else div_loss_pearson
@@ -129,9 +159,12 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         avg_orth = epoch_orth_loss / len(train_loader)
 
         loss_history["train"].append(avg_task)
+        if student_model is not None and epoch >= student_warmup_epochs:
+            loss_history.setdefault("student_train", []).append(epoch_student_loss / len(train_loader))
 
-        #log_msg(f"Epoch [{epoch+1}/{num_epochs}] - Task Loss: {avg_task:.8f}, Div Loss: {avg_div:.8f}")
         log_msg(f"Epoch [{epoch + 1}/{num_epochs}] - Task: {avg_task:.4f} | JSD: {avg_jsd:.4f} | Pearson: {avg_pearson:.4f} | Orth: {avg_orth:.4f}")
+        if student_model is not None and epoch >= student_warmup_epochs:
+            log_msg(f"  Student EnDD train loss: {epoch_student_loss / len(train_loader):.4f}")
 
         """
         if val_loader is not None:
@@ -187,6 +220,18 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
             loss_history["val"].append(avg_val_loss)
             log_msg(f"Validation Loss: {avg_val_loss:.8f}")
 
+            if student_model is not None and epoch >= student_warmup_epochs:
+                avg_student_val = student_val_epoch(student_model, decoder_model, val_loader)
+                loss_history.setdefault("student_val", []).append(avg_student_val)
+                log_msg(f"  Student Val Loss: {avg_student_val:.6f}")
+                if avg_student_val < best_student_val_loss:
+                    best_student_val_loss = avg_student_val
+                    save_checkpoint(
+                        {'epoch': epoch + 1, 'model_state_dict': student_model.state_dict()},
+                        str(CHECKPOINT_DIR), filename=f"{run_name}_best_student.pth"
+                    )
+                    log_msg(f"  New best student val loss {best_student_val_loss:.6f} — saved")
+
         if (epoch + 1) % save_interval == 0:
             log_msg(f"Periodic save at epoch {epoch + 1}")
             current_state = {
@@ -201,6 +246,8 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                 json.dump(loss_history, f, indent=2)
 
         scheduler.step()
+        if student_scheduler is not None:
+            student_scheduler.step()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     final_state = {
@@ -211,6 +258,11 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
     }
     save_checkpoint(final_state, str(CHECKPOINT_DIR),
                     filename=f"{run_name}_final_model_{timestamp}.pth")
+    if student_model is not None:
+        save_checkpoint(
+            {'epoch': num_epochs, 'model_state_dict': student_model.state_dict()},
+            str(CHECKPOINT_DIR), filename=f"{run_name}_final_student_{timestamp}.pth"
+        )
     loss_path = os.path.join(runs_dir, f"{run_name}_loss_history.json")
     with open(loss_path, "w") as f:
         json.dump(loss_history, f, indent=2)
@@ -257,10 +309,23 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
         log_msg(f"Class weights — min: {class_weights[class_weights>0].min():.3f}, median: {class_weights[class_weights>0].median():.3f}, max: {class_weights.max():.3f}")
         criterion = nn.CrossEntropyLoss(weight=class_weights, ignore_index=0)
 
+    student_model = None
+    student_optimizer = None
+    student_scheduler = None
+    if input_dict.get("train_student", False):
+        student_model = StudentHead(in_channels, embed_dim, num_classes)
+        student_model.to(DEVICE)
+        student_optimizer = torch.optim.AdamW(student_model.parameters(), lr=learning_rate, weight_decay=0.05)
+        student_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            student_optimizer, T_max=input_dict["num_epochs"], eta_min=1e-6
+        )
+        log_msg("StudentHead instantiated for parallel AS4 training")
+
     # Train
     trained_decoder_model = train_model(
-        this_ensemble, train_loader, val_loader, criterion, optimizer, input_dict
+        this_ensemble, train_loader, val_loader, criterion, optimizer, input_dict,
+        student_model=student_model, student_optimizer=student_optimizer, student_scheduler=student_scheduler
     )
 
-    return trained_decoder_model
+    return trained_decoder_model, student_model
 

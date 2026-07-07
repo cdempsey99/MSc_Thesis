@@ -95,7 +95,7 @@ def run_training(args):
 
 
     start_time = time.time()
-    trained_model = full_decoder_training_run(input_dict, train_loader, val_loader)
+    trained_model, student_model = full_decoder_training_run(input_dict, train_loader, val_loader)
 
     log_msg(f"Training completed in {(time.time() - start_time) / 60:.2f} minutes.")
 
@@ -121,6 +121,14 @@ def run_training(args):
         args,
         run_name=run_name
     )
+
+    if args.train_student and student_model is not None:
+        best_student_path = Path(os.getenv("OUT_DIR", "results")) / "checkpoints" / f"{run_name}_best_student.pth"
+        if best_student_path.exists():
+            log_msg(f"Loading best student checkpoint from {best_student_path}")
+            ckpt = torch.load(best_student_path, map_location=DEVICE)
+            student_model.load_state_dict(ckpt['model_state_dict'])
+        evaluate_student_test_set(student_model, test_loader, args, run_name=f"{run_name}_student")
 
 
 if __name__ == "__main__":
@@ -156,6 +164,8 @@ if __name__ == "__main__":
     parser.add_argument("--use_focal_loss", action="store_true", help="Use focal loss instead of cross-entropy")
     parser.add_argument("--focal_gamma", type=float, default=2.0, help="Focal loss gamma (focusing parameter)")
     parser.add_argument("--use_dice_loss", action="store_true", help="Use Dice loss instead of cross-entropy")
+    parser.add_argument("--train_student", action="store_true", help="Train AS4 StudentHead in parallel with teacher ensemble")
+    parser.add_argument("--student_warmup_epochs", type=int, default=10, help="Epochs to train teacher only before student starts updating")
 
     args = parser.parse_args()
     run_training(args)
