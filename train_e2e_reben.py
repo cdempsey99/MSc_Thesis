@@ -263,6 +263,12 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
     auroc_entropy = []
     auroc_errors  = []
     AUROC_MAX = 2_000_000
+    n_pairs = decoder.M * (decoder.M - 1) // 2
+    head_conf_matrices = [np.zeros((num_classes, num_classes), dtype=np.int64) for _ in range(decoder.M)]
+    total_ent_sum = 0.0
+    aleatoric_sum = 0.0
+    jsd_sum = 0.0
+    uq_count = 0
 
     with torch.no_grad():
         for batch_idx, (test_imgs, test_masks) in enumerate(test_loader):
@@ -276,6 +282,8 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
                 class_maps  = torch.argmax(mean_probs, dim=1).cpu().numpy()
                 conf_maps   = torch.max(mean_probs, dim=1)[0].cpu().numpy()
 
+            all_head_probs_f32 = torch.stack([torch.softmax(all_preds[m].float(), dim=1)
+                                              for m in range(decoder.M)])  # [M, B, C, H, W]
             mean_probs_f32 = mean_probs.float()
             test_masks_t   = test_masks.to(DEVICE).long()
             labelled_t     = test_masks_t > 0
@@ -284,13 +292,32 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
                 gt_idx    = test_masks_t.unsqueeze(1).clamp(0, num_classes - 1)
                 nll_sum  += (-log_probs.gather(1, gt_idx).squeeze(1)[labelled_t]).sum().item()
                 nll_count += labelled_t.sum().item()
+                ent_t = -(mean_probs_f32 * torch.log(mean_probs_f32.clamp(min=1e-10))).sum(dim=1)
                 auroc_collected = sum(len(x) for x in auroc_entropy) if auroc_entropy else 0
                 if auroc_collected < AUROC_MAX:
-                    ent_t = -(mean_probs_f32 * torch.log(mean_probs_f32.clamp(min=1e-10))).sum(dim=1)
                     err_t = (torch.argmax(mean_probs_f32, dim=1) != test_masks_t).float()
                     auroc_entropy.append(ent_t[labelled_t].cpu().numpy())
                     auroc_errors.append(err_t[labelled_t].cpu().numpy())
+                # UQ decomposition
+                total_ent_sum += ent_t[labelled_t].sum().item()
+                aleat = torch.zeros_like(ent_t)
+                for m in range(decoder.M):
+                    hp = all_head_probs_f32[m]
+                    aleat += -(hp * torch.log(hp.clamp(1e-10))).sum(dim=1)
+                aleat /= decoder.M
+                aleatoric_sum += aleat[labelled_t].sum().item()
+                uq_count += labelled_t.sum().item()
+                if n_pairs > 0:
+                    for i in range(decoder.M):
+                        for j in range(i + 1, decoder.M):
+                            p, q = all_head_probs_f32[i], all_head_probs_f32[j]
+                            m_pq = 0.5 * (p + q)
+                            jsd = (-(m_pq * torch.log(m_pq.clamp(1e-10))).sum(dim=1)
+                                   + 0.5 * (p * torch.log(p.clamp(1e-10))).sum(dim=1)
+                                   + 0.5 * (q * torch.log(q.clamp(1e-10))).sum(dim=1))
+                            jsd_sum += jsd[labelled_t].sum().item()
 
+            head_preds_np = torch.argmax(all_head_probs_f32, dim=2).cpu().numpy()  # [M, B, H, W]
             for b in range(test_imgs.shape[0]):
                 gt = test_masks[b].squeeze().cpu().numpy()
                 if (gt > 0).sum() < 100:
@@ -301,6 +328,8 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
                 conf_flat = conf_maps[b][mask]
 
                 np.add.at(conf_matrix, (true_flat, pred_flat), 1)
+                for m in range(decoder.M):
+                    np.add.at(head_conf_matrices[m], (true_flat, head_preds_np[m, b][mask]), 1)
 
                 bin_indices = np.digitize(conf_flat, bin_boundaries[1:-1])
                 for bin_idx in range(num_bins):
@@ -335,6 +364,27 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
     else:
         global_auroc = 0.0
 
+    # Per-head mIoU
+    head_mious = []
+    for m in range(decoder.M):
+        h_iou = np.zeros(num_classes - 1)
+        h_present = []
+        for c in range(1, num_classes):
+            tp = head_conf_matrices[m][c, c]
+            fp = head_conf_matrices[m][:, c].sum() - tp
+            fn = head_conf_matrices[m][c, :].sum() - tp
+            denom = tp + fp + fn
+            if denom > 0:
+                h_iou[c - 1] = tp / denom
+                h_present.append(c - 1)
+        head_mious.append(float(np.mean(h_iou[h_present])) if h_present else 0.0)
+
+    # UQ decomposition
+    mean_total_ent    = total_ent_sum / max(uq_count, 1)
+    mean_aleatoric    = aleatoric_sum / max(uq_count, 1)
+    mean_epistemic    = mean_total_ent - mean_aleatoric
+    mean_pairwise_jsd = jsd_sum / max(uq_count * n_pairs, 1) if n_pairs > 0 else 0.0
+
     global_acc = np.diag(conf_matrix).sum() / max(conf_matrix.sum(), 1)
 
     bin_accs  = np.where(bin_counts > 0, bin_acc_sums / bin_counts, 0.0)
@@ -347,6 +397,9 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
     log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | "
             f"Acc: {global_acc:.4f} | ECE: {global_ece:.4f} | "
             f"NLL: {global_nll:.4f} | AUROC: {global_auroc:.4f}")
+    log_msg(f"Uncertainty: total={mean_total_ent:.4f} | aleatoric={mean_aleatoric:.4f} | "
+            f"epistemic={mean_epistemic:.4f} | pairwise_JSD={mean_pairwise_jsd:.4f}")
+    log_msg(f"Per-head mIoU: {' | '.join(f'head{m}={v:.4f}' for m, v in enumerate(head_mious))}")
     log_msg("Per-class IoU (descending frequency):")
     freq_order = np.argsort(class_pixel_counts)[::-1]
     for class_idx in freq_order:
@@ -362,6 +415,11 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
         "global_ece": float(global_ece),
         "global_nll": global_nll,
         "global_auroc": global_auroc,
+        "mean_total_entropy": mean_total_ent,
+        "mean_aleatoric": mean_aleatoric,
+        "mean_epistemic": mean_epistemic,
+        "mean_pairwise_jsd": mean_pairwise_jsd,
+        "per_head_miou": {f"head_{m}": v for m, v in enumerate(head_mious)},
         "num_patches": patch_count,
         "per_class_iou": {class_names[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)},
     }
