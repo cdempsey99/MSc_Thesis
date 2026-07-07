@@ -684,11 +684,6 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
 
             # Batched forward pass
             all_preds = trained_model(test_features)
-            mean_logits = all_preds.mean(dim=0)
-            mean_logits_high = F.interpolate(mean_logits, size=(224, 224), mode='bilinear', align_corners=False)
-            mean_probs = torch.softmax(mean_logits_high, dim=1)
-            class_maps = torch.argmax(mean_probs, dim=1).cpu().numpy()
-            conf_maps = torch.max(mean_probs, dim=1)[0].cpu().numpy()
 
             M_sz, B_sz = trained_model.M, test_features.shape[0]
             all_preds_up = F.interpolate(
@@ -696,7 +691,11 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                 size=(224, 224), mode='bilinear', align_corners=False
             ).view(M_sz, B_sz, num_classes, 224, 224)
             all_head_probs_f32 = torch.softmax(all_preds_up.float(), dim=2)
+            mean_probs = all_head_probs_f32.mean(dim=0)  # true probability mixture: mean(softmax), not softmax(mean)
             head_preds_np = torch.argmax(all_head_probs_f32, dim=2).cpu().numpy()
+
+            class_maps = torch.argmax(mean_probs, dim=1).cpu().numpy()
+            conf_maps = torch.max(mean_probs, dim=1)[0].cpu().numpy()
 
             test_masks_t = test_masks.to(DEVICE).long()
             labelled_t = test_masks_t > 0
