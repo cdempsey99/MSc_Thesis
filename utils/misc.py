@@ -664,6 +664,13 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
     auroc_errors = []
     AUROC_MAX = 2_000_000
 
+    n_pairs = trained_model.M * (trained_model.M - 1) // 2
+    head_conf_matrices = [np.zeros((num_classes, num_classes), dtype=np.int64) for _ in range(trained_model.M)]
+    total_ent_sum = 0.0
+    aleatoric_sum = 0.0
+    jsd_sum = 0.0
+    uq_count = 0
+
     # Pick 3 random GLOBAL indices from entire test set for visualisation
     vis_global_indices = set(random.sample(
         range(len(test_loader.dataset)),
@@ -683,6 +690,14 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
             class_maps = torch.argmax(mean_probs, dim=1).cpu().numpy()
             conf_maps = torch.max(mean_probs, dim=1)[0].cpu().numpy()
 
+            M_sz, B_sz = trained_model.M, test_features.shape[0]
+            all_preds_up = F.interpolate(
+                all_preds.view(M_sz * B_sz, num_classes, *all_preds.shape[-2:]),
+                size=(224, 224), mode='bilinear', align_corners=False
+            ).view(M_sz, B_sz, num_classes, 224, 224)
+            all_head_probs_f32 = torch.softmax(all_preds_up.float(), dim=2)
+            head_preds_np = torch.argmax(all_head_probs_f32, dim=2).cpu().numpy()
+
             test_masks_t = test_masks.to(DEVICE).long()
             labelled_t = test_masks_t > 0
             if labelled_t.any():
@@ -690,12 +705,29 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                 gt_idx = test_masks_t.unsqueeze(1).clamp(0, num_classes - 1)
                 nll_sum += (-log_probs.gather(1, gt_idx).squeeze(1)[labelled_t]).sum().item()
                 nll_count += labelled_t.sum().item()
+                ent_t = -(mean_probs * torch.log(mean_probs.clamp(min=1e-10))).sum(dim=1)
                 auroc_collected = sum(len(x) for x in auroc_entropy) if auroc_entropy else 0
                 if auroc_collected < AUROC_MAX:
-                    ent_t = -(mean_probs * torch.log(mean_probs.clamp(min=1e-10))).sum(dim=1)
                     err_t = (torch.argmax(mean_probs, dim=1) != test_masks_t).float()
                     auroc_entropy.append(ent_t[labelled_t].cpu().numpy())
                     auroc_errors.append(err_t[labelled_t].cpu().numpy())
+                total_ent_sum += ent_t[labelled_t].sum().item()
+                aleat = torch.zeros_like(ent_t)
+                for m in range(trained_model.M):
+                    hp = all_head_probs_f32[m]
+                    aleat += -(hp * torch.log(hp.clamp(1e-10))).sum(dim=1)
+                aleat /= trained_model.M
+                aleatoric_sum += aleat[labelled_t].sum().item()
+                uq_count += labelled_t.sum().item()
+                if n_pairs > 0:
+                    for i in range(trained_model.M):
+                        for j in range(i + 1, trained_model.M):
+                            p, q = all_head_probs_f32[i], all_head_probs_f32[j]
+                            m_pq = 0.5 * (p + q)
+                            jsd = (-(m_pq * torch.log(m_pq.clamp(1e-10))).sum(dim=1)
+                                   + 0.5 * (p * torch.log(p.clamp(1e-10))).sum(dim=1)
+                                   + 0.5 * (q * torch.log(q.clamp(1e-10))).sum(dim=1))
+                            jsd_sum += jsd[labelled_t].sum().item()
 
             # Check each item in batch for visualisation
             for b_offset in range(test_features.shape[0]):
@@ -766,6 +798,8 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                 conf_flat = conf_maps[b][mask]
 
                 np.add.at(conf_matrix, (true_flat, pred_flat), 1)
+                for m in range(trained_model.M):
+                    np.add.at(head_conf_matrices[m], (true_flat, head_preds_np[m, b][mask]), 1)
 
                 for bin_idx in range(num_bins):
                     in_bin = (conf_flat >= bin_boundaries[bin_idx]) & (conf_flat < bin_boundaries[bin_idx + 1])
@@ -805,6 +839,24 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
     # Overall accuracy (labelled pixels only)
     global_acc = float(np.diag(conf_matrix)[1:].sum() / max(conf_matrix[1:, :].sum(), 1))
 
+    mean_total_ent = total_ent_sum / max(uq_count, 1)
+    mean_aleatoric = aleatoric_sum / max(uq_count, 1)
+    mean_epistemic = max(mean_total_ent - mean_aleatoric, 0.0)
+    mean_pairwise_jsd = jsd_sum / max(n_pairs * uq_count, 1)
+
+    per_head_miou = []
+    for m in range(trained_model.M):
+        hcm = head_conf_matrices[m]
+        iou_h = []
+        for c in range(1, num_classes):
+            if hcm[c, :].sum() > 0:
+                tp = hcm[c, c]
+                fp = hcm[:, c].sum() - tp
+                fn = hcm[c, :].sum() - tp
+                denom = tp + fp + fn
+                iou_h.append(tp / denom if denom > 0 else 0.0)
+        per_head_miou.append(float(np.mean(iou_h)) if iou_h else 0.0)
+
     # ECE and reliability diagram from running bins
     bin_accs  = np.zeros(num_bins)
     bin_props = np.zeros(num_bins)
@@ -824,6 +876,8 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
 
     log_msg(f"FINAL TEST RESULTS ({patch_count} patches):")
     log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f} | NLL: {global_nll:.4f} | AUROC: {global_auroc:.4f}")
+    log_msg(f"UQ: Total H={mean_total_ent:.4f} | Aleatoric={mean_aleatoric:.4f} | Epistemic={mean_epistemic:.4f} | Pairwise JSD={mean_pairwise_jsd:.4f}")
+    log_msg(f"Per-head mIoU: {[f'{x:.4f}' for x in per_head_miou]}")
     log_msg("Per-class IoU (descending frequency):")
     freq_order = np.argsort(class_pixel_counts)[::-1]
     for class_idx in freq_order:
@@ -843,6 +897,11 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
         "global_ece": global_ece,
         "global_nll": global_nll,
         "global_auroc": global_auroc,
+        "mean_total_entropy": mean_total_ent,
+        "mean_aleatoric": mean_aleatoric,
+        "mean_epistemic": mean_epistemic,
+        "mean_pairwise_jsd": mean_pairwise_jsd,
+        "per_head_miou": per_head_miou,
         "num_patches": patch_count,
         "per_class_iou": {class_names[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)}
     }
