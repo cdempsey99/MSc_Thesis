@@ -209,7 +209,10 @@ class ReBENSARRawDataset(Dataset):
 
     def __getitem__(self, idx):
         patch_id, s1_name = self.pairs[idx]
-        tile_id = "_".join(s1_name.split("_")[:-2])
+        # S1 product IDs don't embed the MGRS tile (unlike S2's ..._T33UUP), so reBEN
+        # appends it as a 3rd trailing token: {scene}_{tile}_{row}_{col}. Strip all three
+        # to get the on-disk scene folder, not just row/col as with the S2 patch_id.
+        tile_id = "_".join(s1_name.split("_")[:-3])
 
         bands = []
         for band in self.BANDS:
@@ -252,7 +255,7 @@ class ReBENSARRawDataset(Dataset):
 
     def get_patch_info(self, idx):
         patch_id, s1_name = self.pairs[idx]
-        tile_id = "_".join(s1_name.split("_")[:-2])
+        tile_id = "_".join(s1_name.split("_")[:-3])
         return str(self.s1_root / tile_id / s1_name), 0, 0
 
 
