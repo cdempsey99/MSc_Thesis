@@ -182,6 +182,121 @@ def load_reben_splits(metadata_path, s2_root, ref_root,
     )
 
 
+class ReBENSARRawDataset(Dataset):
+    """
+    Dataset for reBEN SAR e2e training.
+    Loads pre-cut 120x120 Sentinel-1 RTC patches (VV/VH, already in dB) and
+    resizes to 224x224. Masks are the same CORINE reference maps used for the
+    optical pipeline, keyed by the paired S2 patch_id (labels are sensor-independent).
+    Use load_reben_sar_splits() to construct train/val/test instances from metadata.parquet.
+    """
+    BANDS = ["VV", "VH"]
+    WAVELENGTHS = torch.tensor([3.5, 4.0], dtype=torch.float32)  # μm — Clay metadata.yaml nominal SAR values
+    # Clay metadata.yaml sentinel-1-rtc band stats (z-score normalisation; data is already dB)
+    BAND_MEAN = {"VV": -12.113, "VH": -18.673}
+    BAND_STD = {"VV": 8.314, "VH": 8.017}
+
+    def __init__(self, pairs, s1_root, ref_root, augment=False):
+        """pairs: list of (patch_id, s1_name) tuples — patch_id keys the mask, s1_name keys the SAR image."""
+        self.pairs = pairs
+        self.s1_root = Path(s1_root)
+        self.ref_root = Path(ref_root)
+        self.augment = augment
+        log_msg(f"ReBENSARRawDataset: {len(pairs)} patches")
+
+    def __len__(self):
+        return len(self.pairs)
+
+    def __getitem__(self, idx):
+        patch_id, s1_name = self.pairs[idx]
+        tile_id = "_".join(s1_name.split("_")[:-2])
+
+        bands = []
+        for band in self.BANDS:
+            tif = self.s1_root / tile_id / s1_name / f"{s1_name}_{band}.tif"
+            with rasterio.open(tif) as src:
+                arr = src.read(1).astype(np.float32)
+            arr = (arr - self.BAND_MEAN[band]) / self.BAND_STD[band]
+            bands.append(arr)
+
+        img_tensor = torch.from_numpy(np.stack(bands, axis=0))  # [2, 120, 120] — already dB, z-scored
+        img_tensor = F.interpolate(img_tensor.unsqueeze(0), size=(224, 224),
+                                   mode='bilinear', align_corners=False).squeeze(0)
+
+        ref_dir = self.ref_root / "_".join(patch_id.split("_")[:-2]) / patch_id
+        ref_tif = next(ref_dir.glob("*.tif"))
+        with rasterio.open(ref_tif) as src:
+            mask = src.read(1).astype(np.uint16)
+        mask = _CORINE_LUT[mask]  # CORINE codes → 0-indexed class labels (0 = ignore)
+
+        mask_tensor = torch.from_numpy(mask).float().unsqueeze(0).unsqueeze(0)
+        mask_tensor = F.interpolate(mask_tensor, size=(224, 224),
+                                    mode='nearest').squeeze().long()
+
+        if self.augment:
+            img_tensor, mask_tensor = self._augment(img_tensor, mask_tensor)
+
+        return img_tensor, mask_tensor
+
+    def _augment(self, img, mask):
+        if torch.rand(1) > 0.5:
+            img = torch.flip(img, dims=[2])
+            mask = torch.flip(mask, dims=[1])
+        if torch.rand(1) > 0.5:
+            img = torch.flip(img, dims=[1])
+            mask = torch.flip(mask, dims=[0])
+        k = torch.randint(0, 4, (1,)).item()
+        img = torch.rot90(img, k, dims=[1, 2])
+        mask = torch.rot90(mask, k, dims=[0, 1])
+        return img, mask
+
+    def get_patch_info(self, idx):
+        patch_id, s1_name = self.pairs[idx]
+        tile_id = "_".join(s1_name.split("_")[:-2])
+        return str(self.s1_root / tile_id / s1_name), 0, 0
+
+
+def load_reben_sar_splits(metadata_path, s1_root, ref_root,
+                          exclude_snow=True, exclude_cloud=True, max_patches=None,
+                          max_val_patches=None):
+    """
+    Reads metadata.parquet and returns train/val/test ReBENSARRawDataset objects
+    using the official reBEN splits and the s1_name column for S1<->S2 pairing.
+    Filters snowy/cloudy patches by default (flags are derived from the optical
+    scene, but apply to the same underlying land parcel/date so are still valid for SAR).
+    max_patches limits each split independently (useful for QA runs).
+    """
+    df = pd.read_parquet(metadata_path)
+    if exclude_snow:
+        df = df[~df.contains_seasonal_snow]
+    if exclude_cloud:
+        df = df[~df.contains_cloud_or_shadow]
+
+    def pairs_for(split_name):
+        sub = df[df.split == split_name]
+        return list(zip(sub.patch_id.tolist(), sub.s1_name.tolist()))
+
+    train_pairs = pairs_for('train')
+    val_pairs   = pairs_for('validation')
+    test_pairs  = pairs_for('test')
+
+    if max_patches:
+        train_pairs = train_pairs[:max_patches]
+        val_pairs   = val_pairs[:max_patches // 5]
+        test_pairs  = test_pairs[:max_patches // 5]
+    if max_val_patches:
+        val_pairs = val_pairs[:max_val_patches]
+
+    log_msg(f"reBEN SAR splits (exclude_snow={exclude_snow}, exclude_cloud={exclude_cloud}): "
+            f"{len(train_pairs)} train | {len(val_pairs)} val | {len(test_pairs)} test")
+
+    return (
+        ReBENSARRawDataset(train_pairs, s1_root, ref_root, augment=True),
+        ReBENSARRawDataset(val_pairs,   s1_root, ref_root, augment=False),
+        ReBENSARRawDataset(test_pairs,  s1_root, ref_root, augment=False),
+    )
+
+
 class BakedReBENDataset(Dataset):
     """
     Map-style dataset for pre-baked reBEN embeddings produced by extract_embeddings_reben.py.
