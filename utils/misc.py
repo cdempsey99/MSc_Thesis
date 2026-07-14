@@ -5,6 +5,7 @@ import inspect
 import psutil
 import torch.nn.functional as F
 from sklearn.metrics import jaccard_score, roc_auc_score
+from scipy.stats import spearmanr
 from utils.visualisation import *
 import json
 import os
@@ -602,6 +603,108 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
     log_msg(f"Student results saved to {results_path}")
+
+    return results
+
+
+def evaluate_uncertainty_correlation(teacher_model, student_model, test_loader, args, run_name="uncertainty_correlation"):
+    """
+    Compares the spatial layout of teacher (ensemble) vs student (Dirichlet) uncertainty maps.
+    For each test patch, flattens the labelled pixels of the epistemic map (and separately the
+    aleatoric map) from both models and computes the Spearman rank correlation between them.
+    Maps are computed on the fly per batch and never written to disk — only the per-patch
+    correlations are accumulated into a running mean.
+    """
+    teacher_model.eval()
+    student_model.eval()
+
+    num_classes = args.num_classes
+
+    epi_corr_sum = 0.0
+    epi_corr_count = 0
+    alea_corr_sum = 0.0
+    alea_corr_count = 0
+    skipped_degenerate = 0
+    patch_count = 0
+
+    with torch.no_grad():
+        for test_features, test_masks in test_loader:
+            test_features = test_features.to(DEVICE)
+
+            # Teacher: ensemble mixture, epistemic/aleatoric decomposition
+            all_preds = teacher_model(test_features)                          # [M, B, K, h, w]
+            M_sz, B_sz = teacher_model.M, test_features.shape[0]
+            all_preds_up = F.interpolate(
+                all_preds.view(M_sz * B_sz, num_classes, *all_preds.shape[-2:]),
+                size=(224, 224), mode='bilinear', align_corners=False
+            ).view(M_sz, B_sz, num_classes, 224, 224)
+            teacher_head_probs = torch.softmax(all_preds_up.float(), dim=2)
+            teacher_mean_probs = teacher_head_probs.mean(dim=0)               # [B, K, H, W]
+
+            teacher_total_ent = -(teacher_mean_probs * torch.log(teacher_mean_probs.clamp(min=1e-10))).sum(dim=1)
+            teacher_aleatoric = torch.zeros_like(teacher_total_ent)
+            for m in range(teacher_model.M):
+                hp = teacher_head_probs[m]
+                teacher_aleatoric += -(hp * torch.log(hp.clamp(1e-10))).sum(dim=1)
+            teacher_aleatoric /= teacher_model.M
+            teacher_epistemic = (teacher_total_ent - teacher_aleatoric).clamp(min=0)
+
+            # Student: Dirichlet decomposition
+            alphas = student_model(test_features)                             # [B, K, 224, 224]
+            alpha0 = alphas.sum(dim=1, keepdim=True)
+            student_mean_probs = alphas / alpha0
+            alpha0_sq = alpha0.squeeze(1)
+            student_total_ent = -(student_mean_probs * torch.log(student_mean_probs + 1e-10)).sum(dim=1)
+            student_aleatoric = (torch.digamma(alpha0_sq + 1)
+                                  - (student_mean_probs * torch.digamma(alphas + 1)).sum(dim=1))
+            student_epistemic = (student_total_ent - student_aleatoric).clamp(min=0)
+
+            teacher_epi_np = teacher_epistemic.cpu().numpy()
+            teacher_alea_np = teacher_aleatoric.cpu().numpy()
+            student_epi_np = student_epistemic.cpu().numpy()
+            student_alea_np = student_aleatoric.cpu().numpy()
+
+            for b in range(test_features.shape[0]):
+                gt = test_masks[b].squeeze().cpu().numpy()
+                mask = gt > 0
+                if mask.sum() < 100:
+                    continue
+                patch_count += 1
+
+                epi_rho, _ = spearmanr(teacher_epi_np[b][mask], student_epi_np[b][mask])
+                if not math.isnan(epi_rho):
+                    epi_corr_sum += epi_rho
+                    epi_corr_count += 1
+                else:
+                    skipped_degenerate += 1
+
+                alea_rho, _ = spearmanr(teacher_alea_np[b][mask], student_alea_np[b][mask])
+                if not math.isnan(alea_rho):
+                    alea_corr_sum += alea_rho
+                    alea_corr_count += 1
+                else:
+                    skipped_degenerate += 1
+
+    mean_epi_corr = epi_corr_sum / max(epi_corr_count, 1)
+    mean_alea_corr = alea_corr_sum / max(alea_corr_count, 1)
+
+    log_msg(f"TEACHER/STUDENT UNCERTAINTY CORRELATION ({patch_count} patches, {skipped_degenerate} degenerate skipped):")
+    log_msg(f"Mean Spearman epistemic corr: {mean_epi_corr:.4f} | Mean Spearman aleatoric corr: {mean_alea_corr:.4f}")
+
+    runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
+    os.makedirs(runs_dir, exist_ok=True)
+    results = {
+        "run_name": run_name,
+        "mean_epistemic_spearman": mean_epi_corr,
+        "mean_aleatoric_spearman": mean_alea_corr,
+        "num_patches": patch_count,
+        "num_epistemic_correlations": epi_corr_count,
+        "num_aleatoric_correlations": alea_corr_count,
+    }
+    results_path = os.path.join(runs_dir, f"{run_name}_uncertainty_correlation_results.json")
+    with open(results_path, "w") as f:
+        json.dump(results, f, indent=2)
+    log_msg(f"Uncertainty correlation results saved to {results_path}")
 
     return results
 

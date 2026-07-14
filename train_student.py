@@ -34,7 +34,7 @@ from pathlib import Path
 from configs.config import *
 from models.ensemble import DecoderEnsemble, StudentHead
 from utils.dataset import BakedFeatureDataset
-from utils.misc import endd_loss, evaluate_student_test_set, save_checkpoint, log_msg
+from utils.misc import endd_loss, evaluate_student_test_set, evaluate_uncertainty_correlation, save_checkpoint, log_msg
 from utils.visualisation import plot_loss_curves
 from torch.utils.data import DataLoader
 
@@ -270,6 +270,11 @@ def run_student_training(args):
         log_msg("No best model found, evaluating final model")
 
     evaluate_student_test_set(trained_student, test_loader, args, run_name=run_name)
+
+    # Teacher needed again to compare teacher/student uncertainty map spatial correlation
+    teacher_model.to(DEVICE)
+    teacher_model.eval()
+    evaluate_uncertainty_correlation(teacher_model, trained_student, test_loader, args, run_name=run_name)
 
 
 if __name__ == "__main__":
