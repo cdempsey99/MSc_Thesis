@@ -610,10 +610,10 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
 def evaluate_uncertainty_correlation(teacher_model, student_model, test_loader, args, run_name="uncertainty_correlation"):
     """
     Compares the spatial layout of teacher (ensemble) vs student (Dirichlet) uncertainty maps.
-    For each test patch, flattens the labelled pixels of the epistemic map (and separately the
-    aleatoric map) from both models and computes the Spearman rank correlation between them.
-    Maps are computed on the fly per batch and never written to disk — only the per-patch
-    correlations are accumulated into a running mean.
+    For each test patch, flattens the labelled pixels of the epistemic, aleatoric, and total
+    entropy maps from both models and computes the Spearman rank correlation between them,
+    independently for each of the three. Maps are computed on the fly per batch and never
+    written to disk — only the per-patch correlations are accumulated into a running mean.
     """
     teacher_model.eval()
     student_model.eval()
@@ -624,6 +624,8 @@ def evaluate_uncertainty_correlation(teacher_model, student_model, test_loader, 
     epi_corr_count = 0
     alea_corr_sum = 0.0
     alea_corr_count = 0
+    total_corr_sum = 0.0
+    total_corr_count = 0
     skipped_degenerate = 0
     patch_count = 0
 
@@ -661,8 +663,10 @@ def evaluate_uncertainty_correlation(teacher_model, student_model, test_loader, 
 
             teacher_epi_np = teacher_epistemic.cpu().numpy()
             teacher_alea_np = teacher_aleatoric.cpu().numpy()
+            teacher_total_np = teacher_total_ent.cpu().numpy()
             student_epi_np = student_epistemic.cpu().numpy()
             student_alea_np = student_aleatoric.cpu().numpy()
+            student_total_np = student_total_ent.cpu().numpy()
 
             for b in range(test_features.shape[0]):
                 gt = test_masks[b].squeeze().cpu().numpy()
@@ -685,11 +689,19 @@ def evaluate_uncertainty_correlation(teacher_model, student_model, test_loader, 
                 else:
                     skipped_degenerate += 1
 
+                total_rho, _ = spearmanr(teacher_total_np[b][mask], student_total_np[b][mask])
+                if not math.isnan(total_rho):
+                    total_corr_sum += total_rho
+                    total_corr_count += 1
+                else:
+                    skipped_degenerate += 1
+
     mean_epi_corr = epi_corr_sum / max(epi_corr_count, 1)
     mean_alea_corr = alea_corr_sum / max(alea_corr_count, 1)
+    mean_total_corr = total_corr_sum / max(total_corr_count, 1)
 
     log_msg(f"TEACHER/STUDENT UNCERTAINTY CORRELATION ({patch_count} patches, {skipped_degenerate} degenerate skipped):")
-    log_msg(f"Mean Spearman epistemic corr: {mean_epi_corr:.4f} | Mean Spearman aleatoric corr: {mean_alea_corr:.4f}")
+    log_msg(f"Mean Spearman epistemic corr: {mean_epi_corr:.4f} | Mean Spearman aleatoric corr: {mean_alea_corr:.4f} | Mean Spearman total corr: {mean_total_corr:.4f}")
 
     runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
     os.makedirs(runs_dir, exist_ok=True)
@@ -697,9 +709,11 @@ def evaluate_uncertainty_correlation(teacher_model, student_model, test_loader, 
         "run_name": run_name,
         "mean_epistemic_spearman": mean_epi_corr,
         "mean_aleatoric_spearman": mean_alea_corr,
+        "mean_total_spearman": mean_total_corr,
         "num_patches": patch_count,
         "num_epistemic_correlations": epi_corr_count,
         "num_aleatoric_correlations": alea_corr_count,
+        "num_total_correlations": total_corr_count,
     }
     results_path = os.path.join(runs_dir, f"{run_name}_uncertainty_correlation_results.json")
     with open(results_path, "w") as f:
