@@ -352,14 +352,36 @@ def plot_loss_curves(loss_history_path, save_name="loss_curves"):
     val_losses = history["val"]
     epochs = range(1, len(train_losses) + 1)
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(epochs, train_losses, label="Train Loss", color="blue")
-    plt.plot(epochs, val_losses, label="Val Loss", color="orange")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title("Training and Validation Loss")
-    plt.legend()
-    plt.grid(alpha=0.3)
+    div_series = [(key, label, color) for key, label, color in [
+        ("train_jsd", "JSD Diversity Loss", "green"),
+        ("train_pearson", "Pearson Diversity Loss", "red"),
+        ("train_orth", "Orthogonality Loss", "purple"),
+    ] if history.get(key)]
+
+    if div_series:
+        fig, (ax_task, ax_div) = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
+    else:
+        fig, ax_task = plt.subplots(figsize=(10, 6))
+        ax_div = None
+
+    ax_task.plot(epochs, train_losses, label="Train Loss", color="blue")
+    ax_task.plot(epochs, val_losses, label="Val Loss", color="orange")
+    ax_task.set_ylabel("Loss")
+    ax_task.set_title("Training and Validation Loss")
+    ax_task.legend()
+    ax_task.grid(alpha=0.3)
+
+    if ax_div is not None:
+        for key, label, color in div_series:
+            div_epochs = range(1, len(history[key]) + 1)
+            ax_div.plot(div_epochs, history[key], label=label, color=color)
+        ax_div.set_xlabel("Epoch")
+        ax_div.set_ylabel("Diversity Loss (raw, unweighted)")
+        ax_div.set_title("Diversity Loss Components")
+        ax_div.legend()
+        ax_div.grid(alpha=0.3)
+    else:
+        ax_task.set_xlabel("Epoch")
 
     current_time = datetime.now().strftime("%Y%m%d%H%M")
     full_path = os.path.join(save_path, f"{save_name}_{current_time}.png")

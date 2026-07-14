@@ -159,6 +159,12 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         avg_orth = epoch_orth_loss / len(train_loader)
 
         loss_history["train"].append(avg_task)
+        if "jsd" in diversity_methods:
+            loss_history.setdefault("train_jsd", []).append(avg_jsd)
+        if "pearson" in diversity_methods:
+            loss_history.setdefault("train_pearson", []).append(avg_pearson)
+        if "orthogonality" in diversity_methods:
+            loss_history.setdefault("train_orth", []).append(avg_orth)
         if student_model is not None and epoch >= student_warmup_epochs:
             loss_history.setdefault("student_train", []).append(epoch_student_loss / len(train_loader))
 
