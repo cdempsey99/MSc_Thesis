@@ -129,6 +129,7 @@ def run_training(args):
             ckpt = torch.load(best_student_path, map_location=DEVICE)
             student_model.load_state_dict(ckpt['model_state_dict'])
         evaluate_student_test_set(student_model, test_loader, args, run_name=f"{run_name}_student")
+        evaluate_uncertainty_correlation(trained_model, student_model, test_loader, args, run_name=f"{run_name}_student")
 
 
 if __name__ == "__main__":
