@@ -34,7 +34,7 @@ from pathlib import Path
 from configs.config import *
 from models.ensemble import DecoderEnsemble, StudentHead
 from utils.dataset import BakedFeatureDataset
-from utils.misc import endd_loss, evaluate_student_test_set, evaluate_uncertainty_correlation, get_temperature, save_checkpoint, log_msg
+from utils.misc import endd_loss, evaluate_test_set, evaluate_student_test_set, evaluate_uncertainty_correlation, get_temperature, save_checkpoint, log_msg
 from utils.visualisation import plot_loss_curves
 from torch.utils.data import DataLoader
 
@@ -262,11 +262,13 @@ def run_student_training(args):
     else:
         log_msg("No best model found, evaluating final model")
 
-    evaluate_student_test_set(trained_student, test_loader, args, run_name=run_name)
+    evaluate_student_test_set(trained_student, test_loader, args, run_name=f"{run_name}_student")
 
-    # Teacher needed again to compare teacher/student uncertainty map spatial correlation
+    # Teacher needed again: its own scalar metrics for a fair teacher-vs-student comparison,
+    # plus the uncertainty map spatial correlation
     teacher_model.to(DEVICE)
     teacher_model.eval()
+    evaluate_test_set(teacher_model, test_loader, None, args, run_name=f"{run_name}_teacher")
     evaluate_uncertainty_correlation(teacher_model, trained_student, test_loader, args, run_name=run_name)
 
 
@@ -297,6 +299,11 @@ if __name__ == "__main__":
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--run_name", type=str, default="student")
     parser.add_argument("--max_images", type=int, default=None)
+    # Metadata-only, read by evaluate_test_set for the teacher's own results JSON
+    parser.add_argument("--diversity_methods", type=str, nargs="+", default=[])
+    parser.add_argument("--lam_jsd", type=float, default=0.0)
+    parser.add_argument("--lam_pearson", type=float, default=0.0)
+    parser.add_argument("--lam_orth", type=float, default=0.0)
 
     args = parser.parse_args()
     run_student_training(args)
