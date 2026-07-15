@@ -379,6 +379,13 @@ def get_decoder_output_maps(trained_decoder_model, grid_features, save_name="hea
 
     return mean_probs, class_map, variance_map, total_entropy, mutual_info
 
+def get_temperature(epoch, num_epochs, T_start, T_end=1.0):
+    """Linear annealing from T_start down to T_end over training."""
+    if num_epochs <= 1:
+        return T_end
+    return T_start - (T_start - T_end) * epoch / (num_epochs - 1)
+
+
 def endd_loss(student_alphas, teacher_logits, temperature=1.0):
     """
     Ensemble Distribution Distillation loss: Dirichlet NLL.

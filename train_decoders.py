@@ -167,6 +167,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_dice_loss", action="store_true", help="Use Dice loss instead of cross-entropy")
     parser.add_argument("--train_student", action="store_true", help="Train AS4 StudentHead in parallel with teacher ensemble")
     parser.add_argument("--student_warmup_epochs", type=int, default=10, help="Epochs to train teacher only before student starts updating")
+    parser.add_argument("--student_T_start", type=float, default=4.0, help="Initial temperature for EnDD teacher softmax annealing, linearly anneals to 1.0 over the student's training window")
 
     args = parser.parse_args()
     run_training(args)

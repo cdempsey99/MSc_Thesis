@@ -34,16 +34,9 @@ from pathlib import Path
 from configs.config import *
 from models.ensemble import DecoderEnsemble, StudentHead
 from utils.dataset import BakedFeatureDataset
-from utils.misc import endd_loss, evaluate_student_test_set, evaluate_uncertainty_correlation, save_checkpoint, log_msg
+from utils.misc import endd_loss, evaluate_student_test_set, evaluate_uncertainty_correlation, get_temperature, save_checkpoint, log_msg
 from utils.visualisation import plot_loss_curves
 from torch.utils.data import DataLoader
-
-
-def get_temperature(epoch, num_epochs, T_start, T_end=1.0):
-    """Linear annealing from T_start down to T_end over training."""
-    if num_epochs <= 1:
-        return T_end
-    return T_start - (T_start - T_end) * epoch / (num_epochs - 1)
 
 
 def train_student(teacher_model, student_model, train_loader, val_loader, args, run_name):

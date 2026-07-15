@@ -5,17 +5,17 @@ import json
 from datetime import datetime
 
 
-def student_step(student_model, student_optimizer, features, teacher_logits_detached):
+def student_step(student_model, student_optimizer, features, teacher_logits_detached, temperature=1.0):
     """Single batch update for the AS4 student. Teacher logits must already be detached."""
     student_optimizer.zero_grad()
     alphas = student_model(features)
-    loss = endd_loss(alphas, teacher_logits_detached)
+    loss = endd_loss(alphas, teacher_logits_detached, temperature=temperature)
     loss.backward()
     student_optimizer.step()
     return loss.item()
 
 
-def student_val_epoch(student_model, teacher_model, val_loader):
+def student_val_epoch(student_model, teacher_model, val_loader, temperature=1.0):
     """Compute student EnDD loss on the validation set."""
     student_model.eval()
     total_loss = 0.0
@@ -24,7 +24,7 @@ def student_val_epoch(student_model, teacher_model, val_loader):
             features = features.to(DEVICE)
             teacher_logits = teacher_model(features)
             alphas = student_model(features)
-            total_loss += endd_loss(alphas, teacher_logits).item()
+            total_loss += endd_loss(alphas, teacher_logits, temperature=temperature).item()
     return total_loss / len(val_loader)
 
 
@@ -53,6 +53,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
     best_val_loss = float('inf')
     best_student_val_loss = float('inf')
     student_warmup_epochs = input_dict.get("student_warmup_epochs", 10)
+    student_T_start = input_dict.get("student_T_start", 4.0)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
 
     loss_history = {"train": [], "val": []}
@@ -90,6 +91,8 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         epoch_pearson_loss = 0
         epoch_orth_loss = 0
         epoch_student_loss = 0.0
+        student_T = get_temperature(epoch - student_warmup_epochs, num_epochs - student_warmup_epochs, student_T_start) \
+            if (student_model is not None and epoch >= student_warmup_epochs) else None
 
         decoder_model.train()
 
@@ -143,7 +146,8 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
             optimizer.step()
 
             if student_model is not None and epoch >= student_warmup_epochs:
-                epoch_student_loss += student_step(student_model, student_optimizer, features, all_preds.detach())
+                epoch_student_loss += student_step(student_model, student_optimizer, features, all_preds.detach(),
+                                                   temperature=student_T)
 
             epoch_task_loss += task_loss.item() if torch.is_tensor(task_loss) else task_loss
             epoch_jsd_loss += div_loss_jsd.item() if torch.is_tensor(div_loss_jsd) else div_loss_jsd
@@ -170,7 +174,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
         log_msg(f"Epoch [{epoch + 1}/{num_epochs}] - Task: {avg_task:.4f} | JSD: {avg_jsd:.4f} | Pearson: {avg_pearson:.4f} | Orth: {avg_orth:.4f}")
         if student_model is not None and epoch >= student_warmup_epochs:
-            log_msg(f"  Student EnDD train loss: {epoch_student_loss / len(train_loader):.4f}")
+            log_msg(f"  Student EnDD train loss: {epoch_student_loss / len(train_loader):.4f} | T={student_T:.2f}")
 
         """
         if val_loader is not None:
@@ -227,7 +231,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
             log_msg(f"Validation Loss: {avg_val_loss:.8f}")
 
             if student_model is not None and epoch >= student_warmup_epochs:
-                avg_student_val = student_val_epoch(student_model, decoder_model, val_loader)
+                avg_student_val = student_val_epoch(student_model, decoder_model, val_loader, temperature=student_T)
                 loss_history.setdefault("student_val", []).append(avg_student_val)
                 log_msg(f"  Student Val Loss: {avg_student_val:.6f}")
                 if avg_student_val < best_student_val_loss:
