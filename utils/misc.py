@@ -124,7 +124,6 @@ def js_divergence_loss(all_preds):
             kl_j = F.kl_div(torch.log(avg_ij + 1e-10), all_probs[j], reduction="sum")
 
             del avg_ij, p_i, p_j
-            torch.cuda.empty_cache()
 
             n_pixels = all_probs.size(1) * all_probs.size(3) * all_probs.size(4)
             # JSD is a symmetrised version of KLD
