@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import rasterio
 from rasterio.windows import Window
 
-from utils.misc import log_msg, save_checkpoint, FocalLoss
+from utils.misc import log_msg, save_checkpoint, FocalLoss, js_divergence_loss, pearson_diversity_loss, orthogonality_loss
 from utils.dataset_e2e import load_reben_splits, ReBENRawDataset
 S2_WAVES = ReBENRawDataset.WAVELENGTHS  # [0.6646, 0.5598, 0.4924] μm — S2 B04/B03/B02
 from utils.visualisation import plot_loss_curves, visualise_all_metrics
@@ -127,6 +127,9 @@ def train_e2e_reben(args):
     for epoch in range(start_epoch, args.num_epochs):
         log_msg(f"Starting epoch {epoch + 1}...")
         epoch_task_loss = 0
+        epoch_jsd_loss = 0
+        epoch_pearson_loss = 0
+        epoch_orth_loss = 0
 
         encoder_model.eval()
         transformer = encoder_model.model.encoder.transformer
@@ -151,7 +154,24 @@ def train_e2e_reben(args):
                 total_task_loss += criterion(mean_logits, batch_masks)
                 task_loss = total_task_loss / (decoder.M + 1)
 
-            scaler.scale(task_loss).backward()
+            # Diversity losses computed in float32, outside autocast, for numerical stability
+            div_loss_jsd = torch.tensor(0.0, device=DEVICE)
+            div_loss_pearson = torch.tensor(0.0, device=DEVICE)
+            div_loss_orth = torch.tensor(0.0, device=DEVICE)
+
+            if "jsd" in args.diversity_methods:
+                div_loss_jsd = js_divergence_loss(all_preds.float())
+            if "pearson" in args.diversity_methods:
+                div_loss_pearson = pearson_diversity_loss(all_preds.float())
+            if "orthogonality" in args.diversity_methods:
+                div_loss_orth = orthogonality_loss(decoder)
+
+            total_loss = task_loss \
+                + args.lam_jsd * div_loss_jsd \
+                + args.lam_pearson * div_loss_pearson \
+                + args.lam_orth * div_loss_orth
+
+            scaler.scale(total_loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(
                 [p for p in encoder_model.parameters() if p.requires_grad] +
@@ -161,12 +181,27 @@ def train_e2e_reben(args):
             scaler.step(optimizer)
             scaler.update()
             epoch_task_loss += task_loss.item()
+            epoch_jsd_loss += div_loss_jsd.item() if torch.is_tensor(div_loss_jsd) else div_loss_jsd
+            epoch_pearson_loss += div_loss_pearson.item() if torch.is_tensor(div_loss_pearson) else div_loss_pearson
+            epoch_orth_loss += div_loss_orth.item() if torch.is_tensor(div_loss_orth) else div_loss_orth
 
         avg_task = epoch_task_loss / len(train_loader)
+        avg_jsd = epoch_jsd_loss / len(train_loader)
+        avg_pearson = epoch_pearson_loss / len(train_loader)
+        avg_orth = epoch_orth_loss / len(train_loader)
+
         loss_history["train"].append(avg_task)
+        if "jsd" in args.diversity_methods:
+            loss_history.setdefault("train_jsd", []).append(avg_jsd)
+        if "pearson" in args.diversity_methods:
+            loss_history.setdefault("train_pearson", []).append(avg_pearson)
+        if "orthogonality" in args.diversity_methods:
+            loss_history.setdefault("train_orth", []).append(avg_orth)
+
         enc_lr = optimizer.param_groups[0]['lr']
         dec_lr = optimizer.param_groups[1]['lr']
-        log_msg(f"Epoch [{epoch + 1}/{args.num_epochs}] - Task Loss: {avg_task:.4f} | "
+        log_msg(f"Epoch [{epoch + 1}/{args.num_epochs}] - Task Loss: {avg_task:.4f} | JSD: {avg_jsd:.4f} | "
+                f"Pearson: {avg_pearson:.4f} | Orth: {avg_orth:.4f} | "
                 f"LR encoder: {enc_lr:.2e} decoder: {dec_lr:.2e}")
 
         # Validation
@@ -407,6 +442,10 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
     os.makedirs(runs_dir, exist_ok=True)
     results = {
         "run_name": run_name,
+        "diversity_methods": args.diversity_methods,
+        "lam_jsd": args.lam_jsd,
+        "lam_pearson": args.lam_pearson,
+        "lam_orth": args.lam_orth,
         "global_miou": float(global_miou),
         "global_fwiou": fw_iou,
         "global_accuracy": float(global_acc),
@@ -462,6 +501,13 @@ if __name__ == "__main__":
     # Loss
     parser.add_argument("--use_focal_loss", action="store_true")
     parser.add_argument("--focal_gamma",    type=float, default=2.0)
+
+    # Diversity
+    parser.add_argument("--diversity_methods", type=str, nargs="+", default=[], choices=["jsd", "pearson", "orthogonality"],
+                        help="One or more diversity methods to combine")
+    parser.add_argument("--lam_jsd",     type=float, default=0.0)
+    parser.add_argument("--lam_pearson", type=float, default=0.0)
+    parser.add_argument("--lam_orth",    type=float, default=0.0)
 
     # Resume
     parser.add_argument("--resume",              action="store_true")
