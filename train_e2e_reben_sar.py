@@ -277,14 +277,12 @@ def evaluate_test_set_reben_sar(encoder_model, decoder, test_loader, args, run_n
             with torch.cuda.amp.autocast():
                 features  = get_encoder_representation_partial(test_imgs, encoder_model, waves=S1_WAVES)
                 all_preds = decoder(features)
-                mean_logits = all_preds.mean(dim=0)
-                mean_probs  = torch.softmax(mean_logits, dim=1)
-                class_maps  = torch.argmax(mean_probs, dim=1).cpu().numpy()
-                conf_maps   = torch.max(mean_probs, dim=1)[0].cpu().numpy()
 
             all_head_probs_f32 = torch.stack([torch.softmax(all_preds[m].float(), dim=1)
                                               for m in range(decoder.M)])  # [M, B, C, H, W]
-            mean_probs_f32 = mean_probs.float()
+            mean_probs_f32 = all_head_probs_f32.mean(dim=0)  # true probability mixture: mean(softmax), not softmax(mean)
+            class_maps  = torch.argmax(mean_probs_f32, dim=1).cpu().numpy()
+            conf_maps   = torch.max(mean_probs_f32, dim=1)[0].cpu().numpy()
             test_masks_t   = test_masks.to(DEVICE).long()
             labelled_t     = test_masks_t > 0
             if labelled_t.any():
@@ -382,7 +380,7 @@ def evaluate_test_set_reben_sar(encoder_model, decoder, test_loader, args, run_n
     # UQ decomposition
     mean_total_ent    = total_ent_sum / max(uq_count, 1)
     mean_aleatoric    = aleatoric_sum / max(uq_count, 1)
-    mean_epistemic    = mean_total_ent - mean_aleatoric
+    mean_epistemic    = max(mean_total_ent - mean_aleatoric, 0.0)
     mean_pairwise_jsd = jsd_sum / max(uq_count * n_pairs, 1) if n_pairs > 0 else 0.0
 
     global_acc = np.diag(conf_matrix).sum() / max(conf_matrix.sum(), 1)
