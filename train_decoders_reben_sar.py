@@ -18,7 +18,7 @@ from models.ensemble import DecoderEnsemble
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def evaluate_baked_reben(decoder, test_loader, args, run_name):
+def evaluate_baked_reben_sar(decoder, test_loader, args, run_name):
     decoder.eval()
 
     num_classes = args.num_classes
@@ -163,7 +163,7 @@ def evaluate_baked_reben(decoder, test_loader, args, run_name):
     global_ece = (np.sum(bin_counts * np.abs(bin_accs - bin_confs)) / total_samples
                   if total_samples > 0 else 0.0)
 
-    log_msg(f"REBEN BAKED TEST RESULTS ({patch_count} patches):")
+    log_msg(f"REBEN SAR BAKED TEST RESULTS ({patch_count} patches):")
     log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | "
             f"Acc: {global_acc:.4f} | ECE: {global_ece:.4f} | "
             f"NLL: {global_nll:.4f} | AUROC: {global_auroc:.4f}")
@@ -200,10 +200,10 @@ def evaluate_baked_reben(decoder, test_loader, args, run_name):
     return results
 
 
-def train_decoders_reben(args):
+def train_decoders_reben_sar(args):
     run_name = f"{args.run_name}_{time.strftime('%Y%m%d_%H%M')}"
     log_msg(f"Run name: {run_name}")
-    log_msg(f"reBEN frozen decoder training: {vars(args)}")
+    log_msg(f"reBEN SAR frozen decoder training: {vars(args)}")
 
     # 1. Datasets
     embedding_dir = Path(args.embedding_dir)
@@ -386,17 +386,17 @@ def train_decoders_reben(args):
         log_msg("Loaded best checkpoint for evaluation")
 
     log_msg("Running evaluation...")
-    evaluate_baked_reben(decoder, test_loader, args, run_name)
+    evaluate_baked_reben_sar(decoder, test_loader, args, run_name)
 
     return decoder
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="reBEN frozen decoder training on pre-baked embeddings")
+    parser = argparse.ArgumentParser(description="reBEN SAR frozen decoder training on pre-baked embeddings")
 
     # Paths
     parser.add_argument("--embedding_dir", type=str, required=True,
-                        help="Path to embeddings/reben/ directory containing shard .pt files")
+                        help="Path to embeddings/reben_sar/ directory containing shard .pt files")
     parser.add_argument("--out_dir", type=str, default="./results")
 
     # Model
@@ -424,7 +424,7 @@ if __name__ == "__main__":
                         help="Skip loading optimizer state on resume — resets LR")
 
     # Misc
-    parser.add_argument("--run_name", type=str, default="reben_frozen")
+    parser.add_argument("--run_name", type=str, default="reben_sar_frozen")
 
     args = parser.parse_args()
-    train_decoders_reben(args)
+    train_decoders_reben_sar(args)
