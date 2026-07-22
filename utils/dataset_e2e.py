@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 import pandas as pd
 from rasterio.windows import Window
+from scipy.ndimage import median_filter
 from torch.utils.data import Dataset
 from pathlib import Path
 from utils.misc import log_msg
@@ -196,13 +197,14 @@ class ReBENSARRawDataset(Dataset):
     BAND_MEAN = {"VV": -12.113, "VH": -18.673}
     BAND_STD = {"VV": 8.314, "VH": 8.017}
 
-    def __init__(self, pairs, s1_root, ref_root, augment=False):
+    def __init__(self, pairs, s1_root, ref_root, augment=False, despeckle=False):
         """pairs: list of (patch_id, s1_name) tuples — patch_id keys the mask, s1_name keys the SAR image."""
         self.pairs = pairs
         self.s1_root = Path(s1_root)
         self.ref_root = Path(ref_root)
         self.augment = augment
-        log_msg(f"ReBENSARRawDataset: {len(pairs)} patches")
+        self.despeckle = despeckle
+        log_msg(f"ReBENSARRawDataset: {len(pairs)} patches" + (" (despeckled, 3x3 median)" if despeckle else ""))
 
     def __len__(self):
         return len(self.pairs)
@@ -219,6 +221,8 @@ class ReBENSARRawDataset(Dataset):
             tif = self.s1_root / tile_id / s1_name / f"{s1_name}_{band}.tif"
             with rasterio.open(tif) as src:
                 arr = src.read(1).astype(np.float32)
+            if self.despeckle:
+                arr = median_filter(arr, size=3)  # light speckle reduction, applied in dB before z-scoring
             arr = (arr - self.BAND_MEAN[band]) / self.BAND_STD[band]
             bands.append(arr)
 
@@ -261,7 +265,7 @@ class ReBENSARRawDataset(Dataset):
 
 def load_reben_sar_splits(metadata_path, s1_root, ref_root,
                           exclude_snow=True, exclude_cloud=True, max_patches=None,
-                          max_val_patches=None):
+                          max_val_patches=None, despeckle=False):
     """
     Reads metadata.parquet and returns train/val/test ReBENSARRawDataset objects
     using the official reBEN splits and the s1_name column for S1<->S2 pairing.
@@ -294,9 +298,9 @@ def load_reben_sar_splits(metadata_path, s1_root, ref_root,
             f"{len(train_pairs)} train | {len(val_pairs)} val | {len(test_pairs)} test")
 
     return (
-        ReBENSARRawDataset(train_pairs, s1_root, ref_root, augment=True),
-        ReBENSARRawDataset(val_pairs,   s1_root, ref_root, augment=False),
-        ReBENSARRawDataset(test_pairs,  s1_root, ref_root, augment=False),
+        ReBENSARRawDataset(train_pairs, s1_root, ref_root, augment=True,  despeckle=despeckle),
+        ReBENSARRawDataset(val_pairs,   s1_root, ref_root, augment=False, despeckle=despeckle),
+        ReBENSARRawDataset(test_pairs,  s1_root, ref_root, augment=False, despeckle=despeckle),
     )
 
 

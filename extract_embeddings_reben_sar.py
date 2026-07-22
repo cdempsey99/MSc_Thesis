@@ -76,6 +76,7 @@ def run_extraction(args):
         exclude_snow=True,
         exclude_cloud=True,
         max_patches=args.max_patches,
+        despeckle=args.despeckle,
     )
 
     encoder = initialize_clay_encoder()
@@ -111,5 +112,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size",    type=int, default=32)
     parser.add_argument("--max_patches",   type=int, default=None,
                         help="Limit train patches for QA runs (val/test get max_patches//5)")
+    parser.add_argument("--despeckle", action="store_true",
+                        help="Apply a light 3x3 median filter to VV/VH bands (in dB, before z-scoring) for speckle reduction")
     args = parser.parse_args()
     run_extraction(args)
