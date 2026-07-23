@@ -132,50 +132,53 @@ def profile_decoder_only(args):
         student = StudentHead(in_channels=1024, embed_dim=args.decoder_embed_dim, num_classes=args.num_classes)
         student.to(DEVICE)
 
-    features = torch.randn(args.batch_size, 1024, 28, 28, device=DEVICE)
-    targets = torch.randint(0, args.num_classes, (args.batch_size, 224, 224), device=DEVICE)
-    criterion = nn.CrossEntropyLoss(ignore_index=0)
-
-    with FlopCounterMode(display=True) as fc:
-        all_preds = decoder(features)
-        loss = sum(criterion(all_preds[m], targets) for m in range(decoder.M)) / decoder.M
-        if student is not None:
-            alphas = student(features)
-            loss = loss + endd_loss(alphas, all_preds, temperature=1.0)
-        loss.backward()
-
-    log_msg(f"Decoder-only config: M={args.ensemble_size}, embed_dim={args.decoder_embed_dim}, "
-            f"student={args.include_student}, batch_size={args.batch_size}")
-    log_msg(f"Forward+backward FLOPs per batch: {fc.get_total_flops():,}")
+    ensure_flops_profile(
+        config={
+            "dataset": args.dataset,
+            "encoder_type": "frozen",
+            "n_unfrozen_blocks": None,
+            "ensemble_size": args.ensemble_size,
+            "decoder_embed_dim": args.decoder_embed_dim,
+            "num_classes": args.num_classes,
+            "in_channels": None,
+            "batch_size": args.batch_size,
+            "include_student": args.include_student,
+        },
+        decoder=decoder,
+        student=student,
+    )
 
 
 def profile_e2e(args):
-    from models.encoder import initialize_clay_encoder_partial_unfreeze, get_encoder_representation_partial
+    from models.encoder import initialize_clay_encoder_partial_unfreeze
 
     encoder = initialize_clay_encoder_partial_unfreeze(n_unfrozen_blocks=args.n_unfrozen_blocks)
     decoder = DecoderEnsemble(M=args.ensemble_size, in_channels=1024,
                                embed_dim=args.decoder_embed_dim, num_classes=args.num_classes)
     decoder.to(DEVICE)
 
-    waves = torch.ones(args.in_channels, dtype=torch.float32)  # values don't affect FLOPs, only shape does
-    images = torch.randn(args.batch_size, args.in_channels, 224, 224, device=DEVICE)
-    targets = torch.randint(0, args.num_classes, (args.batch_size, 224, 224), device=DEVICE)
-    criterion = nn.CrossEntropyLoss(ignore_index=0)
-
-    with FlopCounterMode(display=True) as fc:
-        features = get_encoder_representation_partial(images, encoder, waves=waves)
-        all_preds = decoder(features)
-        loss = sum(criterion(all_preds[m], targets) for m in range(decoder.M)) / decoder.M
-        loss.backward()
-
-    log_msg(f"E2E config: n_unfrozen_blocks={args.n_unfrozen_blocks}, M={args.ensemble_size}, "
-            f"embed_dim={args.decoder_embed_dim}, in_channels={args.in_channels}, batch_size={args.batch_size}")
-    log_msg(f"Forward+backward FLOPs per batch: {fc.get_total_flops():,}")
+    ensure_flops_profile(
+        config={
+            "dataset": args.dataset,
+            "encoder_type": "finetuned",
+            "n_unfrozen_blocks": args.n_unfrozen_blocks,
+            "ensemble_size": args.ensemble_size,
+            "decoder_embed_dim": args.decoder_embed_dim,
+            "num_classes": args.num_classes,
+            "in_channels": args.in_channels,
+            "batch_size": args.batch_size,
+            "include_student": False,
+        },
+        decoder=decoder,
+        encoder=encoder,
+    )
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="One-time FLOPs profiling for a given model configuration")
+    parser = argparse.ArgumentParser(description="Manually trigger a cached FLOPs profile for a given model configuration")
     parser.add_argument("--mode", choices=["decoder_only", "e2e"], required=True)
+    parser.add_argument("--dataset", type=str, required=True,
+                        help="e.g. fbp, reben, reben_sar — must match what the real training script used")
     parser.add_argument("--ensemble_size", type=int, default=1)
     parser.add_argument("--decoder_embed_dim", type=int, default=512)
     parser.add_argument("--num_classes", type=int, default=25)
