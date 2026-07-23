@@ -46,6 +46,7 @@ def train_e2e_reben_sar(args):
         max_patches=args.max_patches,
         max_val_patches=args.max_val_patches,
         despeckle=args.despeckle,
+        lee_filter_despeckle=args.lee_filter,
     )
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
@@ -467,6 +468,8 @@ if __name__ == "__main__":
                         help="Include patches flagged as containing cloud or shadow")
     parser.add_argument("--despeckle", action="store_true",
                         help="Apply a light 3x3 median filter to VV/VH bands (in dB, before z-scoring) for speckle reduction")
+    parser.add_argument("--lee_filter", action="store_true",
+                        help="Apply an adaptive Lee speckle filter to VV/VH bands instead of the flat median filter")
 
     # Model
     parser.add_argument("--ensemble_size",     type=int,   default=5)

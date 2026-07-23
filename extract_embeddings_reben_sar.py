@@ -77,6 +77,7 @@ def run_extraction(args):
         exclude_cloud=True,
         max_patches=args.max_patches,
         despeckle=args.despeckle,
+        lee_filter_despeckle=args.lee_filter,
     )
 
     encoder = initialize_clay_encoder()
@@ -114,5 +115,7 @@ if __name__ == "__main__":
                         help="Limit train patches for QA runs (val/test get max_patches//5)")
     parser.add_argument("--despeckle", action="store_true",
                         help="Apply a light 3x3 median filter to VV/VH bands (in dB, before z-scoring) for speckle reduction")
+    parser.add_argument("--lee_filter", action="store_true",
+                        help="Apply an adaptive Lee speckle filter to VV/VH bands instead of the flat median filter")
     args = parser.parse_args()
     run_extraction(args)

@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 import pandas as pd
 from rasterio.windows import Window
-from scipy.ndimage import median_filter
+from scipy.ndimage import median_filter, uniform_filter
 from torch.utils.data import Dataset
 from pathlib import Path
 from utils.misc import log_msg
@@ -183,6 +183,42 @@ def load_reben_splits(metadata_path, s2_root, ref_root,
     )
 
 
+def lee_filter(arr_db, window_size=7, enl=4.9):
+    """
+    Adaptive (Lee) speckle filter. Unlike a flat median/mean filter, this smooths
+    proportionally to local variance: homogeneous regions (low local variance,
+    likely pure speckle) get smoothed heavily, textured regions (high local
+    variance, likely genuine structure like forest canopy roughness) are left
+    mostly untouched. This is the standard SAR despeckling filter in the remote
+    sensing literature, and specifically targets the failure mode found with plain
+    median-filter despeckling (destroying real texture along with noise).
+
+    The multiplicative speckle model this filter is derived from applies in the
+    linear intensity domain, not log/dB, so the input (already in dB) is converted
+    to linear, filtered, then converted back to dB before z-scoring as usual.
+
+    enl (equivalent number of looks) is a property of the SAR product, not the
+    scene. 4.9 is a commonly cited literature value for Sentinel-1 IW GRDH
+    (the product BigEarthNet-S1 derives from), used here as an approximation
+    rather than a value derived from this specific dataset.
+    """
+    linear = 10.0 ** (arr_db / 10.0)
+
+    mean_local = uniform_filter(linear, size=window_size)
+    mean_sq_local = uniform_filter(linear ** 2, size=window_size)
+    var_local = np.clip(mean_sq_local - mean_local ** 2, 0, None)
+
+    cu = 1.0 / np.sqrt(enl)
+    ci = np.sqrt(var_local) / np.clip(mean_local, 1e-10, None)
+
+    weight = 1.0 - (cu / np.clip(ci, 1e-10, None)) ** 2
+    weight = np.clip(weight, 0.0, 1.0)  # weight->0 in homogeneous areas (trust local mean), ->1 in textured areas (trust pixel)
+
+    output_linear = mean_local + weight * (linear - mean_local)
+    output_linear = np.clip(output_linear, 1e-10, None)
+    return 10.0 * np.log10(output_linear)
+
+
 class ReBENSARRawDataset(Dataset):
     """
     Dataset for reBEN SAR e2e training.
@@ -197,14 +233,17 @@ class ReBENSARRawDataset(Dataset):
     BAND_MEAN = {"VV": -12.113, "VH": -18.673}
     BAND_STD = {"VV": 8.314, "VH": 8.017}
 
-    def __init__(self, pairs, s1_root, ref_root, augment=False, despeckle=False):
+    def __init__(self, pairs, s1_root, ref_root, augment=False, despeckle=False, lee_filter_despeckle=False):
         """pairs: list of (patch_id, s1_name) tuples — patch_id keys the mask, s1_name keys the SAR image."""
         self.pairs = pairs
         self.s1_root = Path(s1_root)
         self.ref_root = Path(ref_root)
         self.augment = augment
         self.despeckle = despeckle
-        log_msg(f"ReBENSARRawDataset: {len(pairs)} patches" + (" (despeckled, 3x3 median)" if despeckle else ""))
+        self.lee_filter_despeckle = lee_filter_despeckle
+        despeckle_desc = " (despeckled, 3x3 median)" if despeckle else \
+            " (despeckled, Lee adaptive filter)" if lee_filter_despeckle else ""
+        log_msg(f"ReBENSARRawDataset: {len(pairs)} patches" + despeckle_desc)
 
     def __len__(self):
         return len(self.pairs)
@@ -223,6 +262,8 @@ class ReBENSARRawDataset(Dataset):
                 arr = src.read(1).astype(np.float32)
             if self.despeckle:
                 arr = median_filter(arr, size=3)  # light speckle reduction, applied in dB before z-scoring
+            if self.lee_filter_despeckle:
+                arr = lee_filter(arr)
             arr = (arr - self.BAND_MEAN[band]) / self.BAND_STD[band]
             bands.append(arr)
 
@@ -265,7 +306,7 @@ class ReBENSARRawDataset(Dataset):
 
 def load_reben_sar_splits(metadata_path, s1_root, ref_root,
                           exclude_snow=True, exclude_cloud=True, max_patches=None,
-                          max_val_patches=None, despeckle=False):
+                          max_val_patches=None, despeckle=False, lee_filter_despeckle=False):
     """
     Reads metadata.parquet and returns train/val/test ReBENSARRawDataset objects
     using the official reBEN splits and the s1_name column for S1<->S2 pairing.
@@ -298,9 +339,9 @@ def load_reben_sar_splits(metadata_path, s1_root, ref_root,
             f"{len(train_pairs)} train | {len(val_pairs)} val | {len(test_pairs)} test")
 
     return (
-        ReBENSARRawDataset(train_pairs, s1_root, ref_root, augment=True,  despeckle=despeckle),
-        ReBENSARRawDataset(val_pairs,   s1_root, ref_root, augment=False, despeckle=despeckle),
-        ReBENSARRawDataset(test_pairs,  s1_root, ref_root, augment=False, despeckle=despeckle),
+        ReBENSARRawDataset(train_pairs, s1_root, ref_root, augment=True,  despeckle=despeckle, lee_filter_despeckle=lee_filter_despeckle),
+        ReBENSARRawDataset(val_pairs,   s1_root, ref_root, augment=False, despeckle=despeckle, lee_filter_despeckle=lee_filter_despeckle),
+        ReBENSARRawDataset(test_pairs,  s1_root, ref_root, augment=False, despeckle=despeckle, lee_filter_despeckle=lee_filter_despeckle),
     )
 
 
