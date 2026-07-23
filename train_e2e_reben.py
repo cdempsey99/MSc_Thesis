@@ -146,6 +146,16 @@ def train_e2e_reben(args):
             log_msg(f"Resuming encoder from {encoder_ckpt}...")
             enc_ckpt = torch.load(encoder_ckpt, map_location=DEVICE)
             encoder_model.load_state_dict(enc_ckpt['encoder_state_dict'], strict=False)
+        if student_model is not None and args.resume_student_path:
+            student_ckpt_path = Path(args.resume_student_path)
+            if student_ckpt_path.exists():
+                log_msg(f"Resuming student from {student_ckpt_path}...")
+                student_ckpt = torch.load(student_ckpt_path, map_location=DEVICE)
+                student_model.load_state_dict(student_ckpt['model_state_dict'])
+                if 'optimizer_state_dict' in student_ckpt:
+                    student_optimizer.load_state_dict(student_ckpt['optimizer_state_dict'])
+            else:
+                log_msg(f"WARNING: --resume_student_path given but not found at {student_ckpt_path}, student starts fresh")
         start_epoch = args.resume_epoch
         loss_path = os.path.join(runs_dir, f"{args.run_name}_loss_history.json")
         if os.path.exists(loss_path):
@@ -155,6 +165,9 @@ def train_e2e_reben(args):
         if start_epoch < args.warmup_epochs:
             for _ in range(start_epoch):
                 warmup_scheduler.step()
+        if student_scheduler is not None:
+            for _ in range(start_epoch):
+                student_scheduler.step()
 
     # 5. Training loop
     best_val_loss = float('inf')
@@ -301,7 +314,8 @@ def train_e2e_reben(args):
             log_msg(f"  Student Val Loss: {avg_student_val:.6f}")
             if avg_student_val < best_student_val_loss:
                 best_student_val_loss = avg_student_val
-                save_checkpoint({'epoch': epoch + 1, 'model_state_dict': student_model.state_dict()},
+                save_checkpoint({'epoch': epoch + 1, 'model_state_dict': student_model.state_dict(),
+                                 'optimizer_state_dict': student_optimizer.state_dict()},
                                 str(CHECKPOINT_DIR), filename=f"{run_name}_best_student.pth")
                 log_msg(f"  New best student val loss {best_student_val_loss:.6f} — saved")
 
@@ -320,6 +334,10 @@ def train_e2e_reben(args):
                             str(CHECKPOINT_DIR), filename=f"{run_name}_last_decoder.pth")
             save_checkpoint({'epoch': epoch + 1, 'encoder_state_dict': encoder_model.state_dict()},
                             str(CHECKPOINT_DIR), filename=f"{run_name}_last_encoder.pth")
+            if student_model is not None:
+                save_checkpoint({'epoch': epoch + 1, 'model_state_dict': student_model.state_dict(),
+                                 'optimizer_state_dict': student_optimizer.state_dict()},
+                                str(CHECKPOINT_DIR), filename=f"{run_name}_last_student.pth")
             loss_path = os.path.join(runs_dir, f"{run_name}_loss_history.json")
             with open(loss_path, "w") as f:
                 json.dump(loss_history, f, indent=2)
@@ -339,7 +357,8 @@ def train_e2e_reben(args):
     save_checkpoint({'epoch': args.num_epochs, 'encoder_state_dict': encoder_model.state_dict()},
                     str(CHECKPOINT_DIR), filename=f"{run_name}_final_encoder_{timestamp}.pth")
     if student_model is not None:
-        save_checkpoint({'epoch': args.num_epochs, 'model_state_dict': student_model.state_dict()},
+        save_checkpoint({'epoch': args.num_epochs, 'model_state_dict': student_model.state_dict(),
+                         'optimizer_state_dict': student_optimizer.state_dict()},
                         str(CHECKPOINT_DIR), filename=f"{run_name}_final_student_{timestamp}.pth")
     loss_path = os.path.join(runs_dir, f"{run_name}_loss_history.json")
     with open(loss_path, "w") as f:
@@ -862,6 +881,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume",              action="store_true")
     parser.add_argument("--resume_decoder_path", type=str, default=None)
     parser.add_argument("--resume_encoder_path", type=str, default=None)
+    parser.add_argument("--resume_student_path", type=str, default=None)
     parser.add_argument("--resume_epoch",        type=int, default=0)
 
     # Misc
