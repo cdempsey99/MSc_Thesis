@@ -19,7 +19,7 @@ from rasterio.windows import Window
 from utils.misc import log_msg, save_checkpoint, FocalLoss
 from utils.dataset_e2e import load_reben_sar_splits, ReBENSARRawDataset
 S1_WAVES = ReBENSARRawDataset.WAVELENGTHS  # [3.5, 4.0] μm — Clay metadata.yaml nominal SAR values
-from utils.visualisation import plot_loss_curves, visualise_all_metrics
+from utils.visualisation import plot_loss_curves, visualise_all_metrics, plot_confusion_matrix
 from models.ensemble import DecoderEnsemble
 from models.encoder import (
     initialize_clay_encoder_partial_unfreeze,
@@ -421,11 +421,13 @@ def evaluate_test_set_reben_sar(encoder_model, decoder, test_loader, args, run_n
         "per_head_miou": {f"head_{m}": v for m, v in enumerate(head_mious)},
         "num_patches": patch_count,
         "per_class_iou": {class_names[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)},
+        "confusion_matrix": conf_matrix.tolist(),
     }
     results_path = os.path.join(runs_dir, f"{run_name}_results.json")
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
     log_msg(f"Results saved to {results_path}")
+    plot_confusion_matrix(results_path, save_name=f"{run_name}_confusion")
     return results
 
 

@@ -12,7 +12,7 @@ import os
 
 from utils.misc import log_msg, save_checkpoint, FocalLoss
 from utils.dataset_e2e import BakedReBENDataset
-from utils.visualisation import plot_loss_curves
+from utils.visualisation import plot_loss_curves, plot_confusion_matrix
 from models.ensemble import DecoderEnsemble
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -192,11 +192,13 @@ def evaluate_baked_reben_sar(decoder, test_loader, args, run_name):
         "per_head_miou": {f"head_{m}": v for m, v in enumerate(head_mious)},
         "num_patches": patch_count,
         "per_class_iou": {class_names[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)},
+        "confusion_matrix": conf_matrix.tolist(),
     }
     results_path = os.path.join(runs_dir, f"{run_name}_results.json")
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
     log_msg(f"Results saved to {results_path}")
+    plot_confusion_matrix(results_path, save_name=f"{run_name}_confusion")
     return results
 
 

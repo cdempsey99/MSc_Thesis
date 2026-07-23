@@ -604,12 +604,14 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
         "global_nll": global_nll,
         "global_auroc": global_auroc,
         "num_patches": patch_count,
-        "per_class_iou": {class_names[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)}
+        "per_class_iou": {class_names[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)},
+        "confusion_matrix": conf_matrix.tolist(),
     }
     results_path = os.path.join(runs_dir, f"{run_name}_results.json")
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
     log_msg(f"Student results saved to {results_path}")
+    plot_confusion_matrix(results_path, save_name=f"{run_name}_confusion")
 
     return results
 
@@ -1026,11 +1028,13 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
         "mean_pairwise_jsd": mean_pairwise_jsd,
         "per_head_miou": per_head_miou,
         "num_patches": patch_count,
-        "per_class_iou": {class_names[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)}
+        "per_class_iou": {class_names[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)},
+        "confusion_matrix": conf_matrix.tolist(),
     }
     results_path = os.path.join(runs_dir, f"{run_name}_results.json")
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
     log_msg(f"Results saved to {results_path}")
+    plot_confusion_matrix(results_path, save_name=f"{run_name}_confusion")
 
     return results

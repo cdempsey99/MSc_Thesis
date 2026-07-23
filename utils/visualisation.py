@@ -389,3 +389,46 @@ def plot_loss_curves(loss_history_path, save_name="loss_curves"):
     plt.close()
     print(f"Loss curves saved to {full_path}")
 
+
+def plot_confusion_matrix(results_json_path, save_name="confusion_matrix", normalize=True):
+    """
+    Reads a results.json produced by any of the evaluate_* functions and plots its
+    confusion matrix as a heatmap. Row/col 0 (ignore/no-data) is dropped, matching
+    per_class_iou which also skips it. Class labels come from per_class_iou's keys,
+    which are in the same natural class-index order as the confusion matrix rows/cols.
+    normalize=True row-normalizes (each row sums to 1), which is far more readable
+    than raw counts when class frequencies vary a lot.
+    """
+    save_path = os.path.join(BASE_OUT, "confusion_matrices")
+    ensure_dir(save_path)
+
+    with open(results_json_path) as f:
+        results = json.load(f)
+
+    cm = np.array(results["confusion_matrix"], dtype=np.float64)
+    class_names = list(results["per_class_iou"].keys())
+    cm = cm[1:, 1:]  # drop the ignore/no-data row and column
+
+    if normalize:
+        row_sums = cm.sum(axis=1, keepdims=True)
+        cm = np.divide(cm, row_sums, out=np.zeros_like(cm), where=row_sums > 0)
+
+    n = len(class_names)
+    fig, ax = plt.subplots(figsize=(max(8, n * 0.4), max(8, n * 0.4)))
+    im = ax.imshow(cm, cmap='viridis', vmin=0, vmax=1 if normalize else None)
+    fig.colorbar(im, ax=ax, label="Fraction of true class" if normalize else "Pixel count")
+
+    ax.set_xticks(range(n))
+    ax.set_yticks(range(n))
+    ax.set_xticklabels(class_names, rotation=90, fontsize=7)
+    ax.set_yticklabels(class_names, fontsize=7)
+    ax.set_xlabel("Predicted class")
+    ax.set_ylabel("True class")
+    ax.set_title(f"Confusion Matrix ({results.get('run_name', '')})")
+
+    current_time = datetime.now().strftime("%Y%m%d%H%M")
+    full_path = os.path.join(save_path, f"{save_name}_{current_time}.png")
+    plt.savefig(full_path, bbox_inches='tight', dpi=150)
+    plt.close()
+    print(f"Confusion matrix saved to {full_path}")
+
