@@ -224,8 +224,9 @@ def train_e2e_reben(args):
 
             if student_model is not None and epoch >= args.student_warmup_epochs:
                 student_optimizer.zero_grad()
+                features_detached = features.detach()
                 with torch.cuda.amp.autocast():
-                    student_alphas = student_model(features)
+                    student_alphas = student_model(features_detached)
                 d_loss = endd_loss(student_alphas.float(), all_preds.detach().float(), temperature=student_T)
                 student_scaler.scale(d_loss).backward()
                 student_scaler.unscale_(student_optimizer)
