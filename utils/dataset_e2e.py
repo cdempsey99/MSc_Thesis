@@ -216,7 +216,9 @@ def lee_filter(arr_db, window_size=7, enl=4.9):
 
     output_linear = mean_local + weight * (linear - mean_local)
     output_linear = np.clip(output_linear, 1e-10, None)
-    return 10.0 * np.log10(output_linear)
+    # Chained scalar/array arithmetic above silently upcasts float32 -> float64 in numpy;
+    # cast back explicitly so this doesn't propagate as a double all the way into the encoder.
+    return (10.0 * np.log10(output_linear)).astype(np.float32)
 
 
 class ReBENSARRawDataset(Dataset):
