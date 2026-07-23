@@ -26,6 +26,7 @@ from models.encoder import (
     get_encoder_representation_partial,
 )
 from utils.misc import get_decoder_output_maps
+from profile_flops import ensure_flops_profile
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -68,6 +69,23 @@ def train_e2e_reben_sar(args):
         num_classes=args.num_classes,
     )
     decoder.to(DEVICE)
+
+    ensure_flops_profile(
+        config={
+            "dataset": "reben_sar",
+            "encoder_type": "finetuned",
+            "n_unfrozen_blocks": args.n_unfrozen_blocks,
+            "ensemble_size": args.ensemble_size,
+            "decoder_embed_dim": args.decoder_embed_dim,
+            "num_classes": args.num_classes,
+            "in_channels": 2,
+            "batch_size": args.batch_size,
+            "include_student": False,
+        },
+        decoder=decoder,
+        encoder=encoder_model,
+        waves=S1_WAVES,
+    )
 
     # 3. Optimiser with differential LRs
     trainable_enc = [p for p in encoder_model.parameters() if p.requires_grad]

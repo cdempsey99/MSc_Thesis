@@ -1,6 +1,7 @@
 from models.ensemble import *
 from utils.misc import *
 from configs.config import *
+from profile_flops import ensure_flops_profile
 import json
 from datetime import datetime
 
@@ -330,6 +331,22 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
             student_optimizer, T_max=input_dict["num_epochs"], eta_min=1e-6
         )
         log_msg("StudentHead instantiated for parallel AS4 training")
+
+    ensure_flops_profile(
+        config={
+            "dataset": "fbp",
+            "encoder_type": "frozen",
+            "n_unfrozen_blocks": None,
+            "ensemble_size": input_dict["ensemble_size"],
+            "decoder_embed_dim": input_dict["decoder_embed_dim"],
+            "num_classes": input_dict["num_classes"],
+            "in_channels": None,
+            "batch_size": input_dict["batch_size"],
+            "include_student": input_dict.get("train_student", False),
+        },
+        decoder=this_ensemble,
+        student=student_model,
+    )
 
     # Train
     trained_decoder_model = train_model(

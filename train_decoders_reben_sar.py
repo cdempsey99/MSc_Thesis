@@ -14,6 +14,7 @@ from utils.misc import log_msg, save_checkpoint, FocalLoss
 from utils.dataset_e2e import BakedReBENDataset
 from utils.visualisation import plot_loss_curves, plot_confusion_matrix
 from models.ensemble import DecoderEnsemble
+from profile_flops import ensure_flops_profile
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -231,6 +232,21 @@ def train_decoders_reben_sar(args):
         num_classes=args.num_classes,
     )
     decoder.to(DEVICE)
+
+    ensure_flops_profile(
+        config={
+            "dataset": "reben_sar",
+            "encoder_type": "frozen",
+            "n_unfrozen_blocks": None,
+            "ensemble_size": args.ensemble_size,
+            "decoder_embed_dim": args.decoder_embed_dim,
+            "num_classes": args.num_classes,
+            "in_channels": None,
+            "batch_size": args.batch_size,
+            "include_student": False,
+        },
+        decoder=decoder,
+    )
 
     # 3. Optimiser
     optimizer = torch.optim.AdamW(decoder.parameters(), lr=args.lr, weight_decay=0.05)
