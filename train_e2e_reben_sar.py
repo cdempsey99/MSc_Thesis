@@ -26,7 +26,7 @@ from models.encoder import (
     get_encoder_representation_partial,
 )
 from utils.misc import get_decoder_output_maps
-from profile_flops import ensure_flops_profile
+from profile_flops import ensure_flops_profile, start_compute_tracking, record_compute_cost
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -71,7 +71,7 @@ def train_e2e_reben_sar(args):
     )
     decoder.to(DEVICE)
 
-    ensure_flops_profile(
+    flops_profile = ensure_flops_profile(
         config={
             "dataset": "reben_sar",
             "encoder_type": "finetuned",
@@ -143,6 +143,9 @@ def train_e2e_reben_sar(args):
     # 5. Training loop
     best_val_loss = float('inf')
     log_msg("Starting training...")
+
+    compute_start_epoch = start_epoch
+    training_start_time = start_compute_tracking()
 
     for epoch in range(start_epoch, args.num_epochs):
         log_msg(f"Starting epoch {epoch + 1}...")
@@ -235,6 +238,10 @@ def train_e2e_reben_sar(args):
             warmup_scheduler.step()
         else:
             plateau_scheduler.step(avg_val_loss)
+
+    record_compute_cost(flops_profile, epochs_completed=args.num_epochs - compute_start_epoch,
+                        batches_per_epoch=len(train_loader), start_time=training_start_time,
+                        run_name=run_name)
 
     # Final save
     timestamp = time.strftime("%Y%m%d_%H%M")

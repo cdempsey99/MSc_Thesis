@@ -14,7 +14,7 @@ from utils.misc import log_msg, save_checkpoint, FocalLoss
 from utils.dataset_e2e import BakedReBENDataset
 from utils.visualisation import plot_loss_curves, plot_confusion_matrix
 from models.ensemble import DecoderEnsemble
-from profile_flops import ensure_flops_profile
+from profile_flops import ensure_flops_profile, start_compute_tracking, record_compute_cost
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -233,7 +233,7 @@ def train_decoders_reben(args):
     )
     decoder.to(DEVICE)
 
-    ensure_flops_profile(
+    flops_profile = ensure_flops_profile(
         config={
             "dataset": "reben",
             "encoder_type": "frozen",
@@ -299,6 +299,9 @@ def train_decoders_reben(args):
     best_val_loss = float('inf')
     epochs_no_improve = 0
     log_msg("Starting training...")
+
+    compute_start_epoch = start_epoch
+    training_start_time = start_compute_tracking()
 
     for epoch in range(start_epoch, args.num_epochs):
         log_msg(f"Starting epoch {epoch + 1}...")
@@ -382,6 +385,10 @@ def train_decoders_reben(args):
         if epochs_no_improve >= args.early_stopping_patience:
             log_msg(f"Early stopping triggered at epoch {epoch + 1}")
             break
+
+    record_compute_cost(flops_profile, epochs_completed=epoch + 1 - compute_start_epoch,
+                        batches_per_epoch=len(train_loader), start_time=training_start_time,
+                        run_name=run_name)
 
     # Final save
     timestamp = time.strftime("%Y%m%d_%H%M")

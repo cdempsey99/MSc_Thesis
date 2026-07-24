@@ -29,7 +29,7 @@ from models.encoder import (
     get_encoder_representation_partial,
 )
 from utils.misc import get_decoder_output_maps
-from profile_flops import ensure_flops_profile
+from profile_flops import ensure_flops_profile, start_compute_tracking, record_compute_cost
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -86,7 +86,7 @@ def train_e2e_reben(args):
         student_scaler = torch.cuda.amp.GradScaler()
         log_msg("StudentHead instantiated for parallel AS4 training")
 
-    ensure_flops_profile(
+    flops_profile = ensure_flops_profile(
         config={
             "dataset": "reben",
             "encoder_type": "finetuned",
@@ -97,6 +97,7 @@ def train_e2e_reben(args):
             "in_channels": 3,
             "batch_size": args.batch_size,
             "include_student": args.train_student,
+            "diversity_methods": args.diversity_methods,
         },
         decoder=decoder,
         student=student_model,
@@ -173,6 +174,9 @@ def train_e2e_reben(args):
     best_val_loss = float('inf')
     best_student_val_loss = float('inf')
     log_msg("Starting training...")
+
+    compute_start_epoch = start_epoch
+    training_start_time = start_compute_tracking()
 
     for epoch in range(start_epoch, args.num_epochs):
         log_msg(f"Starting epoch {epoch + 1}...")
@@ -348,6 +352,10 @@ def train_e2e_reben(args):
             plateau_scheduler.step(avg_val_loss)
         if student_scheduler is not None:
             student_scheduler.step()
+
+    record_compute_cost(flops_profile, epochs_completed=args.num_epochs - compute_start_epoch,
+                        batches_per_epoch=len(train_loader), start_time=training_start_time,
+                        run_name=run_name)
 
     # Final save
     timestamp = time.strftime("%Y%m%d_%H%M")

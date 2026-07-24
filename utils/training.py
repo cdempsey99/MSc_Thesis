@@ -1,7 +1,7 @@
 from models.ensemble import *
 from utils.misc import *
 from configs.config import *
-from profile_flops import ensure_flops_profile
+from profile_flops import ensure_flops_profile, start_compute_tracking, record_compute_cost
 import json
 from datetime import datetime
 
@@ -30,7 +30,7 @@ def student_val_epoch(student_model, teacher_model, val_loader, temperature=1.0)
 
 
 def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, input_dict,
-                student_model=None, student_optimizer=None, student_scheduler=None):
+                student_model=None, student_optimizer=None, student_scheduler=None, flops_profile=None):
     num_epochs = input_dict["num_epochs"]
     #lambda_div = input_dict["lambda_div"]
     #enforce_diversity = input_dict["enforce_diversity"]
@@ -82,6 +82,9 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         log_msg("!! This run will OVERWRITE your existing checkpoint. !!")
 
     log_msg(f"Starting Training")
+
+    compute_start_epoch = start_epoch  # captured before the loop mutates epoch, for the compute-cost summary
+    training_start_time = start_compute_tracking()
 
     for epoch in range(start_epoch, num_epochs):
         log_msg(f"Starting epoch {epoch+1}...")
@@ -279,6 +282,11 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         json.dump(loss_history, f, indent=2)
     log_msg(f"Final model saved.")
 
+    if flops_profile is not None:
+        record_compute_cost(flops_profile, epochs_completed=num_epochs - compute_start_epoch,
+                            batches_per_epoch=len(train_loader), start_time=training_start_time,
+                            run_name=run_name)
+
     log_msg(f"Training completed")
     return decoder_model
 
@@ -332,7 +340,7 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
         )
         log_msg("StudentHead instantiated for parallel AS4 training")
 
-    ensure_flops_profile(
+    flops_profile = ensure_flops_profile(
         config={
             "dataset": "fbp",
             "encoder_type": "frozen",
@@ -343,6 +351,7 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
             "in_channels": None,
             "batch_size": input_dict["batch_size"],
             "include_student": input_dict.get("train_student", False),
+            "diversity_methods": input_dict.get("diversity_methods", []),
         },
         decoder=this_ensemble,
         student=student_model,
@@ -351,7 +360,8 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
     # Train
     trained_decoder_model = train_model(
         this_ensemble, train_loader, val_loader, criterion, optimizer, input_dict,
-        student_model=student_model, student_optimizer=student_optimizer, student_scheduler=student_scheduler
+        student_model=student_model, student_optimizer=student_optimizer, student_scheduler=student_scheduler,
+        flops_profile=flops_profile
     )
 
     return trained_decoder_model, student_model
