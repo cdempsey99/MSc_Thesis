@@ -98,6 +98,6 @@ CORINE_TO_REBEN = {
     521: 19, 522: 19, 523: 19,               # Marine Waters
 }
 
-# Kaggle API token
-KAGGLE_API_TOKEN="REDACTED"
+# Kaggle API token — set via env var, never hardcode (see .kaggle/kaggle.json or shell profile)
+KAGGLE_API_TOKEN = os.environ.get("KAGGLE_API_TOKEN")
 
