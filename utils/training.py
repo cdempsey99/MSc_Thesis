@@ -71,6 +71,8 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         decoder_model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch']
+        best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        best_student_val_loss = checkpoint.get('best_student_val_loss', float('inf'))
         loss_path = os.path.join(runs_dir, f"{run_name}_loss_history.json")
         if os.path.exists(loss_path):
             with open(loss_path) as f:
@@ -252,6 +254,8 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                 'epoch': epoch + 1,
                 'model_state_dict': decoder_model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'best_val_loss': best_val_loss,
+                'best_student_val_loss': best_student_val_loss,
             }
             save_checkpoint(current_state, str(CHECKPOINT_DIR),
                             filename=f"{run_name}_last_checkpoint.pth")
