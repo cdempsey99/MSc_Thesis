@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import rasterio
 from rasterio.windows import Window
 
-from utils.misc import log_msg, save_checkpoint, FocalLoss
+from utils.misc import log_msg, save_checkpoint, FocalLoss, js_divergence_loss, pearson_diversity_loss, orthogonality_loss
 from utils.dataset_e2e import load_reben_sar_splits, ReBENSARRawDataset
 S1_WAVES = ReBENSARRawDataset.WAVELENGTHS  # [3.5, 4.0] μm — Clay metadata.yaml nominal SAR values
 from utils.visualisation import plot_loss_curves, visualise_all_metrics, plot_confusion_matrix
@@ -82,6 +82,7 @@ def train_e2e_reben_sar(args):
             "in_channels": 2,
             "batch_size": args.batch_size,
             "include_student": False,
+            "diversity_methods": args.diversity_methods,
         },
         decoder=decoder,
         encoder=encoder_model,
@@ -117,6 +118,7 @@ def train_e2e_reben_sar(args):
     # 4. Resume logic
     start_epoch = 0
     loss_history = {"train": [], "val": []}
+    best_val_loss = float('inf')
 
     if args.resume:
         decoder_ckpt = Path(args.resume_decoder_path) if args.resume_decoder_path else None
@@ -126,6 +128,7 @@ def train_e2e_reben_sar(args):
             ckpt = torch.load(decoder_ckpt, map_location=DEVICE)
             decoder.load_state_dict(ckpt['model_state_dict'])
             optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            best_val_loss = ckpt.get('best_val_loss', float('inf'))
         if encoder_ckpt and encoder_ckpt.exists():
             log_msg(f"Resuming encoder from {encoder_ckpt}...")
             enc_ckpt = torch.load(encoder_ckpt, map_location=DEVICE)
@@ -141,7 +144,6 @@ def train_e2e_reben_sar(args):
                 warmup_scheduler.step()
 
     # 5. Training loop
-    best_val_loss = float('inf')
     log_msg("Starting training...")
 
     compute_start_epoch = start_epoch
@@ -150,6 +152,9 @@ def train_e2e_reben_sar(args):
     for epoch in range(start_epoch, args.num_epochs):
         log_msg(f"Starting epoch {epoch + 1}...")
         epoch_task_loss = 0
+        epoch_jsd_loss = 0
+        epoch_pearson_loss = 0
+        epoch_orth_loss = 0
 
         encoder_model.eval()
         transformer = encoder_model.model.encoder.transformer
@@ -174,7 +179,24 @@ def train_e2e_reben_sar(args):
                 total_task_loss += criterion(mean_logits, batch_masks)
                 task_loss = total_task_loss / (decoder.M + 1)
 
-            scaler.scale(task_loss).backward()
+            # Diversity losses computed in float32, outside autocast, for numerical stability
+            div_loss_jsd = torch.tensor(0.0, device=DEVICE)
+            div_loss_pearson = torch.tensor(0.0, device=DEVICE)
+            div_loss_orth = torch.tensor(0.0, device=DEVICE)
+
+            if "jsd" in args.diversity_methods:
+                div_loss_jsd = js_divergence_loss(all_preds.float())
+            if "pearson" in args.diversity_methods:
+                div_loss_pearson = pearson_diversity_loss(all_preds.float())
+            if "orthogonality" in args.diversity_methods:
+                div_loss_orth = orthogonality_loss(decoder)
+
+            total_loss = task_loss \
+                + args.lam_jsd * div_loss_jsd \
+                + args.lam_pearson * div_loss_pearson \
+                + args.lam_orth * div_loss_orth
+
+            scaler.scale(total_loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(
                 [p for p in encoder_model.parameters() if p.requires_grad] +
@@ -184,12 +206,27 @@ def train_e2e_reben_sar(args):
             scaler.step(optimizer)
             scaler.update()
             epoch_task_loss += task_loss.item()
+            epoch_jsd_loss += div_loss_jsd.item() if torch.is_tensor(div_loss_jsd) else div_loss_jsd
+            epoch_pearson_loss += div_loss_pearson.item() if torch.is_tensor(div_loss_pearson) else div_loss_pearson
+            epoch_orth_loss += div_loss_orth.item() if torch.is_tensor(div_loss_orth) else div_loss_orth
 
         avg_task = epoch_task_loss / len(train_loader)
+        avg_jsd = epoch_jsd_loss / len(train_loader)
+        avg_pearson = epoch_pearson_loss / len(train_loader)
+        avg_orth = epoch_orth_loss / len(train_loader)
+
         loss_history["train"].append(avg_task)
+        if "jsd" in args.diversity_methods:
+            loss_history.setdefault("train_jsd", []).append(avg_jsd)
+        if "pearson" in args.diversity_methods:
+            loss_history.setdefault("train_pearson", []).append(avg_pearson)
+        if "orthogonality" in args.diversity_methods:
+            loss_history.setdefault("train_orth", []).append(avg_orth)
+
         enc_lr = optimizer.param_groups[0]['lr']
         dec_lr = optimizer.param_groups[1]['lr']
-        log_msg(f"Epoch [{epoch + 1}/{args.num_epochs}] - Task Loss: {avg_task:.4f} | "
+        log_msg(f"Epoch [{epoch + 1}/{args.num_epochs}] - Task Loss: {avg_task:.4f} | JSD: {avg_jsd:.4f} | "
+                f"Pearson: {avg_pearson:.4f} | Orth: {avg_orth:.4f} | "
                 f"LR encoder: {enc_lr:.2e} decoder: {dec_lr:.2e}")
 
         # Validation
@@ -226,7 +263,8 @@ def train_e2e_reben_sar(args):
 
         if (epoch + 1) % 5 == 0:
             save_checkpoint({'epoch': epoch + 1, 'model_state_dict': decoder.state_dict(),
-                             'optimizer_state_dict': optimizer.state_dict()},
+                             'optimizer_state_dict': optimizer.state_dict(),
+                             'best_val_loss': best_val_loss},
                             str(CHECKPOINT_DIR), filename=f"{run_name}_last_decoder.pth")
             save_checkpoint({'epoch': epoch + 1, 'encoder_state_dict': encoder_model.state_dict()},
                             str(CHECKPOINT_DIR), filename=f"{run_name}_last_encoder.pth")
@@ -495,6 +533,12 @@ if __name__ == "__main__":
     # Loss
     parser.add_argument("--use_focal_loss", action="store_true")
     parser.add_argument("--focal_gamma",    type=float, default=2.0)
+
+    # Diversity
+    parser.add_argument("--diversity_methods", type=str, nargs="+", default=[], choices=["jsd", "pearson", "orthogonality"])
+    parser.add_argument("--lam_jsd",     type=float, default=0.0)
+    parser.add_argument("--lam_pearson", type=float, default=0.0)
+    parser.add_argument("--lam_orth",    type=float, default=0.0)
 
     # Resume
     parser.add_argument("--resume",              action="store_true")
