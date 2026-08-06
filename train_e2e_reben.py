@@ -134,6 +134,8 @@ def train_e2e_reben(args):
     # 4. Resume logic
     start_epoch = 0
     loss_history = {"train": [], "val": []}
+    best_val_loss = float('inf')
+    best_student_val_loss = float('inf')
 
     if args.resume:
         decoder_ckpt = Path(args.resume_decoder_path) if args.resume_decoder_path else None
@@ -143,6 +145,7 @@ def train_e2e_reben(args):
             ckpt = torch.load(decoder_ckpt, map_location=DEVICE)
             decoder.load_state_dict(ckpt['model_state_dict'])
             optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            best_val_loss = ckpt.get('best_val_loss', float('inf'))
         if encoder_ckpt and encoder_ckpt.exists():
             log_msg(f"Resuming encoder from {encoder_ckpt}...")
             enc_ckpt = torch.load(encoder_ckpt, map_location=DEVICE)
@@ -155,6 +158,7 @@ def train_e2e_reben(args):
                 student_model.load_state_dict(student_ckpt['model_state_dict'])
                 if 'optimizer_state_dict' in student_ckpt:
                     student_optimizer.load_state_dict(student_ckpt['optimizer_state_dict'])
+                best_student_val_loss = student_ckpt.get('best_student_val_loss', float('inf'))
             else:
                 log_msg(f"WARNING: --resume_student_path given but not found at {student_ckpt_path}, student starts fresh")
         start_epoch = args.resume_epoch
@@ -171,8 +175,6 @@ def train_e2e_reben(args):
                 student_scheduler.step()
 
     # 5. Training loop
-    best_val_loss = float('inf')
-    best_student_val_loss = float('inf')
     log_msg("Starting training...")
 
     compute_start_epoch = start_epoch
@@ -334,13 +336,15 @@ def train_e2e_reben(args):
 
         if (epoch + 1) % 5 == 0:
             save_checkpoint({'epoch': epoch + 1, 'model_state_dict': decoder.state_dict(),
-                             'optimizer_state_dict': optimizer.state_dict()},
+                             'optimizer_state_dict': optimizer.state_dict(),
+                             'best_val_loss': best_val_loss},
                             str(CHECKPOINT_DIR), filename=f"{run_name}_last_decoder.pth")
             save_checkpoint({'epoch': epoch + 1, 'encoder_state_dict': encoder_model.state_dict()},
                             str(CHECKPOINT_DIR), filename=f"{run_name}_last_encoder.pth")
             if student_model is not None:
                 save_checkpoint({'epoch': epoch + 1, 'model_state_dict': student_model.state_dict(),
-                                 'optimizer_state_dict': student_optimizer.state_dict()},
+                                 'optimizer_state_dict': student_optimizer.state_dict(),
+                                 'best_student_val_loss': best_student_val_loss},
                                 str(CHECKPOINT_DIR), filename=f"{run_name}_last_student.pth")
             loss_path = os.path.join(runs_dir, f"{run_name}_loss_history.json")
             with open(loss_path, "w") as f:
