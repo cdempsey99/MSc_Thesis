@@ -12,6 +12,7 @@ def student_step(student_model, student_optimizer, features, teacher_logits_deta
     alphas = student_model(features)
     loss = endd_loss(alphas, teacher_logits_detached, temperature=temperature)
     loss.backward()
+    torch.nn.utils.clip_grad_norm_(student_model.parameters(), max_norm=1.0)
     student_optimizer.step()
     return loss.item()
 
@@ -149,6 +150,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                 + lam_orth * div_loss_orth
 
             total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(decoder_model.parameters(), max_norm=1.0)
             optimizer.step()
 
             if student_model is not None and epoch >= student_warmup_epochs:
