@@ -121,6 +121,10 @@ def run_training(args):
         args,
         run_name=run_name
     )
+    evaluate_error_localization(
+        lambda feats: ensemble_uncertainty_and_pred(trained_model(feats), args.num_classes),
+        test_loader, args, run_name=run_name, who="teacher"
+    )
 
     if args.train_student and student_model is not None:
         best_student_path = Path(os.getenv("OUT_DIR", "results")) / "checkpoints" / f"{run_name}_best_student.pth"
@@ -130,6 +134,10 @@ def run_training(args):
             student_model.load_state_dict(ckpt['model_state_dict'])
         evaluate_student_test_set(student_model, test_loader, args, run_name=f"{run_name}_student")
         evaluate_uncertainty_correlation(trained_model, student_model, test_loader, args, run_name=f"{run_name}_student")
+        evaluate_error_localization(
+            lambda feats: dirichlet_uncertainty_and_pred(student_model(feats)),
+            test_loader, args, run_name=run_name, who="student"
+        )
 
 
 if __name__ == "__main__":

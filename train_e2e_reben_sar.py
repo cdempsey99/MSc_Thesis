@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import rasterio
 from rasterio.windows import Window
 
-from utils.misc import log_msg, save_checkpoint, FocalLoss, js_divergence_loss, pearson_diversity_loss, orthogonality_loss
+from utils.misc import log_msg, save_checkpoint, FocalLoss, js_divergence_loss, pearson_diversity_loss, orthogonality_loss, evaluate_error_localization, ensemble_uncertainty_and_pred
 from utils.dataset_e2e import load_reben_sar_splits, ReBENSARRawDataset
 S1_WAVES = ReBENSARRawDataset.WAVELENGTHS  # [3.5, 4.0] μm — Clay metadata.yaml nominal SAR values
 from utils.visualisation import plot_loss_curves, visualise_all_metrics, plot_confusion_matrix
@@ -306,6 +306,16 @@ def train_e2e_reben_sar(args):
 
     log_msg("Running evaluation...")
     evaluate_test_set_reben_sar(encoder_model, decoder, test_loader, args, run_name)
+
+    def _teacher_forward(imgs):
+        with torch.cuda.amp.autocast():
+            features = get_encoder_representation_partial(imgs, encoder_model, waves=S1_WAVES)
+            return decoder(features)
+
+    evaluate_error_localization(
+        lambda imgs: ensemble_uncertainty_and_pred(_teacher_forward(imgs), args.num_classes),
+        test_loader, args, run_name=run_name, who="teacher"
+    )
 
     return decoder, encoder_model
 

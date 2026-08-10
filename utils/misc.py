@@ -732,6 +732,125 @@ def evaluate_uncertainty_correlation(teacher_model, student_model, test_loader, 
     return results
 
 
+def _spearman_error_localization_batch(uncertainty_t, pred_class_np, test_masks, stats):
+    """
+    Accumulates per-patch Spearman(uncertainty, error) into stats dict in place.
+    uncertainty_t: [B, H, W] torch tensor. pred_class_np: [B, H, W] numpy array.
+    test_masks: raw batch of ground-truth masks as loaded from the DataLoader.
+    stats keys: corr_sum, corr_count, skipped, patch_count.
+    """
+    uncertainty_np = uncertainty_t.cpu().numpy()
+    for b in range(uncertainty_np.shape[0]):
+        gt = test_masks[b].squeeze().cpu().numpy()
+        mask = gt > 0
+        if mask.sum() < 100:
+            continue
+        stats['patch_count'] += 1
+        error_flat = (pred_class_np[b][mask] != gt[mask]).astype(np.float64)
+        rho, _ = spearmanr(uncertainty_np[b][mask], error_flat)
+        if not math.isnan(rho):
+            stats['corr_sum'] += rho
+            stats['corr_count'] += 1
+        else:
+            stats['skipped'] += 1
+
+
+def _log_and_save_error_localization(who, total_stats, epi_stats, run_name):
+    mean_total = total_stats['corr_sum'] / max(total_stats['corr_count'], 1)
+    mean_epi = epi_stats['corr_sum'] / max(epi_stats['corr_count'], 1)
+    log_msg(f"{who.upper()} ERROR LOCALIZATION ({total_stats['patch_count']} patches, "
+             f"{total_stats['skipped'] + epi_stats['skipped']} degenerate skipped): "
+             f"total={mean_total:.4f} | epistemic={mean_epi:.4f}")
+
+    runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
+    os.makedirs(runs_dir, exist_ok=True)
+    results = {
+        "run_name": run_name,
+        "who": who,
+        "mean_total_localization": mean_total,
+        "mean_epistemic_localization": mean_epi,
+        "num_patches": total_stats['patch_count'],
+        "num_total_correlations": total_stats['corr_count'],
+        "num_epistemic_correlations": epi_stats['corr_count'],
+        "num_skipped_degenerate": total_stats['skipped'] + epi_stats['skipped'],
+    }
+    results_path = os.path.join(runs_dir, f"{run_name}_{who}_error_localization.json")
+    with open(results_path, "w") as f:
+        json.dump(results, f, indent=2)
+    log_msg(f"{who.capitalize()} error localization results saved to {results_path}")
+    return results
+
+
+def ensemble_uncertainty_and_pred(all_preds, num_classes):
+    """
+    Entropy decomposition for any M-head ensemble (teacher-style): total = H(mean probs),
+    aleatoric = mean(H(head probs)), epistemic = total - aleatoric.
+    all_preds: [M, B, K, h, w] raw logits (pre-softmax, any spatial resolution).
+    Returns (total_entropy, epistemic_entropy, predicted_class_np), all [B, 224, 224].
+    """
+    M_sz, B_sz = all_preds.shape[0], all_preds.shape[1]
+    all_preds_up = F.interpolate(
+        all_preds.reshape(M_sz * B_sz, num_classes, *all_preds.shape[-2:]),
+        size=(224, 224), mode='bilinear', align_corners=False
+    ).view(M_sz, B_sz, num_classes, 224, 224)
+    head_probs = torch.softmax(all_preds_up.float(), dim=2)
+    mean_probs = head_probs.mean(dim=0)
+
+    total_ent = -(mean_probs * torch.log(mean_probs.clamp(min=1e-10))).sum(dim=1)
+    aleatoric = torch.zeros_like(total_ent)
+    for m in range(M_sz):
+        hp = head_probs[m]
+        aleatoric += -(hp * torch.log(hp.clamp(min=1e-10))).sum(dim=1)
+    aleatoric /= M_sz
+    epistemic = (total_ent - aleatoric).clamp(min=0)
+    pred_class = torch.argmax(mean_probs, dim=1).cpu().numpy()
+    return total_ent, epistemic, pred_class
+
+
+def dirichlet_uncertainty_and_pred(alphas):
+    """
+    Digamma decomposition for any Dirichlet-output student (EnDD-style).
+    alphas: [B, K, 224, 224] concentration parameters.
+    Returns (total_entropy, epistemic_entropy, predicted_class_np), all [B, 224, 224].
+    """
+    alpha0 = alphas.sum(dim=1, keepdim=True)
+    mean_probs = alphas / alpha0
+    alpha0_sq = alpha0.squeeze(1)
+    total_ent = -(mean_probs * torch.log(mean_probs.clamp(min=1e-10))).sum(dim=1)
+    aleatoric = (torch.digamma(alpha0_sq + 1) - (mean_probs * torch.digamma(alphas + 1)).sum(dim=1))
+    epistemic = (total_ent - aleatoric).clamp(min=0)
+    pred_class = torch.argmax(mean_probs, dim=1).cpu().numpy()
+    return total_ent, epistemic, pred_class
+
+
+def evaluate_error_localization(compute_fn, test_loader, args, run_name="error_localization", who="model"):
+    """
+    Does this model's own uncertainty spatially locate its own errors? Agnostic to what
+    produced the uncertainty — compute_fn(batch_input) -> (total_entropy, epistemic_entropy,
+    predicted_class_np) for one batch. Correlates each against that batch's own correctness
+    map, per patch, then averages — the spatial analogue of a model's own global AUROC.
+    (Different question from evaluate_uncertainty_correlation, which compares a student's
+    uncertainty against the teacher's rather than against ground-truth correctness.)
+
+    Two ready-made compute_fn ingredients exist — wrap whichever applies in a small closure
+    at the call site: ensemble_uncertainty_and_pred(all_preds, num_classes) for any M-head
+    ensemble (teacher-style), or dirichlet_uncertainty_and_pred(alphas) for any Dirichlet
+    student. who is just a label ("teacher"/"student"/etc.) used in logging and the output
+    filename.
+    """
+    total_stats = {'corr_sum': 0.0, 'corr_count': 0, 'skipped': 0, 'patch_count': 0}
+    epi_stats = {'corr_sum': 0.0, 'corr_count': 0, 'skipped': 0, 'patch_count': 0}
+
+    with torch.no_grad():
+        for batch_input, test_masks in test_loader:
+            batch_input = batch_input.to(DEVICE)
+            total_ent, epistemic, pred_class = compute_fn(batch_input)
+            _spearman_error_localization_batch(total_ent, pred_class, test_masks, total_stats)
+            _spearman_error_localization_batch(epistemic, pred_class, test_masks, epi_stats)
+
+    return _log_and_save_error_localization(who, total_stats, epi_stats, run_name)
+
+
 # Unsure if this is a good idea or not
 # Fn to make sure we initialise weights with very small values to ensure some class doesn't accidentally start off as
 # being picked and then the model becomes confident on this class only because of a random fluctuation

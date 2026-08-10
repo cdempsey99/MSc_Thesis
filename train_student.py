@@ -34,7 +34,7 @@ from pathlib import Path
 from configs.config import *
 from models.ensemble import DecoderEnsemble, StudentHead
 from utils.dataset import BakedFeatureDataset
-from utils.misc import endd_loss, evaluate_test_set, evaluate_student_test_set, evaluate_uncertainty_correlation, get_temperature, save_checkpoint, log_msg
+from utils.misc import endd_loss, evaluate_test_set, evaluate_student_test_set, evaluate_uncertainty_correlation, get_temperature, save_checkpoint, log_msg, evaluate_error_localization, ensemble_uncertainty_and_pred, dirichlet_uncertainty_and_pred
 from utils.visualisation import plot_loss_curves
 from torch.utils.data import DataLoader
 
@@ -263,6 +263,10 @@ def run_student_training(args):
         log_msg("No best model found, evaluating final model")
 
     evaluate_student_test_set(trained_student, test_loader, args, run_name=f"{run_name}_student")
+    evaluate_error_localization(
+        lambda feats: dirichlet_uncertainty_and_pred(trained_student(feats)),
+        test_loader, args, run_name=run_name, who="student"
+    )
 
     # Teacher needed again: its own scalar metrics for a fair teacher-vs-student comparison,
     # plus the uncertainty map spatial correlation
@@ -270,6 +274,10 @@ def run_student_training(args):
     teacher_model.eval()
     evaluate_test_set(teacher_model, test_loader, None, args, run_name=f"{run_name}_teacher")
     evaluate_uncertainty_correlation(teacher_model, trained_student, test_loader, args, run_name=run_name)
+    evaluate_error_localization(
+        lambda feats: ensemble_uncertainty_and_pred(teacher_model(feats), args.num_classes),
+        test_loader, args, run_name=run_name, who="teacher"
+    )
 
 
 if __name__ == "__main__":
