@@ -386,6 +386,42 @@ def get_temperature(epoch, num_epochs, T_start, T_end=1.0):
     return T_start - (T_start - T_end) * epoch / (num_epochs - 1)
 
 
+def fit_temperature(logits, targets, max_iter=50, lr=0.01):
+    """
+    Post-hoc calibration (Guo et al., 2017), unrelated to get_temperature above (that's
+    the EnDD distillation-softmax annealing schedule; this is calibration temperature
+    scaling). Fits a single scalar T minimizing NLL of softmax(logits / T) against
+    targets. Dividing every class's logit by the same T never changes the argmax, so
+    predictions — and therefore mIoU — are unaffected by construction; only confidence
+    shape (ECE, NLL, reliability diagrams) moves.
+
+    Fit T on VALIDATION data only, then apply it to TEST logits before computing
+    calibration metrics — fitting and evaluating on the same split invalidates the
+    result. logits: [N, K] raw pre-softmax, targets: [N] int class labels — both
+    already restricted to labelled pixels by the caller (e.g. via a mask > 0).
+
+    T is parameterised as exp(log_T) so it's guaranteed positive without clamping.
+    """
+    logits = logits.detach()
+    targets = targets.detach()
+
+    log_temperature = torch.zeros(1, device=logits.device, requires_grad=True)
+    optimizer = torch.optim.LBFGS([log_temperature], lr=lr, max_iter=max_iter)
+    nll_criterion = nn.CrossEntropyLoss()
+
+    def closure():
+        optimizer.zero_grad()
+        loss = nll_criterion(logits / log_temperature.exp(), targets)
+        loss.backward()
+        return loss
+
+    optimizer.step(closure)
+
+    temperature = float(log_temperature.exp().item())
+    log_msg(f"Fitted temperature T={temperature:.4f} on {targets.numel():,} labelled pixels")
+    return temperature
+
+
 def endd_loss(student_alphas, teacher_logits, temperature=1.0):
     """
     Ensemble Distribution Distillation loss: Dirichlet NLL.
@@ -737,7 +773,9 @@ def _spearman_error_localization_batch(uncertainty_t, pred_class_np, test_masks,
     Accumulates per-patch Spearman(uncertainty, error) into stats dict in place.
     uncertainty_t: [B, H, W] torch tensor. pred_class_np: [B, H, W] numpy array.
     test_masks: raw batch of ground-truth masks as loaded from the DataLoader.
-    stats keys: corr_sum, corr_count, skipped, patch_count.
+    stats keys: corr_values (list of per-patch rho), skipped, patch_count. Keeping
+    every patch's rho (not just a running sum) is what lets _log_and_save_error_localization
+    report the full distribution, not just its mean.
     """
     uncertainty_np = uncertainty_t.cpu().numpy()
     for b in range(uncertainty_np.shape[0]):
@@ -749,18 +787,23 @@ def _spearman_error_localization_batch(uncertainty_t, pred_class_np, test_masks,
         error_flat = (pred_class_np[b][mask] != gt[mask]).astype(np.float64)
         rho, _ = spearmanr(uncertainty_np[b][mask], error_flat)
         if not math.isnan(rho):
-            stats['corr_sum'] += rho
-            stats['corr_count'] += 1
+            stats['corr_values'].append(rho)
         else:
             stats['skipped'] += 1
 
 
 def _log_and_save_error_localization(who, total_stats, epi_stats, run_name):
-    mean_total = total_stats['corr_sum'] / max(total_stats['corr_count'], 1)
-    mean_epi = epi_stats['corr_sum'] / max(epi_stats['corr_count'], 1)
+    total_vals = np.array(total_stats['corr_values'], dtype=np.float64)
+    epi_vals = np.array(epi_stats['corr_values'], dtype=np.float64)
+    mean_total = float(total_vals.mean()) if total_vals.size else 0.0
+    mean_epi = float(epi_vals.mean()) if epi_vals.size else 0.0
+    frac_total_pos = float((total_vals > 0).mean()) if total_vals.size else 0.0
+    frac_epi_pos = float((epi_vals > 0).mean()) if epi_vals.size else 0.0
+
     log_msg(f"{who.upper()} ERROR LOCALIZATION ({total_stats['patch_count']} patches, "
              f"{total_stats['skipped'] + epi_stats['skipped']} degenerate skipped): "
-             f"total={mean_total:.4f} | epistemic={mean_epi:.4f}")
+             f"total mean={mean_total:.4f} (>{0:.0f}: {frac_total_pos:.1%}) | "
+             f"epistemic mean={mean_epi:.4f} (>{0:.0f}: {frac_epi_pos:.1%})")
 
     runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
     os.makedirs(runs_dir, exist_ok=True)
@@ -769,15 +812,23 @@ def _log_and_save_error_localization(who, total_stats, epi_stats, run_name):
         "who": who,
         "mean_total_localization": mean_total,
         "mean_epistemic_localization": mean_epi,
+        "frac_total_localization_positive": frac_total_pos,
+        "frac_epistemic_localization_positive": frac_epi_pos,
+        "per_patch_total_localization": total_vals.tolist(),
+        "per_patch_epistemic_localization": epi_vals.tolist(),
         "num_patches": total_stats['patch_count'],
-        "num_total_correlations": total_stats['corr_count'],
-        "num_epistemic_correlations": epi_stats['corr_count'],
+        "num_total_correlations": int(total_vals.size),
+        "num_epistemic_correlations": int(epi_vals.size),
         "num_skipped_degenerate": total_stats['skipped'] + epi_stats['skipped'],
     }
     results_path = os.path.join(runs_dir, f"{run_name}_{who}_error_localization.json")
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
     log_msg(f"{who.capitalize()} error localization results saved to {results_path}")
+
+    plot_error_localization_histogram(
+        total_vals, epi_vals, save_name=f"{run_name}_{who}_error_localization_histogram"
+    )
     return results
 
 
@@ -838,15 +889,40 @@ def evaluate_error_localization(compute_fn, test_loader, args, run_name="error_l
     student. who is just a label ("teacher"/"student"/etc.) used in logging and the output
     filename.
     """
-    total_stats = {'corr_sum': 0.0, 'corr_count': 0, 'skipped': 0, 'patch_count': 0}
-    epi_stats = {'corr_sum': 0.0, 'corr_count': 0, 'skipped': 0, 'patch_count': 0}
+    total_stats = {'corr_values': [], 'skipped': 0, 'patch_count': 0}
+    epi_stats = {'corr_values': [], 'skipped': 0, 'patch_count': 0}
+
+    # A handful of patches for an illustrative uncertainty-vs-error figure — separate
+    # from the quantitative distribution above, which is what actually backs the claim.
+    num_vis = min(3, len(test_loader.dataset))
+    vis_global_indices = set(random.sample(range(len(test_loader.dataset)), num_vis)) if num_vis > 0 else set()
+    vis_count = 0
 
     with torch.no_grad():
-        for batch_input, test_masks in test_loader:
+        for batch_idx, (batch_input, test_masks) in enumerate(test_loader):
             batch_input = batch_input.to(DEVICE)
             total_ent, epistemic, pred_class = compute_fn(batch_input)
             _spearman_error_localization_batch(total_ent, pred_class, test_masks, total_stats)
             _spearman_error_localization_batch(epistemic, pred_class, test_masks, epi_stats)
+
+            if vis_count < num_vis:
+                total_ent_np = total_ent.cpu().numpy()
+                for b_offset in range(batch_input.shape[0]):
+                    g_idx = batch_idx * test_loader.batch_size + b_offset
+                    if g_idx not in vis_global_indices:
+                        continue
+                    gt = test_masks[b_offset].squeeze().cpu().numpy()
+                    valid_mask = gt > 0
+                    if valid_mask.sum() < 100:
+                        continue
+                    correct_mask = (pred_class[b_offset] == gt)
+                    plot_error_localization_heatmap(
+                        total_ent_np[b_offset], correct_mask, valid_mask,
+                        save_name=f"{run_name}_{who}_patch_{g_idx}_error_localization"
+                    )
+                    vis_count += 1
+                    if vis_count >= num_vis:
+                        break
 
     return _log_and_save_error_localization(who, total_stats, epi_stats, run_name)
 

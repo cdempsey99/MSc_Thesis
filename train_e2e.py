@@ -18,7 +18,7 @@ from rasterio.windows import Window
 
 from utils.misc import get_ece
 from utils.dataset_e2e import FBPRawDataset
-from utils.misc import log_msg, save_checkpoint, FocalLoss
+from utils.misc import log_msg, save_checkpoint, FocalLoss, evaluate_error_localization, ensemble_uncertainty_and_pred
 from utils.visualisation import plot_loss_curves
 from models.ensemble import DecoderEnsemble
 from models.encoder import (
@@ -320,6 +320,16 @@ def train_e2e(args):
 
     log_msg("Running evaluation...")
     evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, run_name)
+
+    def _teacher_forward(imgs):
+        with torch.cuda.amp.autocast():
+            features = get_encoder_representation_partial(imgs, encoder_model)
+            return decoder(features)
+
+    evaluate_error_localization(
+        lambda imgs: ensemble_uncertainty_and_pred(_teacher_forward(imgs), args.num_classes),
+        test_loader, args, run_name=run_name, who="teacher"
+    )
 
     return decoder, encoder_model
 

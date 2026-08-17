@@ -19,7 +19,8 @@ import math
 from scipy.stats import spearmanr
 
 from utils.misc import (log_msg, save_checkpoint, FocalLoss, js_divergence_loss, pearson_diversity_loss,
-                        orthogonality_loss, endd_loss, get_temperature)
+                        orthogonality_loss, endd_loss, get_temperature, evaluate_error_localization,
+                        ensemble_uncertainty_and_pred, dirichlet_uncertainty_and_pred)
 from utils.dataset_e2e import load_reben_splits, ReBENRawDataset
 S2_WAVES = ReBENRawDataset.WAVELENGTHS  # [0.6646, 0.5598, 0.4924] μm — S2 B04/B03/B02
 from utils.visualisation import plot_loss_curves, visualise_all_metrics, plot_confusion_matrix
@@ -399,6 +400,27 @@ def train_e2e_reben(args):
         evaluate_student_test_set_reben(encoder_model, student_model, test_loader, args, run_name=f"{run_name}_student")
         evaluate_uncertainty_correlation_reben(encoder_model, decoder, student_model, test_loader, args,
                                               run_name=f"{run_name}_student")
+
+    def _teacher_forward(imgs):
+        with torch.cuda.amp.autocast():
+            features = get_encoder_representation_partial(imgs, encoder_model, waves=S2_WAVES)
+            return decoder(features)
+
+    evaluate_error_localization(
+        lambda imgs: ensemble_uncertainty_and_pred(_teacher_forward(imgs), args.num_classes),
+        test_loader, args, run_name=run_name, who="teacher"
+    )
+
+    if student_model is not None:
+        def _student_forward(imgs):
+            with torch.cuda.amp.autocast():
+                features = get_encoder_representation_partial(imgs, encoder_model, waves=S2_WAVES)
+                return student_model(features)
+
+        evaluate_error_localization(
+            lambda imgs: dirichlet_uncertainty_and_pred(_student_forward(imgs).float()),
+            test_loader, args, run_name=run_name, who="student"
+        )
 
     return decoder, encoder_model, student_model
 

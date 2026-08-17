@@ -10,7 +10,7 @@ import argparse
 import numpy as np
 import os
 
-from utils.misc import log_msg, save_checkpoint, FocalLoss
+from utils.misc import log_msg, save_checkpoint, FocalLoss, evaluate_error_localization, ensemble_uncertainty_and_pred
 from utils.dataset_e2e import BakedReBENDataset
 from utils.visualisation import plot_loss_curves, plot_confusion_matrix
 from models.ensemble import DecoderEnsemble
@@ -412,6 +412,15 @@ def train_decoders_reben_sar(args):
 
     log_msg("Running evaluation...")
     evaluate_baked_reben_sar(decoder, test_loader, args, run_name)
+
+    def _teacher_forward(feats):
+        with torch.cuda.amp.autocast():
+            return decoder(feats)
+
+    evaluate_error_localization(
+        lambda feats: ensemble_uncertainty_and_pred(_teacher_forward(feats), args.num_classes),
+        test_loader, args, run_name=run_name, who="teacher"
+    )
 
     return decoder
 

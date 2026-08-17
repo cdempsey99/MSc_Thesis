@@ -390,6 +390,90 @@ def plot_loss_curves(loss_history_path, save_name="loss_curves"):
     print(f"Loss curves saved to {full_path}")
 
 
+def plot_error_localization_heatmap(uncertainty_map, correct_mask, valid_mask,
+                                     save_name="error_localization_heatmap"):
+    """
+    Illustrative figure for a single test patch: does high uncertainty spatially
+    coincide with prediction errors? Purely qualitative — the quantitative claim is
+    the per-patch Spearman distribution plotted by plot_error_localization_histogram,
+    this is just "what does that correlation look like on the ground" for a reader.
+    uncertainty_map, correct_mask, valid_mask: [H, W] numpy arrays (correct_mask/valid_mask
+    boolean). Unlabelled pixels (valid_mask False) are greyed out in all three panels.
+    """
+    save_path = os.path.join(BASE_OUT, "error_localization")
+    ensure_dir(save_path)
+
+    unc_masked = np.ma.masked_where(~valid_mask, uncertainty_map)
+    correctness_masked = np.ma.masked_where(~valid_mask, correct_mask.astype(np.float32))
+
+    cmap_unc = plt.cm.viridis.copy()
+    cmap_unc.set_bad(color='lightgrey')
+    cmap_corr = plt.cm.RdYlGn.copy()
+    cmap_corr.set_bad(color='lightgrey')
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+    im0 = axes[0].imshow(unc_masked, cmap=cmap_unc)
+    axes[0].set_title("Uncertainty (total entropy)")
+    axes[0].axis('off')
+    fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+
+    axes[1].imshow(correctness_masked, cmap=cmap_corr, vmin=0, vmax=1)
+    axes[1].set_title("Correct (green) / Incorrect (red)")
+    axes[1].axis('off')
+
+    axes[2].imshow(unc_masked, cmap=cmap_unc)
+    error_ys, error_xs = np.where(valid_mask & ~correct_mask)
+    axes[2].scatter(error_xs, error_ys, s=1, c='red', alpha=0.5, label='Error pixel')
+    axes[2].set_title("Uncertainty with errors overlaid")
+    axes[2].axis('off')
+    axes[2].legend(loc='upper right', fontsize=8)
+
+    plt.tight_layout()
+    current_time = datetime.now().strftime("%Y%m%d%H%M")
+    full_path = os.path.join(save_path, f"{save_name}_{current_time}.png")
+    plt.savefig(full_path, bbox_inches='tight')
+    plt.close(fig)
+    log_msg(f"Error localization heatmap saved to {full_path}")
+
+
+def plot_error_localization_histogram(rho_total, rho_epistemic, save_name="error_localization_histogram"):
+    """
+    Distribution of per-patch Spearman(uncertainty, error) across the whole test set —
+    this, not a single averaged number, is the evidentiary basis for an "uncertainty
+    spatially localizes error" claim.
+    """
+    save_path = os.path.join(BASE_OUT, "error_localization")
+    ensure_dir(save_path)
+
+    rho_total = np.asarray(rho_total)
+    rho_epistemic = np.asarray(rho_epistemic)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
+    for ax, vals, label, color in [
+        (axes[0], rho_total, "Total entropy", "steelblue"),
+        (axes[1], rho_epistemic, "Epistemic", "darkorange"),
+    ]:
+        if vals.size == 0:
+            ax.set_title(f"{label} (no data)")
+            continue
+        ax.hist(vals, bins=30, color=color, alpha=0.8, edgecolor='black')
+        ax.axvline(float(vals.mean()), color='black', linestyle='--',
+                   label=f"mean={vals.mean():.3f}")
+        ax.axvline(0, color='grey', linestyle=':')
+        ax.set_title(f"{label} (n={vals.size})")
+        ax.set_xlabel("Per-patch Spearman ρ")
+        ax.legend()
+    axes[0].set_ylabel("Number of patches")
+
+    plt.tight_layout()
+    current_time = datetime.now().strftime("%Y%m%d%H%M")
+    full_path = os.path.join(save_path, f"{save_name}_{current_time}.png")
+    plt.savefig(full_path, bbox_inches='tight')
+    plt.close(fig)
+    log_msg(f"Error localization histogram saved to {full_path}")
+
+
 def plot_confusion_matrix(results_json_path, save_name="confusion_matrix", normalize=True):
     """
     Reads a results.json produced by any of the evaluate_* functions and plots its
