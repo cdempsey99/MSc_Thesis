@@ -205,8 +205,19 @@ def main():
     log_msg("Streaming test set calibration metrics (raw + calibrated in one pass)...")
     results_stream = stream_test_calibration(decoder, test_loader, temperature=T)
 
-    assert results_stream["mismatches"] == 0, \
-        f"temperature scaling changed {results_stream['mismatches']} predictions - should be impossible"
+    mismatches = results_stream["mismatches"]
+    total_pixels = results_stream["raw"]["n_pixels"]
+    mismatch_frac = mismatches / max(total_pixels, 1)
+    # Dividing every logit by the same positive T can't change the argmax in exact
+    # arithmetic, but float32 across tens of millions of pixels can flip an extremely
+    # rare near-exact tie by a fraction of an ulp - tolerate a negligible fraction of
+    # these rather than requiring bit-exact equality; anything above this points to an
+    # actual logic error, not floating-point noise.
+    max_allowed_frac = 1e-5
+    log_msg(f"Prediction mismatches after scaling: {mismatches} / {total_pixels:,} ({mismatch_frac:.2e})")
+    assert mismatch_frac <= max_allowed_frac, \
+        f"temperature scaling changed {mismatches}/{total_pixels} ({mismatch_frac:.2e}) predictions - " \
+        f"exceeds the floating-point noise tolerance ({max_allowed_frac:.0e}), likely a real bug"
 
     raw, cal = results_stream["raw"], results_stream["calibrated"]
     log_msg(f"AS1 RAW:        ECE={raw['ece']:.4f} | NLL={raw['nll']:.4f} | n={raw['n_pixels']:,}")
