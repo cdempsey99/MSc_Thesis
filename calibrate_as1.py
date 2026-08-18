@@ -10,11 +10,17 @@ purely quantifies how much of AS1's calibration gap a single extra parameter can
 as a baseline for the diversity-ensemble / distillation ECE claims elsewhere in the
 thesis.
 
+Both stages stream through their DataLoader one batch at a time and never hold more
+than a capped number of pixels (validation) or a single batch (test) in memory - FBP's
+~7300x7300 images mean "every labelled pixel in the split" is tens of GB, not something
+to naively collect.
+
 Usage:
     python calibrate_as1.py \
-        --data_dir /beegfs/scratch/callumdempsey \
+        --data_dir /beegfs/scratch/callumdempsey/results \
         --decoder_checkpoint /beegfs/scratch/callumdempsey/results/checkpoints/AS1_..._best_model.pth \
-        --decoder_embed_dim 256 --num_classes 25 \
+        --decoder_embed_dim 512 --num_classes 25 \
+        --patch_size 224 --stride 224 --max_images 150 \
         --run_name AS1_calibration
 """
 import argparse
@@ -37,7 +43,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def build_val_test_split(data_dir, patch_size, stride, max_images=None):
     """Mirrors train_decoders.py's split exactly (same glob, same seed=42 shuffle, same
     70/15/15 cut) so val/test here are the same patches AS1 was actually validated/tested
-    on — required for the fitted T and reported ECE to mean anything."""
+    on - required for the fitted T and reported ECE to mean anything."""
     embedding_dir = Path(data_dir) / "embeddings" / "fbp" / "clay_v1" / f"patch{patch_size}_stride{stride}"
     all_files = sorted(list(embedding_dir.glob("*_embeddings.pt")))
     if max_images is not None:
@@ -55,11 +61,16 @@ def build_val_test_split(data_dir, patch_size, stride, max_images=None):
     return val_files, test_files
 
 
-def collect_logits_and_targets(decoder, loader):
-    """One pass over a loader; returns concatenated [N, K] logits and [N] targets for
-    labelled pixels only (mask > 0). Fine for validation/test-set sizes that fit in
-    memory once flattened to just the labelled pixels; not meant for huge streaming sets."""
+def collect_val_logits_for_temperature(decoder, loader, max_pixels=2_000_000):
+    """
+    Streams through the validation loader, collecting per-pixel logits/targets only
+    until max_pixels is reached, then stops early. Temperature scaling fits a single
+    scalar, so a capped subsample (patches arrive in the already-shuffled file order
+    from build_val_test_split) is standard practice and statistically sufficient -
+    unlike test-set ECE/NLL below, this does not need every pixel in the split.
+    """
     all_logits, all_targets = [], []
+    collected = 0
     with torch.no_grad():
         for features, masks in loader:
             features = features.to(DEVICE)
@@ -69,36 +80,95 @@ def collect_logits_and_targets(decoder, loader):
             if not valid.any():
                 continue
             logits_flat = logits.permute(0, 2, 3, 1)[valid]  # [N_valid, K]
+            targets_flat = masks[valid]
             all_logits.append(logits_flat.cpu())
-            all_targets.append(masks[valid].cpu())
+            all_targets.append(targets_flat.cpu())
+            collected += targets_flat.numel()
+            if collected >= max_pixels:
+                break
     return torch.cat(all_logits), torch.cat(all_targets)
 
 
-def compute_ece_and_nll(logits, targets, temperature=1.0, num_bins=10):
-    probs = torch.softmax(logits / temperature, dim=1)
-    conf, pred = probs.max(dim=1)
-    correct = (pred == targets).float()
-
+def stream_test_calibration(decoder, test_loader, temperature, num_bins=10):
+    """
+    One pass over the test set computing raw (T=1) and temperature-scaled calibration
+    metrics simultaneously, so the (large) test set only needs to be read once. Never
+    stores per-pixel data - accumulates running confidence/accuracy histograms and a
+    running NLL sum per batch, discarding each batch's logits immediately, matching the
+    streaming pattern already used by evaluate_test_set/evaluate_test_set_reben
+    elsewhere in this codebase. Also counts prediction mismatches between raw and
+    calibrated (should always be zero, by construction) as a correctness check.
+    """
     bin_boundaries = torch.linspace(0, 1, num_bins + 1)
-    bin_accs = torch.zeros(num_bins)
-    bin_props = torch.zeros(num_bins)
-    ece = 0.0
-    for i in range(num_bins):
-        in_bin = (conf > bin_boundaries[i]) & (conf <= bin_boundaries[i + 1])
-        prop = in_bin.float().mean().item()
-        bin_props[i] = prop
-        if in_bin.any():
-            bin_accs[i] = correct[in_bin].mean().item()
-            avg_conf = conf[in_bin].mean().item()
-            ece += abs(bin_accs[i].item() - avg_conf) * prop
+    stats = {
+        tag: {
+            "bin_conf_sums": torch.zeros(num_bins),
+            "bin_acc_sums": torch.zeros(num_bins),
+            "bin_counts": torch.zeros(num_bins),
+            "nll_sum": 0.0,
+            "n": 0,
+        }
+        for tag in ("raw", "calibrated")
+    }
+    mismatches = 0
 
-    nll = torch.nn.functional.cross_entropy(logits / temperature, targets).item()
-    return ece, nll, bin_accs.numpy(), bin_props.numpy()
+    with torch.no_grad():
+        for features, masks in test_loader:
+            features = features.to(DEVICE)
+            logits = decoder(features)[0]
+            masks = masks.to(DEVICE).long()
+            valid = masks > 0
+            if not valid.any():
+                continue
+            logits_flat = logits.permute(0, 2, 3, 1)[valid]  # [N, K]
+            targets_flat = masks[valid]                       # [N]
+
+            pred_raw = None
+            for tag, T in (("raw", 1.0), ("calibrated", temperature)):
+                scaled = logits_flat / T
+                probs = torch.softmax(scaled, dim=1)
+                conf, pred = probs.max(dim=1)
+                correct = (pred == targets_flat).float()
+
+                s = stats[tag]
+                s["nll_sum"] += torch.nn.functional.cross_entropy(scaled, targets_flat, reduction="sum").item()
+                s["n"] += targets_flat.numel()
+
+                conf_cpu, correct_cpu = conf.cpu(), correct.cpu()
+                for i in range(num_bins):
+                    in_bin = (conf_cpu > bin_boundaries[i]) & (conf_cpu <= bin_boundaries[i + 1])
+                    if in_bin.any():
+                        s["bin_conf_sums"][i] += conf_cpu[in_bin].sum()
+                        s["bin_acc_sums"][i] += correct_cpu[in_bin].sum()
+                        s["bin_counts"][i] += in_bin.sum()
+
+                if tag == "raw":
+                    pred_raw = pred
+                else:
+                    mismatches += (pred != pred_raw).sum().item()
+
+    results = {"mismatches": mismatches}
+    for tag in ("raw", "calibrated"):
+        s = stats[tag]
+        n = max(s["n"], 1)
+        bin_props = s["bin_counts"] / n
+        bin_accs = torch.where(s["bin_counts"] > 0, s["bin_acc_sums"] / s["bin_counts"].clamp(min=1), torch.zeros(num_bins))
+        bin_avg_conf = torch.where(s["bin_counts"] > 0, s["bin_conf_sums"] / s["bin_counts"].clamp(min=1), torch.zeros(num_bins))
+        ece = float((bin_props * (bin_accs - bin_avg_conf).abs()).sum())
+        results[tag] = {
+            "ece": ece,
+            "nll": s["nll_sum"] / n,
+            "bin_accs": bin_accs.numpy(),
+            "bin_props": bin_props.numpy(),
+            "n_pixels": s["n"],
+        }
+    return results
 
 
 def main():
     parser = argparse.ArgumentParser(description="Post-hoc temperature scaling for the AS1 baseline")
-    parser.add_argument("--data_dir", type=str, required=True, help="Path to the embeddings folder root")
+    parser.add_argument("--data_dir", type=str, required=True,
+                        help="Root containing embeddings/ (i.e. train_decoders.py's --data_dir / --out_dir), NOT the raw data/fbp images+labels dir")
     parser.add_argument("--decoder_checkpoint", type=str, required=True, help="Path to AS1's saved decoder .pth")
     parser.add_argument("--patch_size", type=int, default=224)
     parser.add_argument("--stride", type=int, default=112)
@@ -106,6 +176,7 @@ def main():
     parser.add_argument("--num_classes", type=int, default=25)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--max_images", type=int, default=None, help="Must match the value AS1 was trained with, if it used one")
+    parser.add_argument("--max_val_pixels", type=int, default=2_000_000, help="Cap on pixels collected for temperature fitting")
     parser.add_argument("--run_name", type=str, default="AS1_calibration")
     args = parser.parse_args()
 
@@ -125,24 +196,21 @@ def main():
     decoder.eval()
     log_msg(f"Loaded AS1 decoder from {args.decoder_checkpoint}")
 
-    log_msg("Collecting validation logits...")
-    val_logits, val_targets = collect_logits_and_targets(decoder, val_loader)
+    log_msg(f"Collecting up to {args.max_val_pixels:,} validation pixels...")
+    val_logits, val_targets = collect_val_logits_for_temperature(decoder, val_loader, args.max_val_pixels)
 
     log_msg(f"Fitting temperature on {val_targets.numel():,} validation pixels...")
     T = fit_temperature(val_logits.to(DEVICE), val_targets.to(DEVICE))
 
-    log_msg("Collecting test logits...")
-    test_logits, test_targets = collect_logits_and_targets(decoder, test_loader)
+    log_msg("Streaming test set calibration metrics (raw + calibrated in one pass)...")
+    results_stream = stream_test_calibration(decoder, test_loader, temperature=T)
 
-    raw_ece, raw_nll, raw_bin_accs, raw_bin_props = compute_ece_and_nll(test_logits, test_targets, temperature=1.0)
-    cal_ece, cal_nll, cal_bin_accs, cal_bin_props = compute_ece_and_nll(test_logits, test_targets, temperature=T)
+    assert results_stream["mismatches"] == 0, \
+        f"temperature scaling changed {results_stream['mismatches']} predictions - should be impossible"
 
-    pred_raw = test_logits.argmax(dim=1)
-    pred_cal = (test_logits / T).argmax(dim=1)
-    assert torch.equal(pred_raw, pred_cal), "temperature scaling changed predictions - should be impossible"
-
-    log_msg(f"AS1 RAW:        ECE={raw_ece:.4f} | NLL={raw_nll:.4f}")
-    log_msg(f"AS1 CALIBRATED: ECE={cal_ece:.4f} | NLL={cal_nll:.4f} | T={T:.4f}")
+    raw, cal = results_stream["raw"], results_stream["calibrated"]
+    log_msg(f"AS1 RAW:        ECE={raw['ece']:.4f} | NLL={raw['nll']:.4f} | n={raw['n_pixels']:,}")
+    log_msg(f"AS1 CALIBRATED: ECE={cal['ece']:.4f} | NLL={cal['nll']:.4f} | T={T:.4f} | n={cal['n_pixels']:,}")
 
     runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
     os.makedirs(runs_dir, exist_ok=True)
@@ -150,17 +218,17 @@ def main():
         "run_name": args.run_name,
         "temperature": T,
         "num_val_pixels": int(val_targets.numel()),
-        "num_test_pixels": int(test_targets.numel()),
-        "raw_ece": raw_ece, "raw_nll": raw_nll,
-        "calibrated_ece": cal_ece, "calibrated_nll": cal_nll,
+        "num_test_pixels": raw["n_pixels"],
+        "raw_ece": raw["ece"], "raw_nll": raw["nll"],
+        "calibrated_ece": cal["ece"], "calibrated_nll": cal["nll"],
     }
     results_path = os.path.join(runs_dir, f"{args.run_name}_results.json")
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
     log_msg(f"Results saved to {results_path}")
 
-    plot_reliability_diagram(raw_bin_accs, raw_bin_props, save_name=f"{args.run_name}_raw_reliability")
-    plot_reliability_diagram(cal_bin_accs, cal_bin_props, save_name=f"{args.run_name}_calibrated_reliability")
+    plot_reliability_diagram(raw["bin_accs"], raw["bin_props"], save_name=f"{args.run_name}_raw_reliability")
+    plot_reliability_diagram(cal["bin_accs"], cal["bin_props"], save_name=f"{args.run_name}_calibrated_reliability")
 
 
 if __name__ == "__main__":
