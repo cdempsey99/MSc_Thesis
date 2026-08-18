@@ -1,5 +1,5 @@
 """
-calibrate_as1.py — post-hoc temperature scaling for the AS1 baseline (single encoder +
+calibrate_as1_frozen.py — post-hoc temperature scaling for the AS1 baseline (single encoder +
 single decoder, no diversity, no student).
 
 Fits one scalar T on the validation split (never on test) via fit_temperature, then
@@ -16,7 +16,7 @@ than a capped number of pixels (validation) or a single batch (test) in memory -
 to naively collect.
 
 Usage:
-    python calibrate_as1.py \
+    python calibrate_as1_frozen.py \
         --data_dir /beegfs/scratch/callumdempsey/results \
         --decoder_checkpoint /beegfs/scratch/callumdempsey/results/checkpoints/AS1_..._best_model.pth \
         --decoder_embed_dim 512 --num_classes 25 \
