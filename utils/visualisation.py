@@ -434,7 +434,7 @@ def plot_error_localization_heatmap(uncertainty_map, correct_mask, valid_mask,
     full_path = os.path.join(save_path, f"{save_name}_{current_time}.png")
     plt.savefig(full_path, bbox_inches='tight')
     plt.close(fig)
-    log_msg(f"Error localization heatmap saved to {full_path}")
+    print(f"Error localization heatmap saved to {full_path}")
 
 
 def plot_error_localization_histogram(rho_total, rho_epistemic, save_name="error_localization_histogram"):
@@ -471,7 +471,7 @@ def plot_error_localization_histogram(rho_total, rho_epistemic, save_name="error
     full_path = os.path.join(save_path, f"{save_name}_{current_time}.png")
     plt.savefig(full_path, bbox_inches='tight')
     plt.close(fig)
-    log_msg(f"Error localization histogram saved to {full_path}")
+    print(f"Error localization histogram saved to {full_path}")
 
 
 def plot_confusion_matrix(results_json_path, save_name="confusion_matrix", normalize=True):
