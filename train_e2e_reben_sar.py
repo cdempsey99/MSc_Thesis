@@ -16,11 +16,15 @@ import matplotlib.pyplot as plt
 import rasterio
 from rasterio.windows import Window
 
-from utils.misc import log_msg, save_checkpoint, FocalLoss, js_divergence_loss, pearson_diversity_loss, orthogonality_loss, evaluate_error_localization, ensemble_uncertainty_and_pred
+from utils.misc import (log_msg, save_checkpoint, FocalLoss, js_divergence_loss, pearson_diversity_loss,
+                        orthogonality_loss, evaluate_error_localization, ensemble_uncertainty_and_pred,
+                        endd_loss, get_temperature, dirichlet_uncertainty_and_pred)
 from utils.dataset_e2e import load_reben_sar_splits, ReBENSARRawDataset
 S1_WAVES = ReBENSARRawDataset.WAVELENGTHS  # [3.5, 4.0] μm — Clay metadata.yaml nominal SAR values
+import math
+from scipy.stats import spearmanr
 from utils.visualisation import plot_loss_curves, visualise_all_metrics, plot_confusion_matrix
-from models.ensemble import DecoderEnsemble
+from models.ensemble import DecoderEnsemble, StudentHead
 from models.encoder import (
     initialize_clay_encoder_partial_unfreeze,
     get_encoder_representation_partial,
@@ -71,6 +75,20 @@ def train_e2e_reben_sar(args):
     )
     decoder.to(DEVICE)
 
+    student_model = None
+    student_optimizer = None
+    student_scheduler = None
+    student_scaler = None
+    if args.train_student:
+        student_model = StudentHead(in_channels=1024, embed_dim=args.decoder_embed_dim, num_classes=args.num_classes)
+        student_model.to(DEVICE)
+        student_optimizer = torch.optim.AdamW(student_model.parameters(), lr=args.lr_decoder, weight_decay=0.05)
+        student_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            student_optimizer, T_max=args.num_epochs, eta_min=1e-6
+        )
+        student_scaler = torch.cuda.amp.GradScaler()
+        log_msg("StudentHead instantiated for parallel AS4 training")
+
     flops_profile = ensure_flops_profile(
         config={
             "dataset": "reben_sar",
@@ -81,10 +99,11 @@ def train_e2e_reben_sar(args):
             "num_classes": args.num_classes,
             "in_channels": 2,
             "batch_size": args.batch_size,
-            "include_student": False,
+            "include_student": args.train_student,
             "diversity_methods": args.diversity_methods,
         },
         decoder=decoder,
+        student=student_model,
         encoder=encoder_model,
         waves=S1_WAVES,
     )
@@ -119,6 +138,7 @@ def train_e2e_reben_sar(args):
     start_epoch = 0
     loss_history = {"train": [], "val": []}
     best_val_loss = float('inf')
+    best_student_val_loss = float('inf')
 
     if args.resume:
         decoder_ckpt = Path(args.resume_decoder_path) if args.resume_decoder_path else None
@@ -133,6 +153,17 @@ def train_e2e_reben_sar(args):
             log_msg(f"Resuming encoder from {encoder_ckpt}...")
             enc_ckpt = torch.load(encoder_ckpt, map_location=DEVICE)
             encoder_model.load_state_dict(enc_ckpt['encoder_state_dict'], strict=False)
+        if student_model is not None and args.resume_student_path:
+            student_ckpt_path = Path(args.resume_student_path)
+            if student_ckpt_path.exists():
+                log_msg(f"Resuming student from {student_ckpt_path}...")
+                student_ckpt = torch.load(student_ckpt_path, map_location=DEVICE)
+                student_model.load_state_dict(student_ckpt['model_state_dict'])
+                if 'optimizer_state_dict' in student_ckpt:
+                    student_optimizer.load_state_dict(student_ckpt['optimizer_state_dict'])
+                best_student_val_loss = student_ckpt.get('best_student_val_loss', float('inf'))
+            else:
+                log_msg(f"WARNING: --resume_student_path given but not found at {student_ckpt_path}, student starts fresh")
         start_epoch = args.resume_epoch
         loss_path = os.path.join(runs_dir, f"{args.run_name}_loss_history.json")
         if os.path.exists(loss_path):
@@ -142,6 +173,9 @@ def train_e2e_reben_sar(args):
         if start_epoch < args.warmup_epochs:
             for _ in range(start_epoch):
                 warmup_scheduler.step()
+        if student_scheduler is not None:
+            for _ in range(start_epoch):
+                student_scheduler.step()
 
     # 5. Training loop
     log_msg("Starting training...")
@@ -155,6 +189,10 @@ def train_e2e_reben_sar(args):
         epoch_jsd_loss = 0
         epoch_pearson_loss = 0
         epoch_orth_loss = 0
+        epoch_student_loss = 0.0
+        student_T = get_temperature(epoch - args.student_warmup_epochs, args.num_epochs - args.student_warmup_epochs,
+                                    args.student_T_start) \
+            if (student_model is not None and epoch >= args.student_warmup_epochs) else None
 
         encoder_model.eval()
         transformer = encoder_model.model.encoder.transformer
@@ -205,6 +243,20 @@ def train_e2e_reben_sar(args):
             )
             scaler.step(optimizer)
             scaler.update()
+
+            if student_model is not None and epoch >= args.student_warmup_epochs:
+                student_optimizer.zero_grad()
+                features_detached = features.detach()
+                with torch.cuda.amp.autocast():
+                    student_alphas = student_model(features_detached)
+                d_loss = endd_loss(student_alphas.float(), all_preds.detach().float(), temperature=student_T)
+                student_scaler.scale(d_loss).backward()
+                student_scaler.unscale_(student_optimizer)
+                torch.nn.utils.clip_grad_norm_(student_model.parameters(), max_norm=1.0)
+                student_scaler.step(student_optimizer)
+                student_scaler.update()
+                epoch_student_loss += d_loss.item()
+
             epoch_task_loss += task_loss.item()
             epoch_jsd_loss += div_loss_jsd.item() if torch.is_tensor(div_loss_jsd) else div_loss_jsd
             epoch_pearson_loss += div_loss_pearson.item() if torch.is_tensor(div_loss_pearson) else div_loss_pearson
@@ -222,17 +274,24 @@ def train_e2e_reben_sar(args):
             loss_history.setdefault("train_pearson", []).append(avg_pearson)
         if "orthogonality" in args.diversity_methods:
             loss_history.setdefault("train_orth", []).append(avg_orth)
+        if student_model is not None and epoch >= args.student_warmup_epochs:
+            loss_history.setdefault("student_train", []).append(epoch_student_loss / len(train_loader))
 
         enc_lr = optimizer.param_groups[0]['lr']
         dec_lr = optimizer.param_groups[1]['lr']
         log_msg(f"Epoch [{epoch + 1}/{args.num_epochs}] - Task Loss: {avg_task:.4f} | JSD: {avg_jsd:.4f} | "
                 f"Pearson: {avg_pearson:.4f} | Orth: {avg_orth:.4f} | "
                 f"LR encoder: {enc_lr:.2e} decoder: {dec_lr:.2e}")
+        if student_model is not None and epoch >= args.student_warmup_epochs:
+            log_msg(f"  Student EnDD train loss: {epoch_student_loss / len(train_loader):.4f} | T={student_T:.2f}")
 
         # Validation
         encoder_model.eval()
         decoder.eval()
+        if student_model is not None:
+            student_model.eval()
         val_loss = 0
+        student_val_loss = 0.0
         with torch.no_grad():
             for v_imgs, v_masks in val_loader:
                 v_imgs  = v_imgs.to(DEVICE)
@@ -248,9 +307,26 @@ def train_e2e_reben_sar(args):
                     v_loss = total_val_loss / (decoder.M + 1)
                 val_loss += v_loss.item()
 
+                if student_model is not None and epoch >= args.student_warmup_epochs:
+                    with torch.cuda.amp.autocast():
+                        student_alphas = student_model(features)
+                    student_val_loss += endd_loss(student_alphas.float(), all_preds.float(),
+                                                  temperature=student_T).item()
+
         avg_val_loss = val_loss / len(val_loader)
         loss_history["val"].append(avg_val_loss)
         log_msg(f"Validation Loss: {avg_val_loss:.8f}")
+
+        if student_model is not None and epoch >= args.student_warmup_epochs:
+            avg_student_val = student_val_loss / len(val_loader)
+            loss_history.setdefault("student_val", []).append(avg_student_val)
+            log_msg(f"  Student Val Loss: {avg_student_val:.6f}")
+            if avg_student_val < best_student_val_loss:
+                best_student_val_loss = avg_student_val
+                save_checkpoint({'epoch': epoch + 1, 'model_state_dict': student_model.state_dict(),
+                                 'optimizer_state_dict': student_optimizer.state_dict()},
+                                str(CHECKPOINT_DIR), filename=f"{run_name}_best_student.pth")
+                log_msg(f"  New best student val loss {best_student_val_loss:.6f} — saved")
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
@@ -268,6 +344,11 @@ def train_e2e_reben_sar(args):
                             str(CHECKPOINT_DIR), filename=f"{run_name}_last_decoder.pth")
             save_checkpoint({'epoch': epoch + 1, 'encoder_state_dict': encoder_model.state_dict()},
                             str(CHECKPOINT_DIR), filename=f"{run_name}_last_encoder.pth")
+            if student_model is not None:
+                save_checkpoint({'epoch': epoch + 1, 'model_state_dict': student_model.state_dict(),
+                                 'optimizer_state_dict': student_optimizer.state_dict(),
+                                 'best_student_val_loss': best_student_val_loss},
+                                str(CHECKPOINT_DIR), filename=f"{run_name}_last_student.pth")
             loss_path = os.path.join(runs_dir, f"{run_name}_loss_history.json")
             with open(loss_path, "w") as f:
                 json.dump(loss_history, f, indent=2)
@@ -276,6 +357,8 @@ def train_e2e_reben_sar(args):
             warmup_scheduler.step()
         else:
             plateau_scheduler.step(avg_val_loss)
+        if student_scheduler is not None:
+            student_scheduler.step()
 
     record_compute_cost(flops_profile, epochs_completed=args.num_epochs - compute_start_epoch,
                         batches_per_epoch=len(train_loader), start_time=training_start_time,
@@ -288,6 +371,10 @@ def train_e2e_reben_sar(args):
                     str(CHECKPOINT_DIR), filename=f"{run_name}_final_decoder_{timestamp}.pth")
     save_checkpoint({'epoch': args.num_epochs, 'encoder_state_dict': encoder_model.state_dict()},
                     str(CHECKPOINT_DIR), filename=f"{run_name}_final_encoder_{timestamp}.pth")
+    if student_model is not None:
+        save_checkpoint({'epoch': args.num_epochs, 'model_state_dict': student_model.state_dict(),
+                         'optimizer_state_dict': student_optimizer.state_dict()},
+                        str(CHECKPOINT_DIR), filename=f"{run_name}_final_student_{timestamp}.pth")
     loss_path = os.path.join(runs_dir, f"{run_name}_loss_history.json")
     with open(loss_path, "w") as f:
         json.dump(loss_history, f, indent=2)
@@ -303,9 +390,18 @@ def train_e2e_reben_sar(args):
     if best_encoder_path.exists():
         enc_ckpt = torch.load(best_encoder_path, map_location=DEVICE)
         encoder_model.load_state_dict(enc_ckpt['encoder_state_dict'], strict=False)
+    if student_model is not None:
+        best_student_path = CHECKPOINT_DIR / f"{run_name}_best_student.pth"
+        if best_student_path.exists():
+            student_ckpt = torch.load(best_student_path, map_location=DEVICE)
+            student_model.load_state_dict(student_ckpt['model_state_dict'])
 
     log_msg("Running evaluation...")
     evaluate_test_set_reben_sar(encoder_model, decoder, test_loader, args, run_name)
+    if student_model is not None:
+        evaluate_student_test_set_reben_sar(encoder_model, student_model, test_loader, args, run_name=f"{run_name}_student")
+        evaluate_uncertainty_correlation_reben_sar(encoder_model, decoder, student_model, test_loader, args,
+                                                   run_name=f"{run_name}_student")
 
     def _teacher_forward(imgs):
         with torch.cuda.amp.autocast():
@@ -317,7 +413,18 @@ def train_e2e_reben_sar(args):
         test_loader, args, run_name=run_name, who="teacher"
     )
 
-    return decoder, encoder_model
+    if student_model is not None:
+        def _student_forward(imgs):
+            with torch.cuda.amp.autocast():
+                features = get_encoder_representation_partial(imgs, encoder_model, waves=S1_WAVES)
+                return student_model(features)
+
+        evaluate_error_localization(
+            lambda imgs: dirichlet_uncertainty_and_pred(_student_forward(imgs).float()),
+            test_loader, args, run_name=run_name, who="student"
+        )
+
+    return decoder, encoder_model, student_model
 
 
 def evaluate_test_set_reben_sar(encoder_model, decoder, test_loader, args, run_name):
@@ -505,6 +612,255 @@ def evaluate_test_set_reben_sar(encoder_model, decoder, test_loader, args, run_n
     return results
 
 
+def evaluate_student_test_set_reben_sar(encoder_model, student_model, test_loader, args, run_name):
+    """
+    Evaluate a trained StudentHead (AS4) on the reBEN SAR test split. test_loader yields
+    raw images (not pre-baked embeddings), so the encoder forward pass runs here first —
+    mirrors train_e2e_reben.py's evaluate_student_test_set_reben, adapted for SAR.
+    """
+    encoder_model.eval()
+    student_model.eval()
+
+    num_classes = args.num_classes
+    class_names = REBEN_CLASSES
+    conf_matrix = np.zeros((num_classes, num_classes), dtype=np.int64)
+    num_bins = 10
+    bin_boundaries = np.linspace(0, 1, num_bins + 1)
+    bin_conf_sums = np.zeros(num_bins)
+    bin_acc_sums  = np.zeros(num_bins, dtype=np.int64)
+    bin_counts    = np.zeros(num_bins, dtype=np.int64)
+    patch_count = 0
+    nll_sum = 0.0
+    nll_count = 0
+    auroc_entropy = []
+    auroc_errors  = []
+    AUROC_MAX = 2_000_000
+
+    with torch.no_grad():
+        for test_imgs, test_masks in test_loader:
+            test_imgs = test_imgs.to(DEVICE)
+
+            with torch.cuda.amp.autocast():
+                features = get_encoder_representation_partial(test_imgs, encoder_model, waves=S1_WAVES)
+                alphas = student_model(features)                    # [B, K, H, W]
+            alphas = alphas.float()
+            alpha0 = alphas.sum(dim=1, keepdim=True)                 # [B, 1, H, W]
+            mean_probs = alphas / alpha0                             # [B, K, H, W]
+
+            test_masks_t = test_masks.to(DEVICE).long()
+            labelled_t = test_masks_t > 0
+            if labelled_t.any():
+                log_probs = torch.log(mean_probs.clamp(min=1e-10))
+                gt_idx = test_masks_t.unsqueeze(1).clamp(0, num_classes - 1)
+                nll_sum += (-log_probs.gather(1, gt_idx).squeeze(1)[labelled_t]).sum().item()
+                nll_count += labelled_t.sum().item()
+                auroc_collected = sum(len(x) for x in auroc_entropy) if auroc_entropy else 0
+                if auroc_collected < AUROC_MAX:
+                    ent_t = -(mean_probs * torch.log(mean_probs.clamp(min=1e-10))).sum(dim=1)
+                    err_t = (torch.argmax(mean_probs, dim=1) != test_masks_t).float()
+                    auroc_entropy.append(ent_t[labelled_t].cpu().numpy())
+                    auroc_errors.append(err_t[labelled_t].cpu().numpy())
+
+            class_maps = torch.argmax(mean_probs, dim=1).cpu().numpy()
+            conf_maps  = torch.max(mean_probs, dim=1)[0].cpu().numpy()
+
+            masks_np = test_masks.numpy()
+            for b in range(test_imgs.shape[0]):
+                gt = masks_np[b]
+                if (gt > 0).sum() < 100:
+                    continue
+                mask = (gt > 0) & (gt < num_classes)
+                pred_flat = class_maps[b][mask]
+                true_flat = gt[mask]
+                conf_flat = conf_maps[b][mask]
+
+                np.add.at(conf_matrix, (true_flat, pred_flat), 1)
+
+                bin_indices = np.digitize(conf_flat, bin_boundaries[1:-1])
+                for bin_idx in range(num_bins):
+                    in_bin = bin_indices == bin_idx
+                    if in_bin.sum() > 0:
+                        bin_conf_sums[bin_idx] += conf_flat[in_bin].sum()
+                        bin_acc_sums[bin_idx]  += (pred_flat[in_bin] == true_flat[in_bin]).sum()
+                        bin_counts[bin_idx]    += in_bin.sum()
+                patch_count += 1
+
+    iou_per_class = np.zeros(num_classes - 1)
+    present = []
+    for c in range(1, num_classes):
+        tp    = conf_matrix[c, c]
+        fp    = conf_matrix[:, c].sum() - tp
+        fn    = conf_matrix[c, :].sum() - tp
+        denom = tp + fp + fn
+        if denom > 0:
+            iou_per_class[c - 1] = tp / denom
+            present.append(c - 1)
+    global_miou = float(np.mean(iou_per_class[present])) if present else 0.0
+
+    class_pixel_counts = conf_matrix[1:, :].sum(axis=1)
+    total_labelled = class_pixel_counts.sum()
+    fw_iou = float((class_pixel_counts / max(total_labelled, 1) * iou_per_class).sum())
+
+    global_nll = nll_sum / max(nll_count, 1)
+    if auroc_entropy:
+        all_ent = np.concatenate(auroc_entropy)
+        all_err = np.concatenate(auroc_errors)
+        global_auroc = float(roc_auc_score(all_err, all_ent)) if len(np.unique(all_err)) > 1 else 0.0
+    else:
+        global_auroc = 0.0
+
+    global_acc = float(np.diag(conf_matrix)[1:].sum() / max(conf_matrix[1:, :].sum(), 1))
+
+    bin_accs  = np.where(bin_counts > 0, bin_acc_sums / bin_counts, 0.0)
+    bin_confs = np.where(bin_counts > 0, bin_conf_sums / bin_counts, 0.0)
+    total_samples = bin_counts.sum()
+    global_ece = (np.sum(bin_counts * np.abs(bin_accs - bin_confs)) / total_samples
+                  if total_samples > 0 else 0.0)
+
+    log_msg(f"REBEN SAR STUDENT TEST RESULTS ({patch_count} patches):")
+    log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | Acc: {global_acc:.4f} | "
+            f"ECE: {global_ece:.4f} | NLL: {global_nll:.4f} | AUROC: {global_auroc:.4f}")
+    log_msg("Per-class IoU (descending frequency):")
+    freq_order = np.argsort(class_pixel_counts)[::-1]
+    for class_idx in freq_order:
+        log_msg(f"  {class_names[class_idx + 1]}: {iou_per_class[class_idx]:.4f}")
+
+    runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
+    os.makedirs(runs_dir, exist_ok=True)
+    results = {
+        "run_name": run_name,
+        "global_miou": global_miou,
+        "global_fwiou": fw_iou,
+        "global_accuracy": global_acc,
+        "global_ece": float(global_ece),
+        "global_nll": global_nll,
+        "global_auroc": global_auroc,
+        "num_patches": patch_count,
+        "per_class_iou": {class_names[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)},
+        "confusion_matrix": conf_matrix.tolist(),
+    }
+    results_path = os.path.join(runs_dir, f"{run_name}_results.json")
+    with open(results_path, "w") as f:
+        json.dump(results, f, indent=2)
+    log_msg(f"Student results saved to {results_path}")
+    plot_confusion_matrix(results_path, save_name=f"{run_name}_confusion")
+
+    return results
+
+
+def evaluate_uncertainty_correlation_reben_sar(encoder_model, decoder, student_model, test_loader, args, run_name):
+    """
+    Compares spatial layout of teacher (ensemble) vs student (Dirichlet) uncertainty
+    maps for reBEN SAR e2e — mirrors train_e2e_reben.py's evaluate_uncertainty_correlation_reben,
+    adapted for SAR, sharing encoder features between teacher and student per batch.
+    """
+    encoder_model.eval()
+    decoder.eval()
+    student_model.eval()
+
+    epi_corr_sum = 0.0
+    epi_corr_count = 0
+    alea_corr_sum = 0.0
+    alea_corr_count = 0
+    total_corr_sum = 0.0
+    total_corr_count = 0
+    skipped_degenerate = 0
+    patch_count = 0
+
+    with torch.no_grad():
+        for test_imgs, test_masks in test_loader:
+            test_imgs = test_imgs.to(DEVICE)
+
+            with torch.cuda.amp.autocast():
+                features = get_encoder_representation_partial(test_imgs, encoder_model, waves=S1_WAVES)
+                all_preds = decoder(features)          # [M, B, K, H, W], already 224x224
+                alphas = student_model(features)        # [B, K, H, W]
+
+            all_preds = all_preds.float()
+            alphas = alphas.float()
+
+            teacher_head_probs = torch.softmax(all_preds, dim=2)
+            teacher_mean_probs = teacher_head_probs.mean(dim=0)                # [B, K, H, W]
+            teacher_total_ent = -(teacher_mean_probs * torch.log(teacher_mean_probs.clamp(min=1e-10))).sum(dim=1)
+            teacher_aleatoric = torch.zeros_like(teacher_total_ent)
+            for m in range(decoder.M):
+                hp = teacher_head_probs[m]
+                teacher_aleatoric += -(hp * torch.log(hp.clamp(1e-10))).sum(dim=1)
+            teacher_aleatoric /= decoder.M
+            teacher_epistemic = (teacher_total_ent - teacher_aleatoric).clamp(min=0)
+
+            alpha0 = alphas.sum(dim=1, keepdim=True)
+            student_mean_probs = alphas / alpha0
+            alpha0_sq = alpha0.squeeze(1)
+            student_total_ent = -(student_mean_probs * torch.log(student_mean_probs + 1e-10)).sum(dim=1)
+            student_aleatoric = (torch.digamma(alpha0_sq + 1)
+                                  - (student_mean_probs * torch.digamma(alphas + 1)).sum(dim=1))
+            student_epistemic = (student_total_ent - student_aleatoric).clamp(min=0)
+
+            teacher_epi_np = teacher_epistemic.cpu().numpy()
+            teacher_alea_np = teacher_aleatoric.cpu().numpy()
+            teacher_total_np = teacher_total_ent.cpu().numpy()
+            student_epi_np = student_epistemic.cpu().numpy()
+            student_alea_np = student_aleatoric.cpu().numpy()
+            student_total_np = student_total_ent.cpu().numpy()
+
+            masks_np = test_masks.numpy()
+            for b in range(test_imgs.shape[0]):
+                gt = masks_np[b]
+                mask = gt > 0
+                if mask.sum() < 100:
+                    continue
+                patch_count += 1
+
+                epi_rho, _ = spearmanr(teacher_epi_np[b][mask], student_epi_np[b][mask])
+                if not math.isnan(epi_rho):
+                    epi_corr_sum += epi_rho
+                    epi_corr_count += 1
+                else:
+                    skipped_degenerate += 1
+
+                alea_rho, _ = spearmanr(teacher_alea_np[b][mask], student_alea_np[b][mask])
+                if not math.isnan(alea_rho):
+                    alea_corr_sum += alea_rho
+                    alea_corr_count += 1
+                else:
+                    skipped_degenerate += 1
+
+                total_rho, _ = spearmanr(teacher_total_np[b][mask], student_total_np[b][mask])
+                if not math.isnan(total_rho):
+                    total_corr_sum += total_rho
+                    total_corr_count += 1
+                else:
+                    skipped_degenerate += 1
+
+    mean_epi_corr = epi_corr_sum / max(epi_corr_count, 1)
+    mean_alea_corr = alea_corr_sum / max(alea_corr_count, 1)
+    mean_total_corr = total_corr_sum / max(total_corr_count, 1)
+
+    log_msg(f"REBEN SAR TEACHER/STUDENT UNCERTAINTY CORRELATION ({patch_count} patches, {skipped_degenerate} degenerate skipped):")
+    log_msg(f"Mean Spearman epistemic corr: {mean_epi_corr:.4f} | Mean Spearman aleatoric corr: {mean_alea_corr:.4f} | "
+            f"Mean Spearman total corr: {mean_total_corr:.4f}")
+
+    runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
+    os.makedirs(runs_dir, exist_ok=True)
+    results = {
+        "run_name": run_name,
+        "mean_epistemic_spearman": mean_epi_corr,
+        "mean_aleatoric_spearman": mean_alea_corr,
+        "mean_total_spearman": mean_total_corr,
+        "num_patches": patch_count,
+        "num_epistemic_correlations": epi_corr_count,
+        "num_aleatoric_correlations": alea_corr_count,
+        "num_total_correlations": total_corr_count,
+    }
+    results_path = os.path.join(runs_dir, f"{run_name}_uncertainty_correlation_results.json")
+    with open(results_path, "w") as f:
+        json.dump(results, f, indent=2)
+    log_msg(f"Uncertainty correlation results saved to {results_path}")
+
+    return results
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="reBEN SAR end-to-end partial-unfreeze training")
 
@@ -550,10 +906,16 @@ if __name__ == "__main__":
     parser.add_argument("--lam_pearson", type=float, default=0.0)
     parser.add_argument("--lam_orth",    type=float, default=0.0)
 
+    # AS4 in-parallel student
+    parser.add_argument("--train_student", action="store_true", help="Train AS4 StudentHead in parallel with teacher ensemble")
+    parser.add_argument("--student_warmup_epochs", type=int, default=10, help="Epochs to train teacher only before student starts updating")
+    parser.add_argument("--student_T_start", type=float, default=4.0, help="Initial temperature for EnDD teacher softmax annealing, linearly anneals to 1.0 over the student's training window")
+
     # Resume
     parser.add_argument("--resume",              action="store_true")
     parser.add_argument("--resume_decoder_path", type=str, default=None)
     parser.add_argument("--resume_encoder_path", type=str, default=None)
+    parser.add_argument("--resume_student_path", type=str, default=None)
     parser.add_argument("--resume_epoch",        type=int, default=0)
 
     # Misc
