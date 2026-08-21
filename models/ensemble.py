@@ -1,3 +1,4 @@
+import math
 import torch.nn as nn
 import torch.nn.functional as F
 from configs.config import *
@@ -125,6 +126,48 @@ class DecoderEnsemble(nn.Module):
         # Stack the outputs along a new 'member' dimension
         # so [Member, Batch, Class, H, W] = [5, ?, 24, 224, 224]
         return torch.stack(head_outputs)
+
+
+class VariationalBottleneck(nn.Module):
+    """
+    Inserted between the encoder and the M decoder heads. Each head gets an
+    independent sample z_m = mu + sigma * eps_m from a learned per-pixel Gaussian,
+    instead of every head consuming the identical shared feature map. The prior mean
+    is the encoder's own (detached) output rather than N(0,1), so the KL term
+    penalises drifting away from what the encoder actually produced for this input,
+    not toward a generic prior that would fight the pretrained representation.
+    Off by default (use_variational_bottleneck=False upstream) - see DecoderEnsemble,
+    which is untouched by this class and keeps working exactly as before either way.
+    """
+
+    def __init__(self, channels=1024, sigma_prior=1.0):
+        super().__init__()
+        self.mu_conv = nn.Conv2d(channels, channels, kernel_size=1)
+        self.logvar_conv = nn.Conv2d(channels, channels, kernel_size=1)
+        self.sigma_prior = sigma_prior
+
+        # Zero/negative-bias init so training starts close to today's deterministic
+        # behaviour (mu ~= e, small sigma) rather than a cold, garbled embedding
+        nn.init.zeros_(self.mu_conv.weight)
+        nn.init.zeros_(self.mu_conv.bias)
+        nn.init.zeros_(self.logvar_conv.weight)
+        nn.init.constant_(self.logvar_conv.bias, -4.0)
+
+    def forward(self, e):
+        mu = e + self.mu_conv(e)
+        logvar = self.logvar_conv(e)
+        prior_mean = e.detach()
+
+        kl = -0.5 * torch.mean(
+            1 + logvar - math.log(self.sigma_prior ** 2)
+            - (mu - prior_mean).pow(2) / (self.sigma_prior ** 2)
+            - logvar.exp() / (self.sigma_prior ** 2)
+        )
+        return mu, logvar, kl
+
+    def sample(self, mu, logvar, n):
+        std = torch.exp(0.5 * logvar)
+        return [mu + std * torch.randn_like(std) for _ in range(n)]
 
 
 class StudentHead(nn.Module):

@@ -165,6 +165,16 @@ if __name__ == "__main__":
     parser.add_argument("--lam_jsd", type=float, default=0.)
     parser.add_argument("--lam_pearson", type=float, default=0.)
     parser.add_argument("--lam_orth", type=float, default=0.0)
+    parser.add_argument("--use_variational_bottleneck", action="store_true",
+                        help="Insert a stochastic (VIB-style) bottleneck between encoder and decoder heads, "
+                             "giving each head an independently-sampled input instead of the identical shared "
+                             "feature map. Off by default; existing diversity_methods keep working unchanged "
+                             "whether this is on or off.")
+    parser.add_argument("--lam_kl", type=float, default=0.0,
+                        help="Weight for the variational bottleneck's KL loss term")
+    parser.add_argument("--sigma_prior", type=float, default=1.0,
+                        help="Prior std for the variational bottleneck - how far each head's sampled embedding "
+                             "is allowed to drift from the encoder's own output")
     # Misc
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--run_name", type=str, default="run")
