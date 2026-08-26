@@ -68,6 +68,11 @@ def main():
     parser.add_argument("--sigma_prior", type=float, required=True,
                         help="Must match the checkpoint's actual training config - doesn't affect eval output (mu-only), but is needed to construct the module")
     parser.add_argument("--num_classes", type=int, default=25)
+    parser.add_argument("--diversity_methods", type=str, nargs="+", default=[],
+                        help="Must match the checkpoint's actual training config - only used for evaluate_test_set's results.json metadata, doesn't affect eval computation")
+    parser.add_argument("--lam_jsd", type=float, default=0.0)
+    parser.add_argument("--lam_pearson", type=float, default=0.0)
+    parser.add_argument("--lam_orth", type=float, default=0.0)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--max_images", type=int, default=None)
     parser.add_argument("--hide_unlabelled_pixels", action="store_true", default=True)
