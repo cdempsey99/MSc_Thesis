@@ -170,6 +170,39 @@ class VariationalBottleneck(nn.Module):
         return [mu + std * torch.randn_like(std) for _ in range(n)]
 
 
+class VBEvalWrapper(nn.Module):
+    """Wraps a DecoderEnsemble + a trained VariationalBottleneck so existing eval functions
+    (evaluate_test_set, get_decoder_output_maps, and evaluate_error_localization's lambda
+    call sites) can be used completely unchanged: each head receives mu(e), matching what it
+    was actually trained on, instead of the raw encoder features. Training already got this
+    right for the student (fed mu); this wrapper fixes the same gap on the teacher's eval path,
+    where evaluate_test_set previously called the decoder directly on raw features."""
+
+    def __init__(self, decoder, bottleneck):
+        super().__init__()
+        self.decoder = decoder
+        self.bottleneck = bottleneck
+        self.M = decoder.M
+
+    def forward(self, x):
+        mu, _, _ = self.bottleneck(x)
+        return self.decoder(mu)
+
+
+class VBStudentEvalWrapper(nn.Module):
+    """Same fix as VBEvalWrapper, for the student: it's also trained on mu(e), not raw
+    features, so its eval path needs the same wrapping when a bottleneck is active."""
+
+    def __init__(self, student, bottleneck):
+        super().__init__()
+        self.student = student
+        self.bottleneck = bottleneck
+
+    def forward(self, x):
+        mu, _, _ = self.bottleneck(x)
+        return self.student(mu)
+
+
 class StudentHead(nn.Module):
     """
     Single decoder head for EnDD (Ensemble Distribution Distillation).

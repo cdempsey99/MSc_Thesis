@@ -15,6 +15,7 @@ from utils.dataset import *
 from utils.training import full_decoder_training_run, log_msg
 from utils.misc import *
 from utils.visualisation import *
+from models.ensemble import VBEvalWrapper, VBStudentEvalWrapper
 
 # Set Device
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -95,7 +96,7 @@ def run_training(args):
 
 
     start_time = time.time()
-    trained_model, student_model = full_decoder_training_run(input_dict, train_loader, val_loader)
+    trained_model, student_model, bottleneck = full_decoder_training_run(input_dict, train_loader, val_loader)
 
     log_msg(f"Training completed in {(time.time() - start_time) / 60:.2f} minutes.")
 
@@ -104,38 +105,53 @@ def run_training(args):
                                      f"{run_name}_loss_history.json")
     plot_loss_curves(loss_history_path, save_name=f"{run_name}_loss_curves")
 
-    # Load best model for evaluation instead of final model
+    # Load best model for evaluation instead of final model - unless --eval_checkpoint final
+    # was requested, in which case trained_model already holds the final-epoch weights as-is
+    # (val-loss "best" selection on FBP's small val split has repeatedly proven unreliable -
+    # see the ensemble-size ablation and this run's own val loss climbing from epoch 6 onward)
     best_model_path = Path(os.getenv("OUT_DIR", "results")) / "checkpoints" / f"{run_name}_best_model.pth"
 
-    if best_model_path.exists():
+    if args.eval_checkpoint == "best" and best_model_path.exists():
         log_msg(f"Loading best model from {best_model_path} for evaluation")
         checkpoint = torch.load(best_model_path, map_location=DEVICE)
         trained_model.load_state_dict(checkpoint['model_state_dict'])
+        if bottleneck is not None and checkpoint.get('bottleneck_state_dict') is not None:
+            bottleneck.load_state_dict(checkpoint['bottleneck_state_dict'])
+            log_msg("Best bottleneck loaded successfully")
         log_msg("Best model loaded successfully")
-    else:
+    elif args.eval_checkpoint == "best":
         log_msg("No best model found, evaluating final model")
+    else:
+        log_msg("--eval_checkpoint=final: evaluating final-epoch weights, not the val-loss best checkpoint")
+
+    # With a bottleneck, each head must be evaluated on mu(features) - what it was actually
+    # trained on - not the raw encoder features, matching the student's (already-correct) input.
+    eval_model = VBEvalWrapper(trained_model, bottleneck) if bottleneck is not None else trained_model
 
     results = evaluate_test_set(
-        trained_model, test_loader,
+        eval_model, test_loader,
         nn.CrossEntropyLoss(ignore_index=0),
         args,
         run_name=run_name
     )
     evaluate_error_localization(
-        lambda feats: ensemble_uncertainty_and_pred(trained_model(feats), args.num_classes),
+        lambda feats: ensemble_uncertainty_and_pred(eval_model(feats), args.num_classes),
         test_loader, args, run_name=run_name, who="teacher"
     )
 
     if args.train_student and student_model is not None:
         best_student_path = Path(os.getenv("OUT_DIR", "results")) / "checkpoints" / f"{run_name}_best_student.pth"
-        if best_student_path.exists():
+        if args.eval_checkpoint == "best" and best_student_path.exists():
             log_msg(f"Loading best student checkpoint from {best_student_path}")
             ckpt = torch.load(best_student_path, map_location=DEVICE)
             student_model.load_state_dict(ckpt['model_state_dict'])
-        evaluate_student_test_set(student_model, test_loader, args, run_name=f"{run_name}_student")
-        evaluate_uncertainty_correlation(trained_model, student_model, test_loader, args, run_name=f"{run_name}_student")
+        elif args.eval_checkpoint == "final":
+            log_msg("--eval_checkpoint=final: evaluating final-epoch student weights")
+        student_eval_model = VBStudentEvalWrapper(student_model, bottleneck) if bottleneck is not None else student_model
+        evaluate_student_test_set(student_eval_model, test_loader, args, run_name=f"{run_name}_student")
+        evaluate_uncertainty_correlation(eval_model, student_eval_model, test_loader, args, run_name=f"{run_name}_student")
         evaluate_error_localization(
-            lambda feats: dirichlet_uncertainty_and_pred(student_model(feats)),
+            lambda feats: dirichlet_uncertainty_and_pred(student_eval_model(feats)),
             test_loader, args, run_name=run_name, who="student"
         )
 
@@ -186,6 +202,11 @@ if __name__ == "__main__":
     parser.add_argument("--train_student", action="store_true", help="Train AS4 StudentHead in parallel with teacher ensemble")
     parser.add_argument("--student_warmup_epochs", type=int, default=10, help="Epochs to train teacher only before student starts updating")
     parser.add_argument("--student_T_start", type=float, default=4.0, help="Initial temperature for EnDD teacher softmax annealing, linearly anneals to 1.0 over the student's training window")
+    parser.add_argument("--eval_checkpoint", type=str, default="best", choices=["best", "final"],
+                        help="Which checkpoint to evaluate at the end of training: 'best' (val-loss selected, "
+                             "default, matches existing behaviour) or 'final' (last epoch's weights - val-loss "
+                             "selection on FBP's small val split has repeatedly proven unreliable, e.g. picking "
+                             "an epoch-6 checkpoint out of a 40-epoch run)")
 
     args = parser.parse_args()
     run_training(args)

@@ -411,5 +411,5 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
         flops_profile=flops_profile, bottleneck=bottleneck
     )
 
-    return trained_decoder_model, student_model
+    return trained_decoder_model, student_model, bottleneck
 
