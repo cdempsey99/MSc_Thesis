@@ -15,7 +15,7 @@ from utils.dataset import *
 from utils.training import full_decoder_training_run, log_msg
 from utils.misc import *
 from utils.visualisation import *
-from models.ensemble import VBEvalWrapper, VBStudentEvalWrapper
+from models.ensemble import VBEvalWrapper
 
 # Set Device
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -124,8 +124,9 @@ def run_training(args):
     else:
         log_msg("--eval_checkpoint=final: evaluating final-epoch weights, not the val-loss best checkpoint")
 
-    # With a bottleneck, each head must be evaluated on mu(features) - what it was actually
-    # trained on - not the raw encoder features, matching the student's (already-correct) input.
+    # With a bottleneck, each head must be evaluated on its own mu_m(features) - the
+    # deterministic posterior mean it was actually trained around - not the raw encoder
+    # features and not another head's mu.
     eval_model = VBEvalWrapper(trained_model, bottleneck) if bottleneck is not None else trained_model
 
     results = evaluate_test_set(
@@ -147,7 +148,10 @@ def run_training(args):
             student_model.load_state_dict(ckpt['model_state_dict'])
         elif args.eval_checkpoint == "final":
             log_msg("--eval_checkpoint=final: evaluating final-epoch student weights")
-        student_eval_model = VBStudentEvalWrapper(student_model, bottleneck) if bottleneck is not None else student_model
+        # Student always trains on raw encoder features regardless of whether the bottleneck
+        # is active, so no wrapper is needed here (unlike the teacher, which needs VBEvalWrapper
+        # to route each head to its own mu_m).
+        student_eval_model = student_model
         evaluate_student_test_set(student_eval_model, test_loader, args, run_name=f"{run_name}_student")
         evaluate_uncertainty_correlation(eval_model, student_eval_model, test_loader, args, run_name=f"{run_name}_student")
         evaluate_error_localization(

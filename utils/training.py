@@ -7,17 +7,21 @@ from datetime import datetime
 
 
 def _ensemble_forward(decoder_model, features, bottleneck=None):
-    """Runs the M-head ensemble forward pass. With a bottleneck, each head sees its
-    own sampled z_m instead of the shared raw features; mu is returned as the
-    student's input either way (== features itself when no bottleneck is used), so
-    the student always sees a deterministic embedding, never a per-head sample."""
+    """Runs the M-head ensemble forward pass. With a bottleneck, each head samples from
+    its own per-head distribution. The student always trains on the raw encoder features
+    (never a bottleneck-derived embedding), so its input distribution is identical whether
+    or not the bottleneck is active. Also returns the mean learned std across heads/pixels
+    (0 when no bottleneck), purely for diagnostic logging of whether the bottleneck is
+    collapsing its injected noise toward zero over training."""
     if bottleneck is not None:
-        mu, logvar, kl = bottleneck(features)
-        z_samples = bottleneck.sample(mu, logvar, decoder_model.M)
+        mus, logvars, kl = bottleneck(features)
+        z_samples = bottleneck.sample(mus, logvars)
         all_preds = torch.stack([decoder_model.heads[m](z_samples[m]) for m in range(decoder_model.M)])
-        return all_preds, mu, kl
+        mean_std = torch.stack([lv.exp().sqrt().mean() for lv in logvars]).mean()
+        return all_preds, kl, mean_std
     else:
-        return decoder_model(features), features, torch.tensor(0.0, device=features.device)
+        zero = torch.tensor(0.0, device=features.device)
+        return decoder_model(features), zero, zero
 
 
 def student_step(student_model, student_optimizer, features, teacher_logits_detached, temperature=1.0):
@@ -38,8 +42,8 @@ def student_val_epoch(student_model, teacher_model, val_loader, temperature=1.0,
     with torch.no_grad():
         for features, _ in val_loader:
             features = features.to(DEVICE)
-            teacher_logits, mu, _ = _ensemble_forward(teacher_model, features, bottleneck)
-            alphas = student_model(mu)
+            teacher_logits, _, _ = _ensemble_forward(teacher_model, features, bottleneck)
+            alphas = student_model(features)
             total_loss += endd_loss(alphas, teacher_logits, temperature=temperature).item()
     return total_loss / len(val_loader)
 
@@ -117,6 +121,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         epoch_pearson_loss = 0
         epoch_orth_loss = 0
         epoch_kl_loss = 0
+        epoch_std_loss = 0
         epoch_student_loss = 0.0
         student_T = get_temperature(epoch - student_warmup_epochs, num_epochs - student_warmup_epochs, student_T_start) \
             if (student_model is not None and epoch >= student_warmup_epochs) else None
@@ -128,7 +133,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
             features = features.to(DEVICE)
             targets = targets.to(DEVICE).long()
 
-            all_preds, mu, kl_loss = _ensemble_forward(decoder_model, features, bottleneck)
+            all_preds, kl_loss, mean_std = _ensemble_forward(decoder_model, features, bottleneck)
 
             total_task_loss = 0
             for head_idx in range(decoder_model.M):
@@ -177,7 +182,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
             optimizer.step()
 
             if student_model is not None and epoch >= student_warmup_epochs:
-                epoch_student_loss += student_step(student_model, student_optimizer, mu.detach(), all_preds.detach(),
+                epoch_student_loss += student_step(student_model, student_optimizer, features.detach(), all_preds.detach(),
                                                    temperature=student_T)
 
             epoch_task_loss += task_loss.item() if torch.is_tensor(task_loss) else task_loss
@@ -185,6 +190,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
             epoch_pearson_loss += div_loss_pearson.item() if torch.is_tensor(div_loss_pearson) else div_loss_pearson
             epoch_orth_loss += div_loss_orth.item() if torch.is_tensor(div_loss_orth) else div_loss_orth
             epoch_kl_loss += kl_loss.item() if torch.is_tensor(kl_loss) else kl_loss
+            epoch_std_loss += mean_std.item() if torch.is_tensor(mean_std) else mean_std
 
         #avg_task = epoch_task_loss / len(train_loader)
         #avg_div = epoch_div_loss / len(train_loader)
@@ -194,6 +200,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         avg_pearson = epoch_pearson_loss / len(train_loader)
         avg_orth = epoch_orth_loss / len(train_loader)
         avg_kl = epoch_kl_loss / len(train_loader)
+        avg_std = epoch_std_loss / len(train_loader)
 
         loss_history["train"].append(avg_task)
         if "jsd" in diversity_methods:
@@ -204,10 +211,11 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
             loss_history.setdefault("train_orth", []).append(avg_orth)
         if bottleneck is not None:
             loss_history.setdefault("train_kl", []).append(avg_kl)
+            loss_history.setdefault("train_bottleneck_std", []).append(avg_std)
         if student_model is not None and epoch >= student_warmup_epochs:
             loss_history.setdefault("student_train", []).append(epoch_student_loss / len(train_loader))
 
-        log_msg(f"Epoch [{epoch + 1}/{num_epochs}] - Task: {avg_task:.4f} | JSD: {avg_jsd:.4f} | Pearson: {avg_pearson:.4f} | Orth: {avg_orth:.4f} | KL: {avg_kl:.4f}")
+        log_msg(f"Epoch [{epoch + 1}/{num_epochs}] - Task: {avg_task:.4f} | JSD: {avg_jsd:.4f} | Pearson: {avg_pearson:.4f} | Orth: {avg_orth:.4f} | KL: {avg_kl:.4f} | BottleneckStd: {avg_std:.4f}")
         if student_model is not None and epoch >= student_warmup_epochs:
             log_msg(f"  Student EnDD train loss: {epoch_student_loss / len(train_loader):.4f} | T={student_T:.2f}")
 
@@ -350,7 +358,7 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
     bottleneck = None
     if input_dict.get("use_variational_bottleneck", False):
         sigma_prior = input_dict.get("sigma_prior", 1.0)
-        bottleneck = VariationalBottleneck(channels=in_channels, sigma_prior=sigma_prior)
+        bottleneck = VariationalBottleneck(channels=in_channels, num_heads=ensemble_size, sigma_prior=sigma_prior)
         bottleneck.to(DEVICE)
         log_msg(f"VariationalBottleneck enabled (sigma_prior={sigma_prior}, lam_kl={input_dict.get('lam_kl', 0.0)})")
 
