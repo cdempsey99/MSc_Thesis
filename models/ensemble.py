@@ -130,53 +130,66 @@ class DecoderEnsemble(nn.Module):
 
 class VariationalBottleneck(nn.Module):
     """
-    Inserted between the encoder and the M decoder heads. Each head gets an
-    independent sample z_m = mu + sigma * eps_m from a learned per-pixel Gaussian,
-    instead of every head consuming the identical shared feature map. The prior mean
-    is the encoder's own (detached) output rather than N(0,1), so the KL term
-    penalises drifting away from what the encoder actually produced for this input,
-    not toward a generic prior that would fight the pretrained representation.
-    Off by default (use_variational_bottleneck=False upstream) - see DecoderEnsemble,
-    which is untouched by this class and keeps working exactly as before either way.
+    Inserted between the encoder and the M decoder heads. Each head has its OWN
+    independently-parameterised Gaussian z_m = mu_m + sigma_m * eps_m, giving the
+    JSD/Pearson diversity loss a per-head structural parameter to push apart - not
+    just a shared noise seed drawn M times from one identical distribution (the
+    original design: every head's sample differed only by IID per-pixel noise,
+    which a head's own conv layers tend to smooth out rather than turn into
+    confidently-differing class boundaries).
+    The prior mean for every head is the encoder's own (detached) output rather
+    than N(0,1), so the KL term penalises drifting away from what the encoder
+    actually produced for this input, not toward a generic prior that would fight
+    the pretrained representation. Off by default (use_variational_bottleneck=False
+    upstream) - see DecoderEnsemble, which is untouched by this class and keeps
+    working exactly as before either way.
     """
 
-    def __init__(self, channels=1024, sigma_prior=1.0):
+    def __init__(self, channels=1024, num_heads=5, sigma_prior=1.0):
         super().__init__()
-        self.mu_conv = nn.Conv2d(channels, channels, kernel_size=1)
-        self.logvar_conv = nn.Conv2d(channels, channels, kernel_size=1)
+        self.num_heads = num_heads
         self.sigma_prior = sigma_prior
+        self.mu_convs = nn.ModuleList([nn.Conv2d(channels, channels, kernel_size=1) for _ in range(num_heads)])
+        self.logvar_convs = nn.ModuleList([nn.Conv2d(channels, channels, kernel_size=1) for _ in range(num_heads)])
 
         # Zero/negative-bias init so training starts close to today's deterministic
-        # behaviour (mu ~= e, small sigma) rather than a cold, garbled embedding
-        nn.init.zeros_(self.mu_conv.weight)
-        nn.init.zeros_(self.mu_conv.bias)
-        nn.init.zeros_(self.logvar_conv.weight)
-        nn.init.constant_(self.logvar_conv.bias, -4.0)
+        # behaviour (mu_m ~= e, small sigma) rather than a cold, garbled embedding
+        for mu_conv, logvar_conv in zip(self.mu_convs, self.logvar_convs):
+            nn.init.zeros_(mu_conv.weight)
+            nn.init.zeros_(mu_conv.bias)
+            nn.init.zeros_(logvar_conv.weight)
+            nn.init.constant_(logvar_conv.bias, -4.0)
 
     def forward(self, e):
-        mu = e + self.mu_conv(e)
-        logvar = self.logvar_conv(e)
         prior_mean = e.detach()
+        mus, logvars, kls = [], [], []
+        for mu_conv, logvar_conv in zip(self.mu_convs, self.logvar_convs):
+            mu = e + mu_conv(e)
+            logvar = logvar_conv(e)
+            kl = -0.5 * torch.mean(
+                1 + logvar - math.log(self.sigma_prior ** 2)
+                - (mu - prior_mean).pow(2) / (self.sigma_prior ** 2)
+                - logvar.exp() / (self.sigma_prior ** 2)
+            )
+            mus.append(mu)
+            logvars.append(logvar)
+            kls.append(kl)
+        return mus, logvars, torch.stack(kls).mean()
 
-        kl = -0.5 * torch.mean(
-            1 + logvar - math.log(self.sigma_prior ** 2)
-            - (mu - prior_mean).pow(2) / (self.sigma_prior ** 2)
-            - logvar.exp() / (self.sigma_prior ** 2)
-        )
-        return mu, logvar, kl
-
-    def sample(self, mu, logvar, n):
-        std = torch.exp(0.5 * logvar)
-        return [mu + std * torch.randn_like(std) for _ in range(n)]
+    def sample(self, mus, logvars):
+        z_samples = []
+        for mu, logvar in zip(mus, logvars):
+            std = torch.exp(0.5 * logvar)
+            z_samples.append(mu + std * torch.randn_like(std))
+        return z_samples
 
 
 class VBEvalWrapper(nn.Module):
-    """Wraps a DecoderEnsemble + a trained VariationalBottleneck so existing eval functions
-    (evaluate_test_set, get_decoder_output_maps, and evaluate_error_localization's lambda
-    call sites) can be used completely unchanged: each head receives mu(e), matching what it
-    was actually trained on, instead of the raw encoder features. Training already got this
-    right for the student (fed mu); this wrapper fixes the same gap on the teacher's eval path,
-    where evaluate_test_set previously called the decoder directly on raw features."""
+    """Wraps a DecoderEnsemble + a trained per-head VariationalBottleneck so existing eval
+    functions (evaluate_test_set, get_decoder_output_maps, and evaluate_error_localization's
+    lambda call sites) can be used unchanged: each head receives its own mu_m(e) - the
+    deterministic posterior mean it was actually trained around, no sampling noise at eval -
+    instead of either raw encoder features or one shared mu across all heads."""
 
     def __init__(self, decoder, bottleneck):
         super().__init__()
@@ -185,22 +198,9 @@ class VBEvalWrapper(nn.Module):
         self.M = decoder.M
 
     def forward(self, x):
-        mu, _, _ = self.bottleneck(x)
-        return self.decoder(mu)
-
-
-class VBStudentEvalWrapper(nn.Module):
-    """Same fix as VBEvalWrapper, for the student: it's also trained on mu(e), not raw
-    features, so its eval path needs the same wrapping when a bottleneck is active."""
-
-    def __init__(self, student, bottleneck):
-        super().__init__()
-        self.student = student
-        self.bottleneck = bottleneck
-
-    def forward(self, x):
-        mu, _, _ = self.bottleneck(x)
-        return self.student(mu)
+        mus, _, _ = self.bottleneck(x)
+        head_outputs = [self.decoder.heads[m](mus[m]) for m in range(self.decoder.M)]
+        return torch.stack(head_outputs)
 
 
 class StudentHead(nn.Module):

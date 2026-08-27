@@ -1,22 +1,29 @@
 """
-reeval_vb_checkpoint_frozen.py — re-evaluates an already-trained FBP frozen-decoder
-VariationalBottleneck checkpoint with the corrected eval path (feeding each head mu(features),
-what it was actually trained on, instead of the raw encoder features the buggy original eval
-used). No retraining: loads the saved decoder + bottleneck (and optionally student) and
-re-runs the full evaluate_test_set + evaluate_error_localization against the FBP test split.
+reeval_vb_checkpoint_frozen.py — re-evaluates a trained FBP frozen-decoder
+VariationalBottleneck checkpoint with the corrected eval path (feeding each head its own
+mu_m(features) - the deterministic posterior mean it was actually trained around - instead
+of the raw encoder features or a single shared mu). No retraining: loads the saved decoder +
+bottleneck (and optionally student) and re-runs evaluate_test_set + evaluate_error_localization
+against the FBP test split.
 
-See models.ensemble.VBEvalWrapper / VBStudentEvalWrapper for the fix itself.
+NOTE: only works against checkpoints saved with the per-head VariationalBottleneck (one
+mu_conv/logvar_conv pair per head). The earlier shared-bottleneck checkpoint
+(AS3_fbp_variational_layer_40ep_qa_20260821_1708_best_model.pth) has a different
+bottleneck_state_dict shape and will NOT load here - that run's results are already fully
+evaluated (see its own _reeval_results.json), nothing is lost by this script no longer
+supporting it.
+
+See models.ensemble.VBEvalWrapper for the fix itself.
 
 Usage:
     python reeval_vb_checkpoint_frozen.py \
         --data_dir /beegfs/scratch/callumdempsey/results \
-        --decoder_checkpoint /beegfs/scratch/callumdempsey/results/checkpoints/AS3_fbp_variational_layer_40ep_qa_20260821_1708_best_model.pth \
+        --decoder_checkpoint /beegfs/scratch/callumdempsey/results/checkpoints/<per_head_vb_run>_best_model.pth \
         --ensemble_size 5 --decoder_embed_dim 512 --num_classes 25 \
         --sigma_prior 0.5 --patch_size 224 --stride 224 --max_images 150 \
-        --run_name AS3_fbp_variational_layer_40ep_qa_20260821_1708_reeval
+        --run_name <per_head_vb_run>_reeval
 
-    # add --student_checkpoint <path> to also re-evaluate the student head (only if this
-    # checkpoint's run actually trained one - this specific run used --train_student=False)
+    # add --student_checkpoint <path> to also re-evaluate the student head
 """
 import argparse
 import random
@@ -28,7 +35,7 @@ from torch.utils.data import DataLoader
 from utils.dataset import BakedFeatureDataset
 from utils.misc import (log_msg, evaluate_test_set, evaluate_error_localization,
                         ensemble_uncertainty_and_pred, dirichlet_uncertainty_and_pred)
-from models.ensemble import DecoderEnsemble, StudentHead, VariationalBottleneck, VBEvalWrapper, VBStudentEvalWrapper
+from models.ensemble import DecoderEnsemble, StudentHead, VariationalBottleneck, VBEvalWrapper
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -87,7 +94,7 @@ def main():
 
     decoder = DecoderEnsemble(M=args.ensemble_size, in_channels=1024, embed_dim=args.decoder_embed_dim,
                               num_classes=args.num_classes)
-    bottleneck = VariationalBottleneck(channels=1024, sigma_prior=args.sigma_prior)
+    bottleneck = VariationalBottleneck(channels=1024, num_heads=args.ensemble_size, sigma_prior=args.sigma_prior)
 
     ckpt = torch.load(args.decoder_checkpoint, map_location=DEVICE)
     decoder.load_state_dict(ckpt['model_state_dict'])
@@ -114,9 +121,11 @@ def main():
         student.to(DEVICE).eval()
         log_msg(f"Loaded student from {args.student_checkpoint}")
 
-        student_eval_model = VBStudentEvalWrapper(student, bottleneck)
+        # Student always trains on raw encoder features regardless of the bottleneck, so no
+        # wrapper is needed here (unlike the teacher, which needs VBEvalWrapper to route each
+        # head to its own mu_m).
         evaluate_error_localization(
-            lambda feats: dirichlet_uncertainty_and_pred(student_eval_model(feats)),
+            lambda feats: dirichlet_uncertainty_and_pred(student(feats)),
             test_loader, args, run_name=args.run_name, who="student"
         )
 
