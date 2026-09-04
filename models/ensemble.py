@@ -49,25 +49,41 @@ class SegFormerDecoderHeadOld(nn.Module):
 
 class SegFormerDecoderHead(nn.Module):
 
-    def __init__(self, in_channels=1024, embed_dim=512, num_classes=NUM_CLASSES, p_drop=0.1):
+    def __init__(self, in_channels=1024, embed_dim=512, num_classes=NUM_CLASSES, p_drop=0.1, num_refine_blocks=2):
         super().__init__()
+        assert num_refine_blocks >= 1
+        self.num_refine_blocks = num_refine_blocks
 
-        # 1024 -> 512
+        # 1024 -> embed_dim
         self.linear_fusion = nn.Conv2d(in_channels, embed_dim, kernel_size=1)
         self.bn1 = nn.BatchNorm2d(embed_dim)
         self.activation1 = nn.GELU()
 
-        # Spatial refinement block 1
+        # First two spatial-refinement blocks keep their original attribute names
+        # (spatial_refine1/2, bn2/3, activation2/3) so the default num_refine_blocks=2 case
+        # produces an identical state_dict to every checkpoint saved before per-head
+        # architecture variation existed - old checkpoints still resume fine with
+        # --architecture_variation off. Blocks beyond the first two (only reachable via
+        # --architecture_variation) live in extra_refine_blocks instead.
         self.spatial_refine1 = nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(embed_dim)
         self.activation2 = nn.GELU()
 
-        # Spatial refinement block 2
-        self.spatial_refine2 = nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1)
-        self.bn3 = nn.BatchNorm2d(embed_dim)
-        self.activation3 = nn.GELU()
+        if num_refine_blocks >= 2:
+            self.spatial_refine2 = nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1)
+            self.bn3 = nn.BatchNorm2d(embed_dim)
+            self.activation3 = nn.GELU()
 
-        # Bottleneck 512 -> 256
+        self.extra_refine_blocks = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(embed_dim, embed_dim, kernel_size=3, padding=1),
+                nn.BatchNorm2d(embed_dim),
+                nn.GELU(),
+            )
+            for _ in range(max(0, num_refine_blocks - 2))
+        ])
+
+        # Bottleneck embed_dim -> embed_dim // 2
         self.bottleneck = nn.Conv2d(embed_dim, embed_dim // 2, kernel_size=1)
         self.bn4 = nn.BatchNorm2d(embed_dim // 2)
         self.activation4 = nn.GELU()
@@ -84,9 +100,13 @@ class SegFormerDecoderHead(nn.Module):
         x = self.bn2(x)
         x = self.activation2(x)
 
-        x = self.spatial_refine2(x)
-        x = self.bn3(x)
-        x = self.activation3(x)
+        if self.num_refine_blocks >= 2:
+            x = self.spatial_refine2(x)
+            x = self.bn3(x)
+            x = self.activation3(x)
+
+        for block in self.extra_refine_blocks:
+            x = block(x)
 
         x = self.bottleneck(x)
         x = self.bn4(x)
@@ -105,7 +125,7 @@ class SegFormerDecoderHead(nn.Module):
 
 class DecoderEnsemble(nn.Module):
 
-    def __init__(self, M=5, in_channels=1024, embed_dim=256, num_classes=NUM_CLASSES):
+    def __init__(self, M=5, in_channels=1024, embed_dim=256, num_classes=NUM_CLASSES, architecture_variation=False):
         super().__init__()
 
         self.M = M
@@ -120,9 +140,26 @@ class DecoderEnsemble(nn.Module):
         self.lr_scales = torch.linspace(0.5, 2.0, M).tolist()
         self.wd_values = torch.linspace(0.01, 0.2, M).tolist()
 
+        # Per-head architecture "capacity" (only used when --architecture_variation is
+        # passed): depth (number of stacked spatial-refine blocks, 1-4) and width
+        # (embed_dim, 256-768) vary together, so each head is a genuinely differently-sized
+        # sub-network rather than just a scalar-tweaked copy of the same one. Off by default -
+        # every head then gets today's fixed 2 blocks / embed_dim (identical to pre-existing
+        # behaviour, and identical state_dict shape per SegFormerDecoderHead's own
+        # backward-compatibility handling).
+        self.architecture_variation = architecture_variation
+        if architecture_variation:
+            self.refine_block_counts = torch.linspace(1, 4, M).round().long().tolist()
+            self.head_embed_dims = torch.linspace(256, 768, M).round().long().tolist()
+        else:
+            self.refine_block_counts = [2] * M
+            self.head_embed_dims = [embed_dim] * M
+
         # Create M individual SegFormerDecoderHead instances
         self.heads = nn.ModuleList([
-            SegFormerDecoderHead(in_channels, embed_dim, num_classes, p_drop=self.dropout_rates[i]) for i in range(M)
+            SegFormerDecoderHead(in_channels, self.head_embed_dims[i], num_classes, p_drop=self.dropout_rates[i],
+                                  num_refine_blocks=self.refine_block_counts[i])
+            for i in range(M)
         ])
 
     def forward(self, x):

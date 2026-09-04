@@ -350,10 +350,18 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
 
     # Instantiate Decoder Ensemble
     log_msg("Instantiating model")
-    this_ensemble = DecoderEnsemble(ensemble_size, in_channels, embed_dim, num_classes)
+    architecture_variation = input_dict.get("architecture_variation", False)
+    this_ensemble = DecoderEnsemble(ensemble_size, in_channels, embed_dim, num_classes,
+                                     architecture_variation=architecture_variation)
     # Leaving this in for now as I'm not sure if it is a good idea or not
     #this_ensemble.apply(init_weights)
     this_ensemble.to(DEVICE)
+    if architecture_variation:
+        log_msg(
+            "Per-head architecture variation enabled - "
+            f"refine_blocks: {this_ensemble.refine_block_counts}, "
+            f"embed_dim: {this_ensemble.head_embed_dims}"
+        )
 
     bottleneck = None
     if input_dict.get("use_variational_bottleneck", False):
@@ -429,6 +437,7 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
             "batch_size": input_dict["batch_size"],
             "include_student": input_dict.get("train_student", False),
             "diversity_methods": input_dict.get("diversity_methods", []),
+            "architecture_variation": architecture_variation,
         },
         decoder=this_ensemble,
         student=student_model,

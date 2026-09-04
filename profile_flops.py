@@ -48,6 +48,7 @@ def _config_key(config):
         f"batch{config['batch_size']}",
         "student" if config.get("include_student") else "nostudent",
         ("div_" + "-".join(sorted(diversity))) if diversity else "nodiv",
+        "archvar" if config.get("architecture_variation") else "uniform",
     ]
     return "_".join(str(p) for p in parts)
 
@@ -68,7 +69,10 @@ def ensure_flops_profile(config, decoder, student=None, encoder=None, waves=None
     (None for frozen), ensemble_size, decoder_embed_dim, num_classes, in_channels
     (None for decoder_only), batch_size, include_student, diversity_methods
     (list of "jsd"/"pearson"/"orthogonality", or None/[] — these have real FLOPs
-    cost at M>1 and are included in the profiled forward pass if present).
+    cost at M>1 and are included in the profiled forward pass if present),
+    architecture_variation (bool — per-head depth/width differs from decoder_embed_dim,
+    so must be part of the cache key or a varied-architecture run could load a stale
+    uniform-architecture profile with the same M/embed_dim/classes/batch).
     """
     out_dir = Path(os.getenv("OUT_DIR", "results")) / "flops_costs"
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -200,6 +200,12 @@ if __name__ == "__main__":
                              "the M heads) and weight_decay (0.01-0.2, linspace across the M heads) instead of "
                              "one shared AdamW param group. Off by default; leaving it off reproduces today's "
                              "single-param-group behaviour exactly, for an easy revert/comparison.")
+    parser.add_argument("--architecture_variation", action="store_true",
+                        help="Give each decoder head its own depth (1-4 stacked spatial-refine blocks, "
+                             "linspace across the M heads) and width (embed_dim 256-768, linspace across the "
+                             "M heads) instead of the fixed 2 blocks / uniform --decoder_embed_dim every head "
+                             "gets today. Off by default; leaving it off reproduces today's fixed-architecture "
+                             "behaviour exactly (identical checkpoint shape too), for an easy revert/comparison.")
     # Misc
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--run_name", type=str, default="run")
