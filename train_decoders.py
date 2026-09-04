@@ -195,6 +195,11 @@ if __name__ == "__main__":
     parser.add_argument("--sigma_prior", type=float, default=1.0,
                         help="Prior std for the variational bottleneck - how far each head's sampled embedding "
                              "is allowed to drift from the encoder's own output")
+    parser.add_argument("--hyperparameter_variation", action="store_true",
+                        help="Give each decoder head its own optimizer LR (0.5x-2x base --lr, linspace across "
+                             "the M heads) and weight_decay (0.01-0.2, linspace across the M heads) instead of "
+                             "one shared AdamW param group. Off by default; leaving it off reproduces today's "
+                             "single-param-group behaviour exactly, for an easy revert/comparison.")
     # Misc
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--run_name", type=str, default="run")

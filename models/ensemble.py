@@ -113,6 +113,13 @@ class DecoderEnsemble(nn.Module):
         # Create a range of dropout values for the various heads
         self.dropout_rates = torch.linspace(0.05, 0.35, M).tolist()
 
+        # Per-head optimizer hyperparameters (only used when --hyperparameter_variation is
+        # passed - see full_decoder_training_run in utils/training.py, which builds per-head
+        # AdamW param groups from these instead of one shared group). Kept here, next to
+        # dropout_rates, so all of a head's varying hyperparameters live in one place.
+        self.lr_scales = torch.linspace(0.5, 2.0, M).tolist()
+        self.wd_values = torch.linspace(0.01, 0.2, M).tolist()
+
         # Create M individual SegFormerDecoderHead instances
         self.heads = nn.ModuleList([
             SegFormerDecoderHead(in_channels, embed_dim, num_classes, p_drop=self.dropout_rates[i]) for i in range(M)

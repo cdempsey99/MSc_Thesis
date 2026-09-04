@@ -363,10 +363,32 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
         log_msg(f"VariationalBottleneck enabled (sigma_prior={sigma_prior}, lam_kl={input_dict.get('lam_kl', 0.0)})")
 
     # Training of the Decoder ensemble
-    trainable_params = list(this_ensemble.parameters())
-    if bottleneck is not None:
-        trainable_params += list(bottleneck.parameters())
-    optimizer = torch.optim.AdamW(trainable_params, lr=learning_rate, weight_decay=0.05)
+    if input_dict.get("hyperparameter_variation", False):
+        # Each head gets its own LR/weight_decay (this_ensemble.lr_scales/wd_values, set in
+        # DecoderEnsemble) instead of one shared param group - testing whether varying
+        # optimizer hyperparameters between heads produces more diverse decoders, analogous
+        # to the existing per-head dropout_rates spread.
+        param_groups = [
+            {
+                "params": head.parameters(),
+                "lr": learning_rate * this_ensemble.lr_scales[i],
+                "weight_decay": this_ensemble.wd_values[i],
+            }
+            for i, head in enumerate(this_ensemble.heads)
+        ]
+        if bottleneck is not None:
+            param_groups.append({"params": bottleneck.parameters(), "lr": learning_rate, "weight_decay": 0.05})
+        optimizer = torch.optim.AdamW(param_groups)
+        log_msg(
+            "Per-head hyperparameter variation enabled - "
+            f"lr: {[f'{learning_rate * s:.2e}' for s in this_ensemble.lr_scales]}, "
+            f"weight_decay: {[f'{w:.3f}' for w in this_ensemble.wd_values]}"
+        )
+    else:
+        trainable_params = list(this_ensemble.parameters())
+        if bottleneck is not None:
+            trainable_params += list(bottleneck.parameters())
+        optimizer = torch.optim.AdamW(trainable_params, lr=learning_rate, weight_decay=0.05)
 
     use_focal = input_dict.get("use_focal_loss", False)
     use_dice  = input_dict.get("use_dice_loss", False)
