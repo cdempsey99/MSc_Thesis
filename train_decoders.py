@@ -79,6 +79,28 @@ def run_training(args):
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
     test_loader = DataLoader(test_ds, batch_size=64, shuffle=False, num_workers=4, pin_memory=True)
 
+    # 3b. Per-head data bagging (--data_bagging): each head gets its own independent
+    # bootstrap resample (with replacement, image-level) of train_files instead of every
+    # head training on the identical shared batch every step. Deterministic per head
+    # (seeded 42+head_index) so a resume reconstructs the exact same bags. Only used when
+    # the flag is set - train_loader above is left fully intact either way, so this is a
+    # pure addition, not a replacement.
+    bagged_train_loaders = None
+    if args.data_bagging:
+        bagged_train_loaders = []
+        unique_counts = []
+        for m in range(args.ensemble_size):
+            rng = random.Random(42 + m)
+            bag_files = [rng.choice(train_files) for _ in range(len(train_files))]
+            unique_counts.append(len(set(str(f) for f in bag_files)))
+            bag_ds = BakedFeatureDataset(bag_files, augment=True)
+            bagged_train_loaders.append(
+                DataLoader(bag_ds, batch_size=args.batch_size, shuffle=True, num_workers=1, pin_memory=True)
+            )
+        log_msg(f"Per-head data bagging enabled - {args.ensemble_size} independent bootstrap resamples "
+                f"of {len(train_files)} training images (image-level, with replacement); "
+                f"unique images per head: {unique_counts}")
+
     # 4. Model Training
     # Pack parameters into your input_dict for the training function
     input_dict = vars(args)
@@ -96,7 +118,9 @@ def run_training(args):
 
 
     start_time = time.time()
-    trained_model, student_model, bottleneck = full_decoder_training_run(input_dict, train_loader, val_loader)
+    trained_model, student_model, bottleneck = full_decoder_training_run(
+        input_dict, train_loader, val_loader, bagged_train_loaders=bagged_train_loaders
+    )
 
     log_msg(f"Training completed in {(time.time() - start_time) / 60:.2f} minutes.")
 
@@ -206,6 +230,13 @@ if __name__ == "__main__":
                              "M heads) instead of the fixed 2 blocks / uniform --decoder_embed_dim every head "
                              "gets today. Off by default; leaving it off reproduces today's fixed-architecture "
                              "behaviour exactly (identical checkpoint shape too), for an easy revert/comparison.")
+    parser.add_argument("--data_bagging", action="store_true",
+                        help="Give each decoder head its own independent bootstrap-resampled (with replacement, "
+                             "image-level) subset of the training images, instead of every head seeing the "
+                             "identical shared batch every step. Not currently supported combined with "
+                             "--use_variational_bottleneck or --train_student (both assume a shared batch across "
+                             "heads) - combine with --architecture_variation freely. Off by default; leaving it "
+                             "off reproduces today's shared-batch training exactly, for an easy revert/comparison.")
     # Misc
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--run_name", type=str, default="run")

@@ -50,7 +50,7 @@ def student_val_epoch(student_model, teacher_model, val_loader, temperature=1.0,
 
 def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, input_dict,
                 student_model=None, student_optimizer=None, student_scheduler=None, flops_profile=None,
-                bottleneck=None):
+                bottleneck=None, bagged_train_loaders=None):
     num_epochs = input_dict["num_epochs"]
     #lambda_div = input_dict["lambda_div"]
     #enforce_diversity = input_dict["enforce_diversity"]
@@ -60,6 +60,19 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
     lam_pearson = input_dict.get("lam_pearson", 0.0)
     lam_orth = input_dict.get("lam_orth", 0.0)
     lam_kl = input_dict.get("lam_kl", 0.0)
+
+    if bagged_train_loaders is not None:
+        # Per-head bagging gives every head a genuinely different batch each step, which
+        # breaks anything that needs heads aligned on the same input: JSD/Pearson/orthogonality
+        # diversity losses compare heads pixel-for-pixel against each other, the bottleneck's
+        # per-head sampling and the in-parallel student both read one shared `features` tensor.
+        # Fail fast here rather than silently produce a meaningless run.
+        assert bottleneck is None, \
+            "--data_bagging is not yet supported combined with --use_variational_bottleneck (its sampling assumes one shared encoder input across heads)"
+        assert student_model is None, \
+            "--data_bagging is not yet supported combined with --train_student (student training assumes one shared batch across heads)"
+        assert not diversity_methods, \
+            "--data_bagging is not yet supported combined with --diversity_methods (JSD/Pearson/orthogonality all require heads to share the same input to compare against each other)"
 
     run_name = input_dict.get("run_name", "run")
     runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
@@ -111,6 +124,11 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
     compute_start_epoch = start_epoch  # captured before the loop mutates epoch, for the compute-cost summary
     training_start_time = start_compute_tracking()
+    # Fixed property of the loaders, not the epoch - computed once here (rather than inside
+    # the loop) so it's still defined even if the loop body never runs (e.g. resuming a
+    # checkpoint already at num_epochs), since it's read again after the loop for the
+    # compute-cost summary.
+    n_steps = len(bagged_train_loaders[0]) if bagged_train_loaders is not None else len(train_loader)
 
     for epoch in range(start_epoch, num_epochs):
         log_msg(f"Starting epoch {epoch+1}...")
@@ -128,79 +146,102 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
         decoder_model.train()
 
-        for features, targets in train_loader:
-            optimizer.zero_grad()
-            features = features.to(DEVICE)
-            targets = targets.to(DEVICE).long()
+        if bagged_train_loaders is not None:
+            # Each head trains on its own bootstrap-resampled batch this step - no shared
+            # input across heads, so no ensemble-mean loss term and no diversity loss (see
+            # the assertions above for why both require a shared batch). This is the
+            # classical independent-training deep-ensemble recipe: diversity comes from
+            # independent init + independent data, not a coordinating loss term.
+            for batches in zip(*bagged_train_loaders):
+                optimizer.zero_grad()
+                total_task_loss = 0
+                for head_idx, (features_m, targets_m) in enumerate(batches):
+                    features_m = features_m.to(DEVICE)
+                    targets_m = targets_m.to(DEVICE).long()
+                    head_high_res = F.interpolate(decoder_model.heads[head_idx](features_m), size=(224, 224),
+                                                  mode='bilinear', align_corners=False)
+                    total_task_loss += criterion(head_high_res, targets_m)
+                task_loss = total_task_loss / decoder_model.M
 
-            all_preds, kl_loss, mean_std = _ensemble_forward(decoder_model, features, bottleneck)
+                task_loss.backward()
+                torch.nn.utils.clip_grad_norm_(decoder_model.parameters(), max_norm=1.0)
+                optimizer.step()
 
-            total_task_loss = 0
-            for head_idx in range(decoder_model.M):
-                head_high_res = F.interpolate(all_preds[head_idx], size=(224, 224),
-                                              mode='bilinear', align_corners=False)
-                total_task_loss += criterion(head_high_res, targets)
+                epoch_task_loss += task_loss.item()
+        else:
+            for features, targets in train_loader:
+                optimizer.zero_grad()
+                features = features.to(DEVICE)
+                targets = targets.to(DEVICE).long()
 
-            mean_logits_low = all_preds.mean(dim=0)
-            mean_logits_high = F.interpolate(mean_logits_low, size=(224, 224), mode='bilinear')
-            total_task_loss += criterion(mean_logits_high, targets)
-            task_loss = total_task_loss / (decoder_model.M + 1)
+                all_preds, kl_loss, mean_std = _ensemble_forward(decoder_model, features, bottleneck)
 
-            #div_loss = 0
-            #if enforce_diversity:
-                # Various diversity options
-            #    div_loss = js_divergence_loss(all_preds)
-                #div_loss = pearson_diversity_loss(all_preds)
+                total_task_loss = 0
+                for head_idx in range(decoder_model.M):
+                    head_high_res = F.interpolate(all_preds[head_idx], size=(224, 224),
+                                                  mode='bilinear', align_corners=False)
+                    total_task_loss += criterion(head_high_res, targets)
 
-            # Make sure that for all diversity options, more loss is a bad thing, as our sign convention below needs to be respected
-            # total_loss = task_loss + (lambda_div * div_loss)
+                mean_logits_low = all_preds.mean(dim=0)
+                mean_logits_high = F.interpolate(mean_logits_low, size=(224, 224), mode='bilinear')
+                total_task_loss += criterion(mean_logits_high, targets)
+                task_loss = total_task_loss / (decoder_model.M + 1)
 
-            div_loss_jsd = 0.0
-            div_loss_pearson = 0.0
-            div_loss_orth = 0.0
+                #div_loss = 0
+                #if enforce_diversity:
+                    # Various diversity options
+                #    div_loss = js_divergence_loss(all_preds)
+                    #div_loss = pearson_diversity_loss(all_preds)
 
-            if "jsd" in diversity_methods:
-                div_loss_jsd = js_divergence_loss(all_preds)
+                # Make sure that for all diversity options, more loss is a bad thing, as our sign convention below needs to be respected
+                # total_loss = task_loss + (lambda_div * div_loss)
 
-            if "pearson" in diversity_methods:
-                div_loss_pearson = pearson_diversity_loss(all_preds)
+                div_loss_jsd = 0.0
+                div_loss_pearson = 0.0
+                div_loss_orth = 0.0
 
-            if "orthogonality" in diversity_methods:
-                div_loss_orth = orthogonality_loss(decoder_model)
+                if "jsd" in diversity_methods:
+                    div_loss_jsd = js_divergence_loss(all_preds)
 
-            # Make sure that for all diversity options, more loss is a bad thing, as our sign convention below needs to be respected
-            total_loss = task_loss \
-                + lam_jsd * div_loss_jsd \
-                + lam_pearson * div_loss_pearson \
-                + lam_orth * div_loss_orth \
-                + lam_kl * kl_loss
+                if "pearson" in diversity_methods:
+                    div_loss_pearson = pearson_diversity_loss(all_preds)
 
-            total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(decoder_model.parameters(), max_norm=1.0)
-            if bottleneck is not None:
-                torch.nn.utils.clip_grad_norm_(bottleneck.parameters(), max_norm=1.0)
-            optimizer.step()
+                if "orthogonality" in diversity_methods:
+                    div_loss_orth = orthogonality_loss(decoder_model)
 
-            if student_model is not None and epoch >= student_warmup_epochs:
-                epoch_student_loss += student_step(student_model, student_optimizer, features.detach(), all_preds.detach(),
-                                                   temperature=student_T)
+                # Make sure that for all diversity options, more loss is a bad thing, as our sign convention below needs to be respected
+                total_loss = task_loss \
+                    + lam_jsd * div_loss_jsd \
+                    + lam_pearson * div_loss_pearson \
+                    + lam_orth * div_loss_orth \
+                    + lam_kl * kl_loss
 
-            epoch_task_loss += task_loss.item() if torch.is_tensor(task_loss) else task_loss
-            epoch_jsd_loss += div_loss_jsd.item() if torch.is_tensor(div_loss_jsd) else div_loss_jsd
-            epoch_pearson_loss += div_loss_pearson.item() if torch.is_tensor(div_loss_pearson) else div_loss_pearson
-            epoch_orth_loss += div_loss_orth.item() if torch.is_tensor(div_loss_orth) else div_loss_orth
-            epoch_kl_loss += kl_loss.item() if torch.is_tensor(kl_loss) else kl_loss
-            epoch_std_loss += mean_std.item() if torch.is_tensor(mean_std) else mean_std
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(decoder_model.parameters(), max_norm=1.0)
+                if bottleneck is not None:
+                    torch.nn.utils.clip_grad_norm_(bottleneck.parameters(), max_norm=1.0)
+                optimizer.step()
+
+                if student_model is not None and epoch >= student_warmup_epochs:
+                    epoch_student_loss += student_step(student_model, student_optimizer, features.detach(), all_preds.detach(),
+                                                       temperature=student_T)
+
+                epoch_task_loss += task_loss.item() if torch.is_tensor(task_loss) else task_loss
+                epoch_jsd_loss += div_loss_jsd.item() if torch.is_tensor(div_loss_jsd) else div_loss_jsd
+                epoch_pearson_loss += div_loss_pearson.item() if torch.is_tensor(div_loss_pearson) else div_loss_pearson
+                epoch_orth_loss += div_loss_orth.item() if torch.is_tensor(div_loss_orth) else div_loss_orth
+                epoch_kl_loss += kl_loss.item() if torch.is_tensor(kl_loss) else kl_loss
+                epoch_std_loss += mean_std.item() if torch.is_tensor(mean_std) else mean_std
 
         #avg_task = epoch_task_loss / len(train_loader)
         #avg_div = epoch_div_loss / len(train_loader)
         #loss_history["train"].append(avg_task)
-        avg_task = epoch_task_loss / len(train_loader)
-        avg_jsd = epoch_jsd_loss / len(train_loader)
-        avg_pearson = epoch_pearson_loss / len(train_loader)
-        avg_orth = epoch_orth_loss / len(train_loader)
-        avg_kl = epoch_kl_loss / len(train_loader)
-        avg_std = epoch_std_loss / len(train_loader)
+        avg_task = epoch_task_loss / n_steps
+        avg_jsd = epoch_jsd_loss / n_steps
+        avg_pearson = epoch_pearson_loss / n_steps
+        avg_orth = epoch_orth_loss / n_steps
+        avg_kl = epoch_kl_loss / n_steps
+        avg_std = epoch_std_loss / n_steps
 
         loss_history["train"].append(avg_task)
         if "jsd" in diversity_methods:
@@ -329,7 +370,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
     if flops_profile is not None:
         record_compute_cost(flops_profile, epochs_completed=num_epochs - compute_start_epoch,
-                            batches_per_epoch=len(train_loader), start_time=training_start_time,
+                            batches_per_epoch=n_steps, start_time=training_start_time,
                             run_name=run_name)
 
     log_msg(f"Training completed")
@@ -337,7 +378,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
 
 # Fn to run instantiation, training, and evaluation (visual and metrics) of decoder ensemble model
-def full_decoder_training_run(input_dict, train_loader, val_loader=None):
+def full_decoder_training_run(input_dict, train_loader, val_loader=None, bagged_train_loaders=None):
 
     log_msg(f"Running full decoder training and evaluation with inputs:\n {input_dict}")
 
@@ -447,7 +488,7 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None):
     trained_decoder_model = train_model(
         this_ensemble, train_loader, val_loader, criterion, optimizer, input_dict,
         student_model=student_model, student_optimizer=student_optimizer, student_scheduler=student_scheduler,
-        flops_profile=flops_profile, bottleneck=bottleneck
+        flops_profile=flops_profile, bottleneck=bottleneck, bagged_train_loaders=bagged_train_loaders
     )
 
     return trained_decoder_model, student_model, bottleneck
