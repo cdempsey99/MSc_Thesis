@@ -95,13 +95,15 @@ def run_training(args):
             unique_counts.append(len(set(str(f) for f in bag_files)))
             bag_ds = BakedFeatureDataset(bag_files, augment=True)
             bagged_train_loaders.append(
-                # num_workers=0 (main process, no separate worker) deliberately, not 1 - with
-                # M separate bagged loaders whose bootstrap samples heavily overlap in which
-                # underlying files they reference, M concurrent worker processes each mmap'ing
-                # files off beegfs was almost certainly what caused the earlier OSError/Errno 5
-                # I/O failures. Synchronous single-process loading removes that concurrent
-                # filesystem access pattern entirely, at the cost of some lost prefetch overlap.
-                DataLoader(bag_ds, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=True)
+                # sampler=FileLocalitySampler, not shuffle=True: patch-level shuffling forced
+                # BakedFeatureDataset's single-file cache to reopen on almost every __getitem__
+                # call (diagnosed via per-step fetch/compute timing - fetch was ~100x compute).
+                # The sampler shuffles file order + within-file patch order instead, keeping
+                # each file's patches contiguous so the cache stays valid across a whole file's
+                # worth of calls. num_workers=0 stays as-is (fixed the earlier concurrent-mmap
+                # OSError) - not changing that in the same pass as this fix.
+                DataLoader(bag_ds, batch_size=args.batch_size, sampler=FileLocalitySampler(bag_ds),
+                          num_workers=0, pin_memory=True)
             )
         log_msg(f"Per-head data bagging enabled - {args.ensemble_size} independent bootstrap resamples "
                 f"of {len(train_files)} training images (image-level, with replacement); "

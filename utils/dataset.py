@@ -1,8 +1,9 @@
 import rasterio
 import bisect
+import random
 from rasterio.windows import Window
 from configs.config import *
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Sampler
 from utils.misc import *
 import json
 import numpy as np
@@ -194,3 +195,45 @@ class BakedFeatureDataset(Dataset):
         local_idx = idx - (self.cumulative_sizes[file_idx - 1] if file_idx > 0 else 0)
 
         return self.file_paths[file_idx], local_idx
+
+
+class FileLocalitySampler(Sampler):
+    """
+    Shuffles at the FILE level (order of files, and patch order within each file) instead
+    of shuffling individual patch indices across the whole flattened dataset the way
+    DataLoader's default shuffle=True does.
+
+    BakedFeatureDataset caches exactly one file at a time (_current_file_path/_current_data,
+    reloaded via torch.load(mmap=True) whenever __getitem__ is asked for a patch from a
+    different file). Patch-level shuffling picks indices randomly across every file in the
+    dataset, so with more than a handful of files, consecutive __getitem__ calls very likely
+    land on different files - forcing a fresh mmap reopen almost every call. Keeping each
+    file's patches contiguous in the iteration order lets that cache stay valid for an
+    entire file's worth of calls instead, cutting reopens from roughly one per patch to
+    roughly one per file, while still reshuffling both the file order and the within-file
+    patch order every epoch - real randomization, just at the granularity the caching
+    actually works at.
+
+    Written for the per-head bagged loaders (--data_bagging in train_decoders.py), where
+    paying the patch-level-shuffle cost independently in M separate loaders (instead of
+    once, in one shared loader) turned an already-real inefficiency into a ~100x slowdown
+    that dominated everything else in the training step.
+    """
+    def __init__(self, dataset):
+        self.cumulative_sizes = dataset.cumulative_sizes
+
+    def __len__(self):
+        return self.cumulative_sizes[-1] if self.cumulative_sizes else 0
+
+    def __iter__(self):
+        file_ranges = []
+        start = 0
+        for end in self.cumulative_sizes:
+            file_ranges.append((start, end))
+            start = end
+        random.shuffle(file_ranges)
+
+        for start, end in file_ranges:
+            indices = list(range(start, end))
+            random.shuffle(indices)
+            yield from indices
