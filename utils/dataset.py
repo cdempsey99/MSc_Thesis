@@ -218,22 +218,40 @@ class FileLocalitySampler(Sampler):
     paying the patch-level-shuffle cost independently in M separate loaders (instead of
     once, in one shared loader) turned an already-real inefficiency into a ~100x slowdown
     that dominated everything else in the training step.
+
+    Also merges consecutive occurrences of the SAME underlying file into one combined
+    range before shuffling. Bootstrap-with-replacement bagging routinely draws the same
+    image more than once, and BakedFeatureDataset sorts its file list on construction, so
+    duplicate occurrences are already adjacent in the raw index space - but shuffling each
+    occurrence independently (the original version of this sampler) scatters them apart
+    anyway, forcing a redundant reopen of a file already cached for no reason. Merging
+    first means a file drawn K times is visited in one contiguous run instead of K
+    scattered ones, so the existing single-file cache is enough - no LRU/multi-file cache
+    needed on top of this.
     """
     def __init__(self, dataset):
         self.cumulative_sizes = dataset.cumulative_sizes
+        self.file_paths = dataset.file_paths
 
     def __len__(self):
         return self.cumulative_sizes[-1] if self.cumulative_sizes else 0
 
     def __iter__(self):
-        file_ranges = []
+        merged_ranges = []
         start = 0
-        for end in self.cumulative_sizes:
-            file_ranges.append((start, end))
+        prev_path = None
+        for i, end in enumerate(self.cumulative_sizes):
+            path = self.file_paths[i]
+            if path == prev_path:
+                merged_ranges[-1] = (merged_ranges[-1][0], end)
+            else:
+                merged_ranges.append((start, end))
+            prev_path = path
             start = end
-        random.shuffle(file_ranges)
 
-        for start, end in file_ranges:
+        random.shuffle(merged_ranges)
+
+        for start, end in merged_ranges:
             indices = list(range(start, end))
             random.shuffle(indices)
             yield from indices

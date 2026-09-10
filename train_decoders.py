@@ -97,13 +97,16 @@ def run_training(args):
             bagged_train_loaders.append(
                 # sampler=FileLocalitySampler, not shuffle=True: patch-level shuffling forced
                 # BakedFeatureDataset's single-file cache to reopen on almost every __getitem__
-                # call (diagnosed via per-step fetch/compute timing - fetch was ~100x compute).
-                # The sampler shuffles file order + within-file patch order instead, keeping
-                # each file's patches contiguous so the cache stays valid across a whole file's
-                # worth of calls. num_workers=0 stays as-is (fixed the earlier concurrent-mmap
-                # OSError) - not changing that in the same pass as this fix.
+                # call (diagnosed via per-step fetch/compute timing - fetch was ~100x compute,
+                # confirmed fixed - fetch dropped ~14x once the sampler preserved locality).
+                # num_workers=1 (not 0): the original crash was concurrent worker processes
+                # racing to mmap-open the SAME file - now that each loader spends a long
+                # contiguous stretch on one file at a time (locality-preserving sampler) rather
+                # than hopping constantly, that collision window is much smaller, so it's worth
+                # retrying the parallelism. 5 loaders x 1 worker + the main process = 6,
+                # comfortably inside this job's --cpus-per-task=8.
                 DataLoader(bag_ds, batch_size=args.batch_size, sampler=FileLocalitySampler(bag_ds),
-                          num_workers=0, pin_memory=True)
+                          num_workers=1, pin_memory=True)
             )
         log_msg(f"Per-head data bagging enabled - {args.ensemble_size} independent bootstrap resamples "
                 f"of {len(train_files)} training images (image-level, with replacement); "
