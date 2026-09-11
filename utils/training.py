@@ -156,15 +156,13 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
             # Diagnostic timing (temporary, not gated behind a flag - remove once the earlier
             # >7h-for-one-epoch stall is understood): splits each step into fetch time (the M
             # bagged loaders' next() calls) vs compute time (forward/backward/optimizer.step),
-            # logged every log_every steps, so a slow run points at a phase instead of a
-            # mystery. bag_iters is built explicitly rather than using `for batches in
-            # zip(...)` directly so the fetch call itself can be timed in isolation.
+            # summarized once per epoch so a slow run points at a phase instead of a mystery.
+            # bag_iters is built explicitly rather than using `for batches in zip(...)`
+            # directly so the fetch call itself can be timed in isolation.
             bag_iters = [iter(loader) for loader in bagged_train_loaders]
-            log_every = 5
             step = 0
             fetch_time_sum = 0.0
             compute_time_sum = 0.0
-            log_msg(f"  [bagging timing] built {len(bag_iters)} bagged iterators, fetching first batch...")
             while True:
                 fetch_start = time.time()
                 try:
@@ -191,9 +189,8 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
                 epoch_task_loss += task_loss.item()
                 step += 1
-                if step == 1 or step % log_every == 0:
-                    log_msg(f"  [bagging timing] step {step}: cumulative avg fetch={fetch_time_sum / step:.2f}s/step, "
-                            f"cumulative avg compute={compute_time_sum / step:.2f}s/step (n_steps this epoch = {n_steps})")
+            log_msg(f"  [bagging timing] epoch {epoch}: avg fetch={fetch_time_sum / step:.2f}s/step, "
+                    f"avg compute={compute_time_sum / step:.2f}s/step ({step} steps)")
         else:
             for features, targets in train_loader:
                 optimizer.zero_grad()
