@@ -105,12 +105,26 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
         decoder_model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if checkpoint.get('scheduler_state_dict') is not None:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            log_msg(f"--> Resumed LR scheduler state (lr={optimizer.param_groups[0]['lr']:.2e})")
+        else:
+            log_msg(f"--> WARNING: checkpoint has no saved scheduler state — LR schedule restarting from epoch 0 (lr={optimizer.param_groups[0]['lr']:.2e})")
         start_epoch = checkpoint['epoch']
         best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         best_student_val_loss = checkpoint.get('best_student_val_loss', float('inf'))
         if bottleneck is not None and checkpoint.get('bottleneck_state_dict') is not None:
             bottleneck.load_state_dict(checkpoint['bottleneck_state_dict'])
             log_msg("--> Resumed VariationalBottleneck weights")
+        if student_model is not None:
+            if checkpoint.get('student_model_state_dict') is not None:
+                student_model.load_state_dict(checkpoint['student_model_state_dict'])
+                student_optimizer.load_state_dict(checkpoint['student_optimizer_state_dict'])
+                if checkpoint.get('student_scheduler_state_dict') is not None:
+                    student_scheduler.load_state_dict(checkpoint['student_scheduler_state_dict'])
+                log_msg("--> Resumed StudentHead weights")
+            else:
+                log_msg("--> WARNING: --train_student set but checkpoint has no saved student state — student starting from scratch")
         loss_path = os.path.join(runs_dir, f"{run_name}_loss_history.json")
         if os.path.exists(loss_path):
             with open(loss_path) as f:
@@ -357,9 +371,13 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                 'epoch': epoch + 1,
                 'model_state_dict': decoder_model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_loss': best_val_loss,
                 'best_student_val_loss': best_student_val_loss,
                 'bottleneck_state_dict': bottleneck.state_dict() if bottleneck is not None else None,
+                'student_model_state_dict': student_model.state_dict() if student_model is not None else None,
+                'student_optimizer_state_dict': student_optimizer.state_dict() if student_optimizer is not None else None,
+                'student_scheduler_state_dict': student_scheduler.state_dict() if student_scheduler is not None else None,
             }
             save_checkpoint(current_state, str(CHECKPOINT_DIR),
                             filename=f"{run_name}_last_checkpoint.pth")
