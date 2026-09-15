@@ -232,6 +232,14 @@ def train_e2e_reben(args):
                 + args.lam_pearson * div_loss_pearson \
                 + args.lam_orth * div_loss_orth
 
+            if not torch.isfinite(total_loss):
+                raise RuntimeError(
+                    f"Non-finite loss detected at epoch {epoch+1} — task={task_loss.item():.4f}, "
+                    f"jsd={div_loss_jsd.item():.4f}. Stopping immediately rather than continuing "
+                    f"to train on garbage (this typically means BatchNorm running stats have been "
+                    f"corrupted and won't self-recover). Resume from the last good checkpoint."
+                )
+
             scaler.scale(total_loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(
