@@ -70,8 +70,11 @@ def train_e2e_reben(args):
         in_channels=1024,
         embed_dim=args.decoder_embed_dim,
         num_classes=args.num_classes,
+        architecture_variation=args.architecture_variation,
     )
     decoder.to(DEVICE)
+    if args.architecture_variation:
+        log_msg(f"Per-head architecture variation enabled - refine_blocks: {decoder.refine_block_counts}, embed_dim: {decoder.head_embed_dims}")
 
     student_model = None
     student_optimizer = None
@@ -95,6 +98,7 @@ def train_e2e_reben(args):
             "ensemble_size": args.ensemble_size,
             "decoder_embed_dim": args.decoder_embed_dim,
             "num_classes": args.num_classes,
+            "architecture_variation": args.architecture_variation,
             "in_channels": 3,
             "batch_size": args.batch_size,
             "include_student": args.train_student,
@@ -892,6 +896,8 @@ if __name__ == "__main__":
     # Model
     parser.add_argument("--ensemble_size",     type=int,   default=5)
     parser.add_argument("--decoder_embed_dim", type=int,   default=512)
+    parser.add_argument("--architecture_variation", action="store_true",
+                         help="Per-head decoder architecture variation (depth/width), matching the FBP mechanism")
     parser.add_argument("--num_classes",       type=int,   default=20)
     parser.add_argument("--n_unfrozen_blocks", type=int,   default=4)
 
