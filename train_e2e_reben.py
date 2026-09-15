@@ -24,12 +24,13 @@ from utils.misc import (log_msg, save_checkpoint, FocalLoss, js_divergence_loss,
 from utils.dataset_e2e import load_reben_splits, ReBENRawDataset
 S2_WAVES = ReBENRawDataset.WAVELENGTHS  # [0.6646, 0.5598, 0.4924] μm — S2 B04/B03/B02
 from utils.visualisation import plot_loss_curves, visualise_all_metrics, plot_confusion_matrix
-from models.ensemble import DecoderEnsemble, StudentHead
+from models.ensemble import DecoderEnsemble, StudentHead, VariationalBottleneck, VBEvalWrapper
 from models.encoder import (
     initialize_clay_encoder_partial_unfreeze,
     get_encoder_representation_partial,
 )
 from utils.misc import get_decoder_output_maps
+from utils.training import _ensemble_forward
 from profile_flops import ensure_flops_profile, start_compute_tracking, record_compute_cost
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -76,6 +77,13 @@ def train_e2e_reben(args):
     if args.architecture_variation:
         log_msg(f"Per-head architecture variation enabled - refine_blocks: {decoder.refine_block_counts}, embed_dim: {decoder.head_embed_dims}")
 
+    bottleneck = None
+    if args.use_variational_bottleneck:
+        bottleneck = VariationalBottleneck(channels=1024, num_heads=args.ensemble_size, sigma_prior=args.sigma_prior)
+        bottleneck.to(DEVICE)
+        log_msg(f"VariationalBottleneck enabled (sigma_prior={args.sigma_prior}, lam_kl={args.lam_kl})")
+    eval_model = VBEvalWrapper(decoder, bottleneck) if bottleneck is not None else decoder
+
     student_model = None
     student_optimizer = None
     student_scheduler = None
@@ -112,10 +120,13 @@ def train_e2e_reben(args):
 
     # 3. Optimiser with differential LRs
     trainable_enc = [p for p in encoder_model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW([
+    optimizer_param_groups = [
         {'params': trainable_enc,         'lr': args.lr_encoder, 'weight_decay': 0.01},
         {'params': decoder.parameters(),  'lr': args.lr_decoder, 'weight_decay': 0.05},
-    ])
+    ]
+    if bottleneck is not None:
+        optimizer_param_groups.append({'params': bottleneck.parameters(), 'lr': args.lr_decoder, 'weight_decay': 0.05})
+    optimizer = torch.optim.AdamW(optimizer_param_groups)
 
     def warmup_lambda(epoch):
         return min(1.0, float(epoch + 1) / float(max(1, args.warmup_epochs)))
@@ -151,6 +162,12 @@ def train_e2e_reben(args):
             decoder.load_state_dict(ckpt['model_state_dict'])
             optimizer.load_state_dict(ckpt['optimizer_state_dict'])
             best_val_loss = ckpt.get('best_val_loss', float('inf'))
+            if bottleneck is not None:
+                if ckpt.get('bottleneck_state_dict') is not None:
+                    bottleneck.load_state_dict(ckpt['bottleneck_state_dict'])
+                    log_msg("Resumed VariationalBottleneck weights")
+                else:
+                    log_msg("WARNING: --use_variational_bottleneck set but checkpoint has no saved bottleneck state — bottleneck starting fresh")
         if encoder_ckpt and encoder_ckpt.exists():
             log_msg(f"Resuming encoder from {encoder_ckpt}...")
             enc_ckpt = torch.load(encoder_ckpt, map_location=DEVICE)
@@ -202,6 +219,8 @@ def train_e2e_reben(args):
             block.train()
         transformer.norm.train()
         decoder.train()
+        if bottleneck is not None:
+            bottleneck.train()
 
         for batch_imgs, batch_masks in train_loader:
             optimizer.zero_grad()
@@ -210,7 +229,7 @@ def train_e2e_reben(args):
 
             with torch.cuda.amp.autocast():
                 features = get_encoder_representation_partial(batch_imgs, encoder_model, waves=S2_WAVES)
-                all_preds = decoder(features)
+                all_preds, kl_loss, mean_std = _ensemble_forward(decoder, features, bottleneck)
 
                 total_task_loss = 0
                 for head_idx in range(decoder.M):
@@ -234,7 +253,8 @@ def train_e2e_reben(args):
             total_loss = task_loss \
                 + args.lam_jsd * div_loss_jsd \
                 + args.lam_pearson * div_loss_pearson \
-                + args.lam_orth * div_loss_orth
+                + args.lam_orth * div_loss_orth \
+                + args.lam_kl * kl_loss
 
             if not torch.isfinite(total_loss):
                 raise RuntimeError(
@@ -246,11 +266,10 @@ def train_e2e_reben(args):
 
             scaler.scale(total_loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in encoder_model.parameters() if p.requires_grad] +
-                list(decoder.parameters()),
-                max_norm=1.0
-            )
+            clip_params = [p for p in encoder_model.parameters() if p.requires_grad] + list(decoder.parameters())
+            if bottleneck is not None:
+                clip_params += list(bottleneck.parameters())
+            torch.nn.utils.clip_grad_norm_(clip_params, max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
 
@@ -298,6 +317,8 @@ def train_e2e_reben(args):
         # Validation
         encoder_model.eval()
         decoder.eval()
+        if bottleneck is not None:
+            bottleneck.eval()
         if student_model is not None:
             student_model.eval()
         val_loss = 0
@@ -308,7 +329,7 @@ def train_e2e_reben(args):
                 v_masks = v_masks.to(DEVICE).long()
                 with torch.cuda.amp.autocast():
                     features = get_encoder_representation_partial(v_imgs, encoder_model, waves=S2_WAVES)
-                    all_preds = decoder(features)
+                    all_preds = eval_model(features)
                     total_val_loss = 0
                     for head_idx in range(decoder.M):
                         total_val_loss += criterion(all_preds[head_idx], v_masks)
@@ -341,7 +362,8 @@ def train_e2e_reben(args):
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             save_checkpoint({'epoch': epoch + 1, 'model_state_dict': decoder.state_dict(),
-                             'optimizer_state_dict': optimizer.state_dict()},
+                             'optimizer_state_dict': optimizer.state_dict(),
+                             'bottleneck_state_dict': bottleneck.state_dict() if bottleneck is not None else None},
                             str(CHECKPOINT_DIR), filename=f"{run_name}_best_decoder.pth")
             save_checkpoint({'epoch': epoch + 1, 'encoder_state_dict': encoder_model.state_dict()},
                             str(CHECKPOINT_DIR), filename=f"{run_name}_best_encoder.pth")
@@ -350,7 +372,8 @@ def train_e2e_reben(args):
         if (epoch + 1) % 5 == 0:
             save_checkpoint({'epoch': epoch + 1, 'model_state_dict': decoder.state_dict(),
                              'optimizer_state_dict': optimizer.state_dict(),
-                             'best_val_loss': best_val_loss},
+                             'best_val_loss': best_val_loss,
+                             'bottleneck_state_dict': bottleneck.state_dict() if bottleneck is not None else None},
                             str(CHECKPOINT_DIR), filename=f"{run_name}_last_decoder.pth")
             save_checkpoint({'epoch': epoch + 1, 'encoder_state_dict': encoder_model.state_dict()},
                             str(CHECKPOINT_DIR), filename=f"{run_name}_last_encoder.pth")
@@ -377,7 +400,8 @@ def train_e2e_reben(args):
     # Final save
     timestamp = time.strftime("%Y%m%d_%H%M")
     save_checkpoint({'epoch': args.num_epochs, 'model_state_dict': decoder.state_dict(),
-                     'optimizer_state_dict': optimizer.state_dict()},
+                     'optimizer_state_dict': optimizer.state_dict(),
+                     'bottleneck_state_dict': bottleneck.state_dict() if bottleneck is not None else None},
                     str(CHECKPOINT_DIR), filename=f"{run_name}_final_decoder_{timestamp}.pth")
     save_checkpoint({'epoch': args.num_epochs, 'encoder_state_dict': encoder_model.state_dict()},
                     str(CHECKPOINT_DIR), filename=f"{run_name}_final_encoder_{timestamp}.pth")
@@ -396,6 +420,8 @@ def train_e2e_reben(args):
     if best_decoder_path.exists():
         ckpt = torch.load(best_decoder_path, map_location=DEVICE)
         decoder.load_state_dict(ckpt['model_state_dict'])
+        if bottleneck is not None and ckpt.get('bottleneck_state_dict') is not None:
+            bottleneck.load_state_dict(ckpt['bottleneck_state_dict'])
     best_encoder_path = CHECKPOINT_DIR / f"{run_name}_best_encoder.pth"
     if best_encoder_path.exists():
         enc_ckpt = torch.load(best_encoder_path, map_location=DEVICE)
@@ -407,16 +433,16 @@ def train_e2e_reben(args):
             student_model.load_state_dict(student_ckpt['model_state_dict'])
 
     log_msg("Running evaluation...")
-    evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name=f"{run_name}_teacher")
+    evaluate_test_set_reben(encoder_model, eval_model, test_loader, args, run_name=f"{run_name}_teacher")
     if student_model is not None:
         evaluate_student_test_set_reben(encoder_model, student_model, test_loader, args, run_name=f"{run_name}_student")
-        evaluate_uncertainty_correlation_reben(encoder_model, decoder, student_model, test_loader, args,
+        evaluate_uncertainty_correlation_reben(encoder_model, eval_model, student_model, test_loader, args,
                                               run_name=f"{run_name}_student")
 
     def _teacher_forward(imgs):
         with torch.cuda.amp.autocast():
             features = get_encoder_representation_partial(imgs, encoder_model, waves=S2_WAVES)
-            return decoder(features)
+            return eval_model(features)
 
     evaluate_error_localization(
         lambda imgs: ensemble_uncertainty_and_pred(_teacher_forward(imgs), args.num_classes),
@@ -898,6 +924,10 @@ if __name__ == "__main__":
     parser.add_argument("--decoder_embed_dim", type=int,   default=512)
     parser.add_argument("--architecture_variation", action="store_true",
                          help="Per-head decoder architecture variation (depth/width), matching the FBP mechanism")
+    parser.add_argument("--use_variational_bottleneck", action="store_true",
+                         help="Per-head variational bottleneck between encoder and decoder heads, matching the FBP mechanism")
+    parser.add_argument("--lam_kl", type=float, default=0.0, help="Weight on the variational bottleneck's KL loss term")
+    parser.add_argument("--sigma_prior", type=float, default=1.0, help="Prior std for the variational bottleneck's KL term")
     parser.add_argument("--num_classes",       type=int,   default=20)
     parser.add_argument("--n_unfrozen_blocks", type=int,   default=4)
 
