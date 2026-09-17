@@ -36,6 +36,29 @@ from profile_flops import ensure_flops_profile, start_compute_tracking, record_c
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def _bn_snapshot(module):
+    """Per-channel running_mean/running_var for every BatchNorm2d in module — cheap to clone every batch."""
+    return {name: (m.running_mean.clone(), m.running_var.clone())
+            for name, m in module.named_modules() if isinstance(m, nn.BatchNorm2d)}
+
+
+def _bn_restore(module, snapshot):
+    """Undo a forward pass's BatchNorm running-stat update after a non-finite loss.
+
+    GradScaler already prevents a bad batch from corrupting weights (it skips the optimizer
+    step on overflow), but running_mean/running_var update unconditionally on every forward
+    call in train mode — a single non-finite activation can permanently poison them, and since
+    every later batch (train or eval) then reads that buffer, the corruption never self-recovers.
+    This is the only persistent state a single bad batch can leave behind, so restoring it here
+    (and skipping this batch's backward/optimizer step entirely) fully undoes the batch's effect.
+    """
+    for name, m in module.named_modules():
+        if isinstance(m, nn.BatchNorm2d) and name in snapshot:
+            mean, var = snapshot[name]
+            m.running_mean.copy_(mean)
+            m.running_var.copy_(var)
+
+
 def train_e2e_reben(args):
     run_name = f"{args.run_name}_{time.strftime('%Y%m%d_%H%M')}"
     log_msg(f"Run name: {run_name}")
@@ -209,6 +232,8 @@ def train_e2e_reben(args):
         epoch_pearson_loss = 0
         epoch_orth_loss = 0
         epoch_student_loss = 0.0
+        n_valid_batches = 0
+        n_skipped_batches = 0
         student_T = get_temperature(epoch - args.student_warmup_epochs, args.num_epochs - args.student_warmup_epochs,
                                     args.student_T_start) \
             if (student_model is not None and epoch >= args.student_warmup_epochs) else None
@@ -226,6 +251,8 @@ def train_e2e_reben(args):
             optimizer.zero_grad()
             batch_imgs  = batch_imgs.to(DEVICE)
             batch_masks = batch_masks.to(DEVICE).long()
+
+            bn_snapshot = _bn_snapshot(decoder)
 
             with torch.cuda.amp.autocast():
                 features = get_encoder_representation_partial(batch_imgs, encoder_model, waves=S2_WAVES)
@@ -257,12 +284,13 @@ def train_e2e_reben(args):
                 + args.lam_kl * kl_loss
 
             if not torch.isfinite(total_loss):
-                raise RuntimeError(
-                    f"Non-finite loss detected at epoch {epoch+1} — task={task_loss.item():.4f}, "
-                    f"jsd={div_loss_jsd.item():.4f}. Stopping immediately rather than continuing "
-                    f"to train on garbage (this typically means BatchNorm running stats have been "
-                    f"corrupted and won't self-recover). Resume from the last good checkpoint."
-                )
+                _bn_restore(decoder, bn_snapshot)
+                n_skipped_batches += 1
+                log_msg(f"WARNING: non-finite loss at epoch {epoch+1} — task={task_loss.item():.4f}, "
+                        f"jsd={div_loss_jsd.item():.4f}. Skipping this batch's backward/optimizer step "
+                        f"and rolling back decoder BatchNorm running stats to their pre-batch snapshot "
+                        f"(this is the only state a single bad batch can otherwise permanently corrupt).")
+                continue
 
             scaler.scale(total_loss).backward()
             scaler.unscale_(optimizer)
@@ -290,11 +318,12 @@ def train_e2e_reben(args):
             epoch_jsd_loss += div_loss_jsd.item() if torch.is_tensor(div_loss_jsd) else div_loss_jsd
             epoch_pearson_loss += div_loss_pearson.item() if torch.is_tensor(div_loss_pearson) else div_loss_pearson
             epoch_orth_loss += div_loss_orth.item() if torch.is_tensor(div_loss_orth) else div_loss_orth
+            n_valid_batches += 1
 
-        avg_task = epoch_task_loss / len(train_loader)
-        avg_jsd = epoch_jsd_loss / len(train_loader)
-        avg_pearson = epoch_pearson_loss / len(train_loader)
-        avg_orth = epoch_orth_loss / len(train_loader)
+        avg_task = epoch_task_loss / max(n_valid_batches, 1)
+        avg_jsd = epoch_jsd_loss / max(n_valid_batches, 1)
+        avg_pearson = epoch_pearson_loss / max(n_valid_batches, 1)
+        avg_orth = epoch_orth_loss / max(n_valid_batches, 1)
 
         loss_history["train"].append(avg_task)
         if "jsd" in args.diversity_methods:
@@ -304,13 +333,14 @@ def train_e2e_reben(args):
         if "orthogonality" in args.diversity_methods:
             loss_history.setdefault("train_orth", []).append(avg_orth)
         if student_model is not None and epoch >= args.student_warmup_epochs:
-            loss_history.setdefault("student_train", []).append(epoch_student_loss / len(train_loader))
+            loss_history.setdefault("student_train", []).append(epoch_student_loss / max(n_valid_batches, 1))
 
         enc_lr = optimizer.param_groups[0]['lr']
         dec_lr = optimizer.param_groups[1]['lr']
         log_msg(f"Epoch [{epoch + 1}/{args.num_epochs}] - Task Loss: {avg_task:.4f} | JSD: {avg_jsd:.4f} | "
                 f"Pearson: {avg_pearson:.4f} | Orth: {avg_orth:.4f} | "
-                f"LR encoder: {enc_lr:.2e} decoder: {dec_lr:.2e}")
+                f"LR encoder: {enc_lr:.2e} decoder: {dec_lr:.2e}"
+                + (f" | Skipped(non-finite): {n_skipped_batches}" if n_skipped_batches > 0 else ""))
         if student_model is not None and epoch >= args.student_warmup_epochs:
             log_msg(f"  Student EnDD train loss: {epoch_student_loss / len(train_loader):.4f} | T={student_T:.2f}")
 
