@@ -123,9 +123,15 @@ def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map,
     mi_map = np.squeeze(to_np(mi_map))
     ground_truth = np.squeeze(to_np(ground_truth))
 
-    # Determine number of panels
+    # Determine number of panels — 2x3 grid when the raw-image panel is included (6 total:
+    # top row Raw/GT/Predicted, bottom row Variance/Entropy/MI); otherwise the original
+    # single row (5 total, kept for any caller not passing raw_patch)
     n_panels = 6 if raw_patch is not None else 5
-    fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 5))
+    if n_panels == 6:
+        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        axes = axes.flatten()
+    else:
+        fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 5))
 
     hide_unlabelled = True
     if hide_unlabelled:
@@ -289,8 +295,16 @@ def visualise_student_uncertainty(class_map, total_entropy, aleatoric, epistemic
     if hide_unlabelled:
         class_map = np.ma.masked_where(ground_truth == 0, class_map)
 
+    # 2-row grid: 7 panels (raw image included) -> 2x4 with the 8th slot hidden,
+    # 6 panels (no raw image) -> 2x3 exactly
     n_panels = 7 if raw_patch is not None else 6
-    fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 5))
+    if n_panels == 7:
+        fig, axes = plt.subplots(2, 4, figsize=(24, 10))
+        axes = axes.flatten()
+        axes[-1].axis('off')
+    else:
+        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        axes = axes.flatten()
     panel = 0
 
     if raw_patch is not None:

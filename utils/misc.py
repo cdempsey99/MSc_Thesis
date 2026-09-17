@@ -523,7 +523,14 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
                 if g_idx in vis_global_indices and vis_count < 3:
                     img_pt_path, local_idx = test_loader.dataset.get_patch_info(g_idx)
                     img_stem = Path(img_pt_path).stem.replace('_embeddings', '')
-                    data_dir = Path(img_pt_path).parent.parent.parent.parent.parent / "data" / "fbp"
+                    scratch_data_env = os.getenv("SCRATCH_DATA")
+                    if scratch_data_env:
+                        data_dir = Path(scratch_data_env)
+                    else:
+                        log_msg("WARNING: SCRATCH_DATA env var not set — falling back to a guessed raw-data "
+                                "path relative to the embeddings dir, which may not resolve (set SCRATCH_DATA, "
+                                "e.g. /beegfs/scratch/callumdempsey/data/fbp, to avoid this).")
+                        data_dir = Path(img_pt_path).parent.parent.parent.parent.parent / "data" / "fbp"
                     raw_img_path = data_dir / f"{img_stem}.tif"
 
                     patches_per_row = len(range(0, 7300 - 224, args.stride))
@@ -1103,7 +1110,14 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                     img_pt_path, local_idx = test_loader.dataset.get_patch_info(g_idx)
 
                     img_stem = img_pt_path.stem.replace('_embeddings', '')
-                    data_dir = Path(img_pt_path).parent.parent.parent.parent.parent / "data" / "fbp"
+                    scratch_data_env = os.getenv("SCRATCH_DATA")
+                    if scratch_data_env:
+                        data_dir = Path(scratch_data_env)
+                    else:
+                        log_msg("WARNING: SCRATCH_DATA env var not set — falling back to a guessed raw-data "
+                                "path relative to the embeddings dir, which may not resolve (set SCRATCH_DATA, "
+                                "e.g. /beegfs/scratch/callumdempsey/data/fbp, to avoid this).")
+                        data_dir = Path(img_pt_path).parent.parent.parent.parent.parent / "data" / "fbp"
                     raw_img_path = data_dir / f"{img_stem}.tif"
 
                     # Reconstruct x, y coordinates
