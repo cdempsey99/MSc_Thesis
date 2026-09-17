@@ -481,10 +481,7 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
     auroc_errors = []
     AUROC_MAX = 2_000_000
 
-    vis_global_indices = set(random.sample(
-        range(len(test_loader.dataset)),
-        min(3, len(test_loader.dataset))
-    ))
+    vis_global_indices = set(_select_visualization_patches(test_loader.dataset, num_vis=3, max_unlabelled_frac=0.10))
     vis_count = 0
 
     with torch.no_grad():
@@ -895,7 +892,8 @@ def evaluate_error_localization(compute_fn, test_loader, args, run_name="error_l
     # A handful of patches for an illustrative uncertainty-vs-error figure — separate
     # from the quantitative distribution above, which is what actually backs the claim.
     num_vis = min(3, len(test_loader.dataset))
-    vis_global_indices = set(random.sample(range(len(test_loader.dataset)), num_vis)) if num_vis > 0 else set()
+    vis_global_indices = set(_select_visualization_patches(test_loader.dataset, num_vis=num_vis, max_unlabelled_frac=0.10)) \
+        if num_vis > 0 else set()
     vis_count = 0
 
     with torch.no_grad():
@@ -965,6 +963,56 @@ def save_checkpoint(state, out_dir, filename="last_checkpoint.pth"):
     torch.save(state, last_path)
     log_msg(f"=> Saving checkpoint to {last_path}")
 
+
+def _select_visualization_patches(dataset, num_vis=3, max_unlabelled_frac=0.10, max_attempts=200):
+    """Rejection-samples num_vis global indices from dataset whose ground-truth mask has at
+    most max_unlabelled_frac unlabelled pixels, so the handful of qualitative eval figures
+    don't land on mostly-empty patches. Uses its own unseeded RNG (not the module-global
+    `random` state, which scripts deliberately seed once for reproducible train/val/test
+    splits) so the chosen patches vary run to run instead of always being the same three.
+
+    Cheap as long as most patches qualify: each attempt is one dataset[idx] lookup (I/O only,
+    no model forward pass) just to read the mask. Falls back to the least-unlabelled candidates
+    seen if max_attempts is exhausted before finding num_vis qualifying patches, so this always
+    returns up to num_vis indices rather than hanging or raising on a dataset where the
+    threshold turns out to be rare.
+    """
+    rng = random.Random()
+    n = len(dataset)
+    num_vis = min(num_vis, n)
+    selected = []
+    seen = set()
+    fallback_pool = []  # (unlabelled_frac, g_idx), kept sorted ascending, capped at num_vis
+    attempts = 0
+    while len(selected) < num_vis and attempts < max_attempts:
+        g_idx = rng.randrange(n)
+        attempts += 1
+        if g_idx in seen:
+            continue
+        seen.add(g_idx)
+        _, mask = dataset[g_idx]
+        mask_np = mask.cpu().numpy() if hasattr(mask, "cpu") else np.asarray(mask)
+        unlabelled_frac = float((np.squeeze(mask_np) == 0).mean())
+        if unlabelled_frac <= max_unlabelled_frac:
+            selected.append(g_idx)
+        else:
+            fallback_pool.append((unlabelled_frac, g_idx))
+            fallback_pool.sort(key=lambda t: t[0])
+            del fallback_pool[num_vis:]
+
+    if len(selected) < num_vis:
+        log_msg(f"WARNING: only found {len(selected)}/{num_vis} visualization patches with "
+                f"<={max_unlabelled_frac * 100:.0f}% unlabelled pixels after {attempts} random draws "
+                f"— filling remaining slot(s) with the least-unlabelled candidates seen instead.")
+        for _, g_idx in fallback_pool:
+            if len(selected) >= num_vis:
+                break
+            if g_idx not in selected:
+                selected.append(g_idx)
+
+    return selected
+
+
 def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="test", class_names=FBP_CLASSES):
     trained_model.eval()
 
@@ -992,11 +1040,9 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
     jsd_sum = 0.0
     uq_count = 0
 
-    # Pick 3 random GLOBAL indices from entire test set for visualisation
-    vis_global_indices = set(random.sample(
-        range(len(test_loader.dataset)),
-        min(3, len(test_loader.dataset))
-    ))
+    # Pick 3 GLOBAL indices from entire test set for visualisation — at least 90% labelled,
+    # fresh random draw each run (see _select_visualization_patches docstring)
+    vis_global_indices = set(_select_visualization_patches(test_loader.dataset, num_vis=3, max_unlabelled_frac=0.10))
     vis_count = 0
 
     with torch.no_grad():
