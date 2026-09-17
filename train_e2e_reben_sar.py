@@ -18,12 +18,14 @@ from rasterio.windows import Window
 
 from utils.misc import (log_msg, save_checkpoint, FocalLoss, js_divergence_loss, pearson_diversity_loss,
                         orthogonality_loss, evaluate_error_localization, ensemble_uncertainty_and_pred,
-                        endd_loss, get_temperature, dirichlet_uncertainty_and_pred)
+                        endd_loss, get_temperature, dirichlet_uncertainty_and_pred,
+                        _select_visualization_patches)
 from utils.dataset_e2e import load_reben_sar_splits, ReBENSARRawDataset
 S1_WAVES = ReBENSARRawDataset.WAVELENGTHS  # [3.5, 4.0] μm — Clay metadata.yaml nominal SAR values
 import math
 from scipy.stats import spearmanr
-from utils.visualisation import plot_loss_curves, visualise_all_metrics, plot_confusion_matrix
+from utils.visualisation import (plot_loss_curves, visualise_all_metrics, plot_confusion_matrix,
+                                 plot_reliability_diagram, visualise_student_uncertainty)
 from models.ensemble import DecoderEnsemble, StudentHead
 from models.encoder import (
     initialize_clay_encoder_partial_unfreeze,
@@ -465,6 +467,20 @@ def train_e2e_reben_sar(args):
     return decoder, encoder_model, student_model
 
 
+def _sar_rgb_composite(img_tensor):
+    """Synthetic RGB composite for a 2-channel (VV, VH) SAR patch, for the illustrative
+    qualitative figures only — R=VV, G=VH, B=VV-VH, a standard SAR false-color convention
+    (VV-VH highlights vegetation/surface-type contrast that neither raw band shows alone).
+    Not a natural-color image — always labelled as such wherever it's plotted. Each channel
+    is normalised independently since VV-VH has a different natural range than either raw band.
+    """
+    arr = img_tensor.cpu().numpy() if hasattr(img_tensor, "cpu") else np.asarray(img_tensor)
+    vv, vh = arr[0], arr[1]
+    channels = [vv, vh, vv - vh]
+    normed = [(ch - ch.min()) / (ch.max() - ch.min() + 1e-10) for ch in channels]
+    return np.stack(normed, axis=-1)  # [H, W, 3]
+
+
 def evaluate_test_set_reben_sar(encoder_model, decoder, test_loader, args, run_name):
     encoder_model.eval()
     decoder.eval()
@@ -489,6 +505,11 @@ def evaluate_test_set_reben_sar(encoder_model, decoder, test_loader, args, run_n
     aleatoric_sum = 0.0
     jsd_sum = 0.0
     uq_count = 0
+
+    # 3 GLOBAL indices for the qualitative teacher figure — at least 90% labelled,
+    # fresh random draw each run (see _select_visualization_patches docstring)
+    vis_global_indices = set(_select_visualization_patches(test_loader.dataset, num_vis=3, max_unlabelled_frac=0.10))
+    vis_count = 0
 
     with torch.no_grad():
         for batch_idx, (test_imgs, test_masks) in enumerate(test_loader):
@@ -538,6 +559,35 @@ def evaluate_test_set_reben_sar(encoder_model, decoder, test_loader, args, run_n
             head_preds_np = torch.argmax(all_head_probs_f32, dim=2).cpu().numpy()  # [M, B, H, W]
             for b in range(test_imgs.shape[0]):
                 gt = test_masks[b].squeeze().cpu().numpy()
+
+                if vis_count < 3:
+                    g_idx = batch_idx * test_loader.batch_size + b
+                    if g_idx in vis_global_indices:
+                        # features came out of autocast (fp16) — decoder itself isn't run under
+                        # autocast here, so cast back to fp32 before feeding get_decoder_output_maps
+                        single_feat = features[b].unsqueeze(0).float()
+                        _, class_map_vis, var_map, ent_map, mi_map = get_decoder_output_maps(
+                            decoder, single_feat, save_name=f"{run_name}_patch_{g_idx}"
+                        )
+                        raw_patch = _sar_rgb_composite(test_imgs[b])
+
+                        patch_dir, _, _ = test_loader.dataset.get_patch_info(g_idx)
+                        patch_id = Path(patch_dir).name
+
+                        visualise_all_metrics(
+                            class_map=class_map_vis,
+                            variance_map=var_map,
+                            total_entropy=ent_map,
+                            mi_map=mi_map,
+                            ground_truth=gt,
+                            hide_unlabelled=args.hide_unlabelled_pixels,
+                            save_name=f"{run_name}_test_patch_{g_idx}",
+                            raw_patch=raw_patch,
+                            patch_info=f"{patch_id} (R=VV G=VH B=VV-VH)",
+                        )
+                        plt.close('all')
+                        vis_count += 1
+
                 if (gt > 0).sum() < 100:
                     continue
                 mask      = (gt > 0) & (gt < num_classes)
@@ -610,6 +660,7 @@ def evaluate_test_set_reben_sar(encoder_model, decoder, test_loader, args, run_n
     total_samples = bin_counts.sum()
     global_ece = (np.sum(bin_counts * np.abs(bin_accs - bin_confs)) / total_samples
                   if total_samples > 0 else 0.0)
+    plot_reliability_diagram(bin_accs, bin_confs, save_name=f"{run_name}_reliability")
 
     log_msg(f"REBEN SAR TEST RESULTS ({patch_count} patches):")
     log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | "
@@ -674,8 +725,13 @@ def evaluate_student_test_set_reben_sar(encoder_model, student_model, test_loade
     auroc_errors  = []
     AUROC_MAX = 2_000_000
 
+    # 3 GLOBAL indices for the qualitative student figure — at least 90% labelled,
+    # fresh random draw each run (see _select_visualization_patches docstring)
+    vis_global_indices = set(_select_visualization_patches(test_loader.dataset, num_vis=3, max_unlabelled_frac=0.10))
+    vis_count = 0
+
     with torch.no_grad():
-        for test_imgs, test_masks in test_loader:
+        for batch_idx, (test_imgs, test_masks) in enumerate(test_loader):
             test_imgs = test_imgs.to(DEVICE)
 
             with torch.cuda.amp.autocast():
@@ -684,6 +740,14 @@ def evaluate_student_test_set_reben_sar(encoder_model, student_model, test_loade
             alphas = alphas.float()
             alpha0 = alphas.sum(dim=1, keepdim=True)                 # [B, 1, H, W]
             mean_probs = alphas / alpha0                             # [B, K, H, W]
+
+            # Dirichlet uncertainty decomposition — needed for the qualitative figure below,
+            # mirrors utils.misc.evaluate_student_test_set's FBP version exactly
+            alpha0_sq = alpha0.squeeze(1)                                              # [B, H, W]
+            total_entropy_map = -(mean_probs * torch.log(mean_probs + 1e-10)).sum(dim=1)     # [B, H, W]
+            aleatoric_map = (torch.digamma(alpha0_sq + 1)
+                             - (mean_probs * torch.digamma(alphas + 1)).sum(dim=1))     # [B, H, W]
+            epistemic_map = (total_entropy_map - aleatoric_map).clamp(min=0)           # [B, H, W]
 
             test_masks_t = test_masks.to(DEVICE).long()
             labelled_t = test_masks_t > 0
@@ -705,6 +769,30 @@ def evaluate_student_test_set_reben_sar(encoder_model, student_model, test_loade
             masks_np = test_masks.numpy()
             for b in range(test_imgs.shape[0]):
                 gt = masks_np[b]
+
+                if vis_count < 3:
+                    g_idx = batch_idx * test_loader.batch_size + b
+                    if g_idx in vis_global_indices:
+                        raw_patch = _sar_rgb_composite(test_imgs[b])
+
+                        patch_dir, _, _ = test_loader.dataset.get_patch_info(g_idx)
+                        patch_id = Path(patch_dir).name
+
+                        visualise_student_uncertainty(
+                            class_map=class_maps[b],
+                            total_entropy=total_entropy_map[b],
+                            aleatoric=aleatoric_map[b],
+                            epistemic=epistemic_map[b],
+                            alpha0_map=alpha0_sq[b],
+                            ground_truth=gt,
+                            hide_unlabelled=args.hide_unlabelled_pixels,
+                            save_name=f"{run_name}_patch_{g_idx}",
+                            raw_patch=raw_patch,
+                            patch_info=f"{patch_id} (R=VV G=VH B=VV-VH)",
+                        )
+                        plt.close('all')
+                        vis_count += 1
+
                 if (gt > 0).sum() < 100:
                     continue
                 mask = (gt > 0) & (gt < num_classes)
@@ -754,6 +842,7 @@ def evaluate_student_test_set_reben_sar(encoder_model, student_model, test_loade
     total_samples = bin_counts.sum()
     global_ece = (np.sum(bin_counts * np.abs(bin_accs - bin_confs)) / total_samples
                   if total_samples > 0 else 0.0)
+    plot_reliability_diagram(bin_accs, bin_confs, save_name=f"{run_name}_reliability")
 
     log_msg(f"REBEN SAR STUDENT TEST RESULTS ({patch_count} patches):")
     log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | Acc: {global_acc:.4f} | "
