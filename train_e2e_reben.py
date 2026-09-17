@@ -20,10 +20,12 @@ from scipy.stats import spearmanr
 
 from utils.misc import (log_msg, save_checkpoint, FocalLoss, js_divergence_loss, pearson_diversity_loss,
                         orthogonality_loss, endd_loss, get_temperature, evaluate_error_localization,
-                        ensemble_uncertainty_and_pred, dirichlet_uncertainty_and_pred)
+                        ensemble_uncertainty_and_pred, dirichlet_uncertainty_and_pred,
+                        _select_visualization_patches)
 from utils.dataset_e2e import load_reben_splits, ReBENRawDataset
 S2_WAVES = ReBENRawDataset.WAVELENGTHS  # [0.6646, 0.5598, 0.4924] μm — S2 B04/B03/B02
-from utils.visualisation import plot_loss_curves, visualise_all_metrics, plot_confusion_matrix
+from utils.visualisation import (plot_loss_curves, visualise_all_metrics, plot_confusion_matrix,
+                                 plot_reliability_diagram, visualise_student_uncertainty)
 from models.ensemble import DecoderEnsemble, StudentHead, VariationalBottleneck, VBEvalWrapper
 from models.encoder import (
     initialize_clay_encoder_partial_unfreeze,
@@ -518,6 +520,11 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
     jsd_sum = 0.0
     uq_count = 0
 
+    # 3 GLOBAL indices for the qualitative teacher figure — at least 90% labelled,
+    # fresh random draw each run (see _select_visualization_patches docstring)
+    vis_global_indices = set(_select_visualization_patches(test_loader.dataset, num_vis=3, max_unlabelled_frac=0.10))
+    vis_count = 0
+
     with torch.no_grad():
         for batch_idx, (test_imgs, test_masks) in enumerate(test_loader):
             test_imgs = test_imgs.to(DEVICE)
@@ -566,6 +573,40 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
             head_preds_np = torch.argmax(all_head_probs_f32, dim=2).cpu().numpy()  # [M, B, H, W]
             for b in range(test_imgs.shape[0]):
                 gt = test_masks[b].squeeze().cpu().numpy()
+
+                if vis_count < 3:
+                    g_idx = batch_idx * test_loader.batch_size + b
+                    if g_idx in vis_global_indices:
+                        # features came out of autocast (fp16) — decoder itself isn't run under
+                        # autocast here, so cast back to fp32 before feeding get_decoder_output_maps
+                        single_feat = features[b].unsqueeze(0).float()
+                        _, class_map_vis, var_map, ent_map, mi_map = get_decoder_output_maps(
+                            decoder, single_feat, save_name=f"{run_name}_patch_{g_idx}"
+                        )
+                        # test_imgs is already the raw (reflectance-scaled) model input for this
+                        # patch — no separate raw-file reload needed, unlike FBP's pre-baked-
+                        # embeddings pipeline where the raw image isn't otherwise available here
+                        raw_img = test_imgs[b].cpu().numpy()
+                        raw_patch = (raw_img - raw_img.min()) / (raw_img.max() - raw_img.min() + 1e-10)
+                        raw_patch = np.transpose(raw_patch, (1, 2, 0))
+
+                        patch_dir, _, _ = test_loader.dataset.get_patch_info(g_idx)
+                        patch_id = Path(patch_dir).name
+
+                        visualise_all_metrics(
+                            class_map=class_map_vis,
+                            variance_map=var_map,
+                            total_entropy=ent_map,
+                            mi_map=mi_map,
+                            ground_truth=gt,
+                            hide_unlabelled=args.hide_unlabelled_pixels,
+                            save_name=f"{run_name}_test_patch_{g_idx}",
+                            raw_patch=raw_patch,
+                            patch_info=patch_id,
+                        )
+                        plt.close('all')
+                        vis_count += 1
+
                 if (gt > 0).sum() < 100:
                     continue
                 mask      = (gt > 0) & (gt < num_classes)
@@ -638,6 +679,7 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
     total_samples = bin_counts.sum()
     global_ece = (np.sum(bin_counts * np.abs(bin_accs - bin_confs)) / total_samples
                   if total_samples > 0 else 0.0)
+    plot_reliability_diagram(bin_accs, bin_confs, save_name=f"{run_name}_reliability")
 
     log_msg(f"REBEN TEST RESULTS ({patch_count} patches):")
     log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | "
@@ -706,8 +748,13 @@ def evaluate_student_test_set_reben(encoder_model, student_model, test_loader, a
     auroc_errors  = []
     AUROC_MAX = 2_000_000
 
+    # 3 GLOBAL indices for the qualitative student figure — at least 90% labelled,
+    # fresh random draw each run (see _select_visualization_patches docstring)
+    vis_global_indices = set(_select_visualization_patches(test_loader.dataset, num_vis=3, max_unlabelled_frac=0.10))
+    vis_count = 0
+
     with torch.no_grad():
-        for test_imgs, test_masks in test_loader:
+        for batch_idx, (test_imgs, test_masks) in enumerate(test_loader):
             test_imgs = test_imgs.to(DEVICE)
 
             with torch.cuda.amp.autocast():
@@ -716,6 +763,14 @@ def evaluate_student_test_set_reben(encoder_model, student_model, test_loader, a
             alphas = alphas.float()
             alpha0 = alphas.sum(dim=1, keepdim=True)                 # [B, 1, H, W]
             mean_probs = alphas / alpha0                             # [B, K, H, W]
+
+            # Dirichlet uncertainty decomposition — needed for the qualitative figure below,
+            # mirrors utils.misc.evaluate_student_test_set's FBP version exactly
+            alpha0_sq = alpha0.squeeze(1)                                              # [B, H, W]
+            total_entropy_map = -(mean_probs * torch.log(mean_probs + 1e-10)).sum(dim=1)     # [B, H, W]
+            aleatoric_map = (torch.digamma(alpha0_sq + 1)
+                             - (mean_probs * torch.digamma(alphas + 1)).sum(dim=1))     # [B, H, W]
+            epistemic_map = (total_entropy_map - aleatoric_map).clamp(min=0)           # [B, H, W]
 
             test_masks_t = test_masks.to(DEVICE).long()
             labelled_t = test_masks_t > 0
@@ -737,6 +792,32 @@ def evaluate_student_test_set_reben(encoder_model, student_model, test_loader, a
             masks_np = test_masks.numpy()
             for b in range(test_imgs.shape[0]):
                 gt = masks_np[b]
+
+                if vis_count < 3:
+                    g_idx = batch_idx * test_loader.batch_size + b
+                    if g_idx in vis_global_indices:
+                        raw_img = test_imgs[b].cpu().numpy()
+                        raw_patch = (raw_img - raw_img.min()) / (raw_img.max() - raw_img.min() + 1e-10)
+                        raw_patch = np.transpose(raw_patch, (1, 2, 0))
+
+                        patch_dir, _, _ = test_loader.dataset.get_patch_info(g_idx)
+                        patch_id = Path(patch_dir).name
+
+                        visualise_student_uncertainty(
+                            class_map=class_maps[b],
+                            total_entropy=total_entropy_map[b],
+                            aleatoric=aleatoric_map[b],
+                            epistemic=epistemic_map[b],
+                            alpha0_map=alpha0_sq[b],
+                            ground_truth=gt,
+                            hide_unlabelled=args.hide_unlabelled_pixels,
+                            save_name=f"{run_name}_patch_{g_idx}",
+                            raw_patch=raw_patch,
+                            patch_info=patch_id,
+                        )
+                        plt.close('all')
+                        vis_count += 1
+
                 if (gt > 0).sum() < 100:
                     continue
                 mask = (gt > 0) & (gt < num_classes)
@@ -786,6 +867,7 @@ def evaluate_student_test_set_reben(encoder_model, student_model, test_loader, a
     total_samples = bin_counts.sum()
     global_ece = (np.sum(bin_counts * np.abs(bin_accs - bin_confs)) / total_samples
                   if total_samples > 0 else 0.0)
+    plot_reliability_diagram(bin_accs, bin_confs, save_name=f"{run_name}_reliability")
 
     log_msg(f"REBEN STUDENT TEST RESULTS ({patch_count} patches):")
     log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | Acc: {global_acc:.4f} | "
