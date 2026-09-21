@@ -5,7 +5,7 @@ import inspect
 import psutil
 import torch.nn.functional as F
 from sklearn.metrics import jaccard_score, roc_auc_score
-from scipy.stats import spearmanr
+from scipy.stats import spearmanr, rankdata
 from scipy.ndimage import gaussian_filter
 from utils.visualisation import *
 import json
@@ -816,11 +816,23 @@ def _spearman_error_localization_batch(uncertainty_t, pred_class_np, test_masks,
     0 there, so leaving them in would read as a false error halo around every patch's
     unlabelled areas).
 
+    Smoothing reduces the tie-driven ceiling but doesn't eliminate it: gaussian_filter
+    truncates its kernel at a finite radius, so pixels far enough from every error in the
+    patch still get an exact 0.0, preserving some ties. Rather than guess how much of a
+    ceiling remains, each patch's actual achievable ceiling is computed alongside its real
+    correlation: the best any perfectly-informative, tie-free predictor could score against
+    THIS patch's specific tie structure. That is NOT spearmanr(smoothed_error, smoothed_error)
+    - a variable trivially always perfectly correlates with itself regardless of ties, so that
+    would just always read 1.0 and tell you nothing. Instead, break the target's ties
+    arbitrarily (rankdata's 'ordinal' method - a strictly monotonic, tie-free stand-in that
+    still respects the same group ordering) and correlate that against the target's own
+    tie-averaged values.
+
     uncertainty_t: [B, H, W] torch tensor. pred_class_np: [B, H, W] numpy array.
     test_masks: raw batch of ground-truth masks as loaded from the DataLoader.
-    stats keys: corr_values (list of per-patch rho), skipped, patch_count. Keeping
-    every patch's rho (not just a running sum) is what lets _log_and_save_error_localization
-    report the full distribution, not just its mean.
+    stats keys: corr_values, ceiling_values, normalized_values (each a list of per-patch
+    values), skipped, patch_count. Keeping every patch's value (not just a running sum) is
+    what lets _log_and_save_error_localization report the full distribution, not just its mean.
     """
     uncertainty_np = uncertainty_t.cpu().numpy()
     for b in range(uncertainty_np.shape[0]):
@@ -833,10 +845,16 @@ def _spearman_error_localization_batch(uncertainty_t, pred_class_np, test_masks,
         error_map = (pred_class_np[b] != gt).astype(np.float64)
         error_map[~mask] = 0.0
         smoothed_error = gaussian_filter(error_map, sigma=smooth_sigma)
+        target = smoothed_error[mask]
 
-        rho, _ = spearmanr(uncertainty_np[b][mask], smoothed_error[mask])
+        rho, _ = spearmanr(uncertainty_np[b][mask], target)
         if not math.isnan(rho):
             stats['corr_values'].append(rho)
+            oracle_proxy = rankdata(target, method='ordinal')
+            ceiling_rho, _ = spearmanr(oracle_proxy, target)
+            stats['ceiling_values'].append(ceiling_rho)
+            if ceiling_rho != 0:
+                stats['normalized_values'].append(rho / ceiling_rho)
         else:
             stats['skipped'] += 1
 
@@ -844,15 +862,28 @@ def _spearman_error_localization_batch(uncertainty_t, pred_class_np, test_masks,
 def _log_and_save_error_localization(who, total_stats, epi_stats, run_name):
     total_vals = np.array(total_stats['corr_values'], dtype=np.float64)
     epi_vals = np.array(epi_stats['corr_values'], dtype=np.float64)
+    total_ceilings = np.array(total_stats['ceiling_values'], dtype=np.float64)
+    epi_ceilings = np.array(epi_stats['ceiling_values'], dtype=np.float64)
+    total_normalized = np.array(total_stats['normalized_values'], dtype=np.float64)
+    epi_normalized = np.array(epi_stats['normalized_values'], dtype=np.float64)
+
     mean_total = float(total_vals.mean()) if total_vals.size else 0.0
     mean_epi = float(epi_vals.mean()) if epi_vals.size else 0.0
+    mean_total_ceiling = float(total_ceilings.mean()) if total_ceilings.size else 0.0
+    mean_epi_ceiling = float(epi_ceilings.mean()) if epi_ceilings.size else 0.0
+    mean_total_normalized = float(total_normalized.mean()) if total_normalized.size else 0.0
+    mean_epi_normalized = float(epi_normalized.mean()) if epi_normalized.size else 0.0
     frac_total_pos = float((total_vals > 0).mean()) if total_vals.size else 0.0
     frac_epi_pos = float((epi_vals > 0).mean()) if epi_vals.size else 0.0
 
+    # Each decomposition (total/epistemic) independently skips its own degenerate patches -
+    # reported separately, not summed, so this doesn't overstate how much data was unusable
     log_msg(f"{who.upper()} ERROR LOCALIZATION ({total_stats['patch_count']} patches, "
-             f"{total_stats['skipped'] + epi_stats['skipped']} degenerate skipped): "
-             f"total mean={mean_total:.4f} (>{0:.0f}: {frac_total_pos:.1%}) | "
-             f"epistemic mean={mean_epi:.4f} (>{0:.0f}: {frac_epi_pos:.1%})")
+             f"total: {total_stats['skipped']} degenerate skipped | epistemic: {epi_stats['skipped']} degenerate skipped): "
+             f"total mean={mean_total:.4f} (ceiling={mean_total_ceiling:.4f}, normalized={mean_total_normalized:.4f}, "
+             f">{0:.0f}: {frac_total_pos:.1%}) | "
+             f"epistemic mean={mean_epi:.4f} (ceiling={mean_epi_ceiling:.4f}, normalized={mean_epi_normalized:.4f}, "
+             f">{0:.0f}: {frac_epi_pos:.1%})")
 
     runs_dir = os.path.join(os.getenv("OUT_DIR", "results"), "runs")
     os.makedirs(runs_dir, exist_ok=True)
@@ -861,14 +892,21 @@ def _log_and_save_error_localization(who, total_stats, epi_stats, run_name):
         "who": who,
         "mean_total_localization": mean_total,
         "mean_epistemic_localization": mean_epi,
+        "mean_total_ceiling": mean_total_ceiling,
+        "mean_epistemic_ceiling": mean_epi_ceiling,
+        "mean_total_normalized": mean_total_normalized,
+        "mean_epistemic_normalized": mean_epi_normalized,
         "frac_total_localization_positive": frac_total_pos,
         "frac_epistemic_localization_positive": frac_epi_pos,
         "per_patch_total_localization": total_vals.tolist(),
         "per_patch_epistemic_localization": epi_vals.tolist(),
+        "per_patch_total_ceiling": total_ceilings.tolist(),
+        "per_patch_epistemic_ceiling": epi_ceilings.tolist(),
         "num_patches": total_stats['patch_count'],
         "num_total_correlations": int(total_vals.size),
         "num_epistemic_correlations": int(epi_vals.size),
-        "num_skipped_degenerate": total_stats['skipped'] + epi_stats['skipped'],
+        "num_total_skipped_degenerate": total_stats['skipped'],
+        "num_epistemic_skipped_degenerate": epi_stats['skipped'],
     }
     results_path = os.path.join(runs_dir, f"{run_name}_{who}_error_localization.json")
     with open(results_path, "w") as f:
@@ -938,8 +976,8 @@ def evaluate_error_localization(compute_fn, test_loader, args, run_name="error_l
     student. who is just a label ("teacher"/"student"/etc.) used in logging and the output
     filename.
     """
-    total_stats = {'corr_values': [], 'skipped': 0, 'patch_count': 0}
-    epi_stats = {'corr_values': [], 'skipped': 0, 'patch_count': 0}
+    total_stats = {'corr_values': [], 'ceiling_values': [], 'normalized_values': [], 'skipped': 0, 'patch_count': 0}
+    epi_stats = {'corr_values': [], 'ceiling_values': [], 'normalized_values': [], 'skipped': 0, 'patch_count': 0}
 
     # A handful of patches for an illustrative uncertainty-vs-error figure — separate
     # from the quantitative distribution above, which is what actually backs the claim.
