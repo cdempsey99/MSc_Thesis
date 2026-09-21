@@ -3,6 +3,7 @@ from datetime import datetime#
 import numpy as np
 import matplotlib.pyplot as plt
 from configs.config import *
+from scipy.ndimage import gaussian_filter
 #from utils.misc import *
 import json
 
@@ -405,27 +406,38 @@ def plot_loss_curves(loss_history_path, save_name="loss_curves"):
 
 
 def plot_error_localization_heatmap(uncertainty_map, correct_mask, valid_mask,
-                                     save_name="error_localization_heatmap"):
+                                     save_name="error_localization_heatmap", smooth_sigma=10):
     """
     Illustrative figure for a single test patch: does high uncertainty spatially
     coincide with prediction errors? Purely qualitative — the quantitative claim is
     the per-patch Spearman distribution plotted by plot_error_localization_histogram,
     this is just "what does that correlation look like on the ground" for a reader.
     uncertainty_map, correct_mask, valid_mask: [H, W] numpy arrays (correct_mask/valid_mask
-    boolean). Unlabelled pixels (valid_mask False) are greyed out in all three panels.
+    boolean). Unlabelled pixels (valid_mask False) are greyed out in every panel.
+
+    The "Smoothed error density" panel shows the actual quantity now being correlated
+    against uncertainty (see utils.misc._spearman_error_localization_batch) — a Gaussian
+    blur (sigma=smooth_sigma pixels) of the raw binary error map, computed the same way
+    here so the figure matches what the reported number represents.
     """
     save_path = os.path.join(BASE_OUT, "error_localization")
     ensure_dir(save_path)
 
+    error_map = (~correct_mask & valid_mask).astype(np.float64)
+    smoothed_error = gaussian_filter(error_map, sigma=smooth_sigma)
+
     unc_masked = np.ma.masked_where(~valid_mask, uncertainty_map)
     correctness_masked = np.ma.masked_where(~valid_mask, correct_mask.astype(np.float32))
+    smoothed_masked = np.ma.masked_where(~valid_mask, smoothed_error)
 
     cmap_unc = plt.cm.viridis.copy()
     cmap_unc.set_bad(color='lightgrey')
     cmap_corr = plt.cm.RdYlGn.copy()
     cmap_corr.set_bad(color='lightgrey')
+    cmap_density = plt.cm.magma.copy()
+    cmap_density.set_bad(color='lightgrey')
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
 
     im0 = axes[0].imshow(unc_masked, cmap=cmap_unc)
     axes[0].set_title("Uncertainty (total entropy)")
@@ -436,12 +448,17 @@ def plot_error_localization_heatmap(uncertainty_map, correct_mask, valid_mask,
     axes[1].set_title("Correct (green) / Incorrect (red)")
     axes[1].axis('off')
 
-    axes[2].imshow(unc_masked, cmap=cmap_unc)
-    error_ys, error_xs = np.where(valid_mask & ~correct_mask)
-    axes[2].scatter(error_xs, error_ys, s=1, c='red', alpha=0.5, label='Error pixel')
-    axes[2].set_title("Uncertainty with errors overlaid")
+    im2 = axes[2].imshow(smoothed_masked, cmap=cmap_density)
+    axes[2].set_title(f"Smoothed error density (σ={smooth_sigma}px)")
     axes[2].axis('off')
-    axes[2].legend(loc='upper right', fontsize=8)
+    fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+
+    axes[3].imshow(unc_masked, cmap=cmap_unc)
+    error_ys, error_xs = np.where(valid_mask & ~correct_mask)
+    axes[3].scatter(error_xs, error_ys, s=1, c='red', alpha=0.5, label='Error pixel')
+    axes[3].set_title("Uncertainty with errors overlaid")
+    axes[3].axis('off')
+    axes[3].legend(loc='upper right', fontsize=8)
 
     plt.tight_layout()
     current_time = datetime.now().strftime("%Y%m%d%H%M")

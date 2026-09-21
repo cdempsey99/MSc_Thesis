@@ -6,6 +6,7 @@ import psutil
 import torch.nn.functional as F
 from sklearn.metrics import jaccard_score, roc_auc_score
 from scipy.stats import spearmanr
+from scipy.ndimage import gaussian_filter
 from utils.visualisation import *
 import json
 import os
@@ -792,9 +793,29 @@ def evaluate_uncertainty_correlation(teacher_model, student_model, test_loader, 
     return results
 
 
-def _spearman_error_localization_batch(uncertainty_t, pred_class_np, test_masks, stats):
+def _spearman_error_localization_batch(uncertainty_t, pred_class_np, test_masks, stats, smooth_sigma=10):
     """
-    Accumulates per-patch Spearman(uncertainty, error) into stats dict in place.
+    Accumulates per-patch Spearman(uncertainty, locally-smoothed error density) into stats
+    dict in place. The raw binary error map (0=correct, 1=wrong) is Gaussian-blurred
+    (sigma=smooth_sigma pixels) before correlating, rather than correlating against the
+    raw binary label directly. Two reasons for this, not one:
+
+    1. Spatial granularity: a hard block/tile scheme (compute the correlation separately
+       within small non-overlapping regions) was considered and rejected - most small
+       regions in a segmentation patch are entirely one class (large homogeneous correct
+       areas dominate), so most tiles would be degenerate. Smoothing turns "is this exact
+       pixel wrong" into "how close is this pixel to nearby mistakes", using every pixel
+       in the patch as before (no subdivision, no small-sample degeneracy).
+    2. The ceiling effect: Spearman correlation against a tie-heavy BINARY variable has a
+       mathematical ceiling well below 1.0 even for a perfectly-informative ranking (more
+       ties = lower ceiling, worse as the binary variable gets more imbalanced). Smoothing
+       removes most of those ties, so this correlation is no longer artificially capped.
+
+    Unlabelled pixels (gt==0) are zeroed out before smoothing so they don't inject spurious
+    "error" signal into nearby labelled regions (pred_class_np is essentially never exactly
+    0 there, so leaving them in would read as a false error halo around every patch's
+    unlabelled areas).
+
     uncertainty_t: [B, H, W] torch tensor. pred_class_np: [B, H, W] numpy array.
     test_masks: raw batch of ground-truth masks as loaded from the DataLoader.
     stats keys: corr_values (list of per-patch rho), skipped, patch_count. Keeping
@@ -808,8 +829,12 @@ def _spearman_error_localization_batch(uncertainty_t, pred_class_np, test_masks,
         if mask.sum() < 100:
             continue
         stats['patch_count'] += 1
-        error_flat = (pred_class_np[b][mask] != gt[mask]).astype(np.float64)
-        rho, _ = spearmanr(uncertainty_np[b][mask], error_flat)
+
+        error_map = (pred_class_np[b] != gt).astype(np.float64)
+        error_map[~mask] = 0.0
+        smoothed_error = gaussian_filter(error_map, sigma=smooth_sigma)
+
+        rho, _ = spearmanr(uncertainty_np[b][mask], smoothed_error[mask])
         if not math.isnan(rho):
             stats['corr_values'].append(rho)
         else:
