@@ -748,6 +748,13 @@ def evaluate_student_test_set_reben(encoder_model, student_model, test_loader, a
     auroc_errors  = []
     AUROC_MAX = 2_000_000
 
+    # Dirichlet uncertainty decomposition aggregates — mirrors the teacher's
+    # mean_total_ent/mean_aleatoric/mean_epistemic so the student's headline epistemic
+    # share is reported alongside the teacher's, not just used transiently for the figure
+    total_ent_sum = 0.0
+    aleatoric_sum = 0.0
+    uq_count = 0
+
     # 3 GLOBAL indices for the qualitative student figure — at least 90% labelled,
     # fresh random draw each run (see _select_visualization_patches docstring)
     vis_global_indices = set(_select_visualization_patches(test_loader.dataset, num_vis=3, max_unlabelled_frac=0.10))
@@ -785,6 +792,9 @@ def evaluate_student_test_set_reben(encoder_model, student_model, test_loader, a
                     err_t = (torch.argmax(mean_probs, dim=1) != test_masks_t).float()
                     auroc_entropy.append(ent_t[labelled_t].cpu().numpy())
                     auroc_errors.append(err_t[labelled_t].cpu().numpy())
+                total_ent_sum += total_entropy_map[labelled_t].sum().item()
+                aleatoric_sum += aleatoric_map[labelled_t].sum().item()
+                uq_count += labelled_t.sum().item()
 
             class_maps = torch.argmax(mean_probs, dim=1).cpu().numpy()
             conf_maps  = torch.max(mean_probs, dim=1)[0].cpu().numpy()
@@ -869,9 +879,14 @@ def evaluate_student_test_set_reben(encoder_model, student_model, test_loader, a
                   if total_samples > 0 else 0.0)
     plot_reliability_diagram(bin_accs, bin_confs, save_name=f"{run_name}_reliability")
 
+    mean_total_ent = total_ent_sum / max(uq_count, 1)
+    mean_aleatoric = aleatoric_sum / max(uq_count, 1)
+    mean_epistemic = max(mean_total_ent - mean_aleatoric, 0.0)
+
     log_msg(f"REBEN STUDENT TEST RESULTS ({patch_count} patches):")
     log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | Acc: {global_acc:.4f} | "
             f"ECE: {global_ece:.4f} | NLL: {global_nll:.4f} | AUROC: {global_auroc:.4f}")
+    log_msg(f"Uncertainty: total={mean_total_ent:.4f} | aleatoric={mean_aleatoric:.4f} | epistemic={mean_epistemic:.4f}")
     log_msg("Per-class IoU (descending frequency):")
     freq_order = np.argsort(class_pixel_counts)[::-1]
     for class_idx in freq_order:
@@ -887,6 +902,9 @@ def evaluate_student_test_set_reben(encoder_model, student_model, test_loader, a
         "global_ece": float(global_ece),
         "global_nll": global_nll,
         "global_auroc": global_auroc,
+        "mean_total_entropy": mean_total_ent,
+        "mean_aleatoric": mean_aleatoric,
+        "mean_epistemic": mean_epistemic,
         "num_patches": patch_count,
         "per_class_iou": {class_names[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)},
         "confusion_matrix": conf_matrix.tolist(),

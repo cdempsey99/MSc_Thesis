@@ -481,6 +481,13 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
     auroc_errors = []
     AUROC_MAX = 2_000_000
 
+    # Dirichlet uncertainty decomposition aggregates — mirrors evaluate_test_set's
+    # mean_total_ent/mean_aleatoric/mean_epistemic so the student's headline epistemic
+    # share is reported alongside the teacher's, not just used transiently for the figure
+    total_ent_sum = 0.0
+    aleatoric_sum = 0.0
+    uq_count = 0
+
     vis_global_indices = set(_select_visualization_patches(test_loader.dataset, num_vis=3, max_unlabelled_frac=0.10))
     vis_count = 0
 
@@ -515,6 +522,11 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
             aleatoric = (torch.digamma(alpha0_sq + 1)
                          - (mean_probs * torch.digamma(alphas + 1)).sum(dim=1))            # [B, H, W]
             epistemic = (total_entropy - aleatoric).clamp(min=0)                           # [B, H, W]
+
+            if labelled_t.any():
+                total_ent_sum += total_entropy[labelled_t].sum().item()
+                aleatoric_sum += aleatoric[labelled_t].sum().item()
+                uq_count += labelled_t.sum().item()
 
             for b in range(test_features.shape[0]):
                 g_idx = batch_idx * test_loader.batch_size + b
@@ -626,8 +638,13 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
     plot_reliability_diagram(bin_accs, bin_props, save_name=f"{run_name}_reliability")
     global_ece = float(ece)
 
+    mean_total_ent = total_ent_sum / max(uq_count, 1)
+    mean_aleatoric = aleatoric_sum / max(uq_count, 1)
+    mean_epistemic = max(mean_total_ent - mean_aleatoric, 0.0)
+
     log_msg(f"STUDENT TEST RESULTS ({patch_count} patches):")
     log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f} | NLL: {global_nll:.4f} | AUROC: {global_auroc:.4f}")
+    log_msg(f"Uncertainty: total={mean_total_ent:.4f} | aleatoric={mean_aleatoric:.4f} | epistemic={mean_epistemic:.4f}")
     log_msg("Per-class IoU (descending frequency):")
     freq_order = np.argsort(class_pixel_counts)[::-1]
     for class_idx in freq_order:
@@ -643,6 +660,9 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
         "global_ece": global_ece,
         "global_nll": global_nll,
         "global_auroc": global_auroc,
+        "mean_total_entropy": mean_total_ent,
+        "mean_aleatoric": mean_aleatoric,
+        "mean_epistemic": mean_epistemic,
         "num_patches": patch_count,
         "per_class_iou": {class_names[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)},
         "confusion_matrix": conf_matrix.tolist(),
