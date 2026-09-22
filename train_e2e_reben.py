@@ -522,7 +522,7 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
 
     # 3 GLOBAL indices for the qualitative teacher figure — at least 90% labelled,
     # fresh random draw each run (see _select_visualization_patches docstring)
-    vis_global_indices = set(_select_visualization_patches(test_loader.dataset, num_vis=3, max_unlabelled_frac=0.10))
+    vis_global_indices = set(_select_visualization_patches(test_loader.dataset, num_vis=6, max_unlabelled_frac=0.10))
     vis_count = 0
 
     with torch.no_grad():
@@ -603,6 +603,7 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
                             save_name=f"{run_name}_test_patch_{g_idx}",
                             raw_patch=raw_patch,
                             patch_info=patch_id,
+                            num_classes=args.num_classes,
                         )
                         plt.close('all')
                         vis_count += 1
@@ -757,7 +758,7 @@ def evaluate_student_test_set_reben(encoder_model, student_model, test_loader, a
 
     # 3 GLOBAL indices for the qualitative student figure — at least 90% labelled,
     # fresh random draw each run (see _select_visualization_patches docstring)
-    vis_global_indices = set(_select_visualization_patches(test_loader.dataset, num_vis=3, max_unlabelled_frac=0.10))
+    vis_global_indices = set(_select_visualization_patches(test_loader.dataset, num_vis=6, max_unlabelled_frac=0.10))
     vis_count = 0
 
     with torch.no_grad():
@@ -824,6 +825,7 @@ def evaluate_student_test_set_reben(encoder_model, student_model, test_loader, a
                             save_name=f"{run_name}_patch_{g_idx}",
                             raw_patch=raw_patch,
                             patch_info=patch_id,
+                            num_classes=args.num_classes,
                         )
                         plt.close('all')
                         vis_count += 1

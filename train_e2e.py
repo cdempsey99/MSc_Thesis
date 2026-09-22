@@ -354,7 +354,7 @@ def evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, 
 
     vis_global_indices = set(random.sample(
         range(len(test_loader.dataset)),
-        min(3, len(test_loader.dataset))
+        min(6, len(test_loader.dataset))
     ))
     vis_count = 0
 
@@ -417,7 +417,8 @@ def evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, 
                         hide_unlabelled=args.hide_unlabelled_pixels,
                         save_name=f"{run_name}_test_patch_{g_idx}",
                         raw_patch=raw_patch,
-                        patch_info=f"{img_stem} x={x} y={y}"
+                        patch_info=f"{img_stem} x={x} y={y}",
+                        num_classes=args.num_classes,
                     )
                     del mean_probs_vis, class_map_vis, var_map, ent_map, mi_map, raw_patch
                     plt.close('all')

@@ -489,7 +489,7 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
     aleatoric_sum = 0.0
     uq_count = 0
 
-    vis_global_indices = set(_select_visualization_patches(test_loader.dataset, num_vis=3, max_unlabelled_frac=0.10))
+    vis_global_indices = set(_select_visualization_patches(test_loader.dataset, num_vis=6, max_unlabelled_frac=0.10))
     vis_count = 0
 
     with torch.no_grad():
@@ -568,6 +568,7 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
                         save_name=f"{run_name}_patch_{g_idx}",
                         raw_patch=raw_patch,
                         patch_info=f"{img_stem} x={x} y={y}",
+                        num_classes=args.num_classes,
                     )
                     plt.close('all')
                     vis_count += 1
@@ -1009,7 +1010,7 @@ def evaluate_error_localization(compute_fn, test_loader, args, run_name="error_l
 
     # A handful of patches for an illustrative uncertainty-vs-error figure — separate
     # from the quantitative distribution above, which is what actually backs the claim.
-    num_vis = min(3, len(test_loader.dataset))
+    num_vis = min(6, len(test_loader.dataset))
     vis_global_indices = set(_select_visualization_patches(test_loader.dataset, num_vis=num_vis, max_unlabelled_frac=0.10)) \
         if num_vis > 0 else set()
     vis_count = 0
@@ -1081,7 +1082,7 @@ def save_checkpoint(state, out_dir, filename="last_checkpoint.pth"):
     log_msg(f"=> Saving checkpoint to {last_path}")
 
 
-def _select_visualization_patches(dataset, num_vis=3, max_unlabelled_frac=0.10, max_attempts=200):
+def _select_visualization_patches(dataset, num_vis=6, max_unlabelled_frac=0.10, max_attempts=200):
     """Rejection-samples num_vis global indices from dataset whose ground-truth mask has at
     most max_unlabelled_frac unlabelled pixels, so the handful of qualitative eval figures
     don't land on mostly-empty patches. Uses its own unseeded RNG (not the module-global
@@ -1159,7 +1160,7 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
 
     # Pick 3 GLOBAL indices from entire test set for visualisation — at least 90% labelled,
     # fresh random draw each run (see _select_visualization_patches docstring)
-    vis_global_indices = set(_select_visualization_patches(test_loader.dataset, num_vis=3, max_unlabelled_frac=0.10))
+    vis_global_indices = set(_select_visualization_patches(test_loader.dataset, num_vis=6, max_unlabelled_frac=0.10))
     vis_count = 0
 
     with torch.no_grad():
@@ -1269,7 +1270,8 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                         hide_unlabelled=args.hide_unlabelled_pixels,
                         save_name=f"{run_name}_test_patch_{g_idx}",
                         raw_patch=raw_patch,
-                        patch_info=f"{img_stem} x={x} y={y}"
+                        patch_info=f"{img_stem} x={x} y={y}",
+                        num_classes=args.num_classes,
                     )
                     del mean_probs_vis, class_map_vis, var_map, ent_map, mi_map, raw_patch
                     plt.close('all')

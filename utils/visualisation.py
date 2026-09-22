@@ -2,10 +2,31 @@ from utils.misc import *
 from datetime import datetime#
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 from configs.config import *
 from scipy.ndimage import gaussian_filter
 #from utils.misc import *
 import json
+
+
+def _class_cmap_norm(num_classes):
+    """
+    (cmap, norm) pair for imshow'ing an integer class map with values 0..num_classes-1,
+    each guaranteed a distinct, non-aliased color. The old pattern - cmap='tab20', vmin=0,
+    vmax=num_classes-1 - re-normalizes N values through a continuous [0,1] range and then
+    quantizes into tab20's fixed 20 color slots, which silently aliases distinct classes onto
+    the same color once N doesn't divide evenly into 20 (FBP's 25 classes collapsed into 20
+    bins this way, aliasing 5 pairs of classes - e.g. classes 0 and 1 - to identical colors).
+    A discrete BoundaryNorm over exactly num_classes colors guarantees a 1:1 mapping instead.
+    tab20's own 20 colors are used directly when they suffice; beyond that, extra colors are
+    borrowed from tab20b.
+    """
+    base_colors = list(plt.get_cmap('tab20').colors)
+    if num_classes > len(base_colors):
+        base_colors = base_colors + list(plt.get_cmap('tab20b').colors)
+    cmap = mcolors.ListedColormap(base_colors[:num_classes])
+    norm = mcolors.BoundaryNorm(np.arange(-0.5, num_classes + 0.5, 1), cmap.N)
+    return cmap, norm
 
 # Auxiliary lambda
 to_np = lambda x: x.cpu().numpy() if isinstance(x, torch.Tensor) else x
@@ -111,7 +132,7 @@ def visualise_all_metrics_old(class_map, variance_map, total_entropy, mi_map, gr
 
 def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map,
                           ground_truth, hide_unlabelled, save_name="all_metrics",
-                          raw_patch=None, patch_info=""):
+                          raw_patch=None, patch_info="", num_classes=25):
 
     save_path = os.path.join(BASE_OUT, "metrics")
     ensure_dir(save_path)
@@ -123,6 +144,7 @@ def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map,
     total_entropy = np.squeeze(to_np(total_entropy))
     mi_map = np.squeeze(to_np(mi_map))
     ground_truth = np.squeeze(to_np(ground_truth))
+    class_cmap, class_norm = _class_cmap_norm(num_classes)
 
     # Determine number of panels — 2x3 grid when the raw-image panel is included (6 total:
     # top row Raw/GT/Predicted, bottom row Variance/Entropy/MI); otherwise the original
@@ -146,19 +168,19 @@ def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map,
     # --- 0. Raw Image with mask overlay ---
     if raw_patch is not None:
         axes[panel].imshow(raw_patch)
-        axes[panel].imshow(ground_truth, cmap='tab20', vmin=0, vmax=24, alpha=0.3)
+        axes[panel].imshow(ground_truth, cmap=class_cmap, norm=class_norm, alpha=0.3)
         axes[panel].set_title(f"Raw Image\n{patch_info}", fontsize=8)
         axes[panel].axis('off')
         panel += 1
 
     # --- Ground Truth ---
-    axes[panel].imshow(ground_truth, cmap='tab20', vmin=0, vmax=24)
+    axes[panel].imshow(ground_truth, cmap=class_cmap, norm=class_norm)
     axes[panel].set_title("Ground Truth")
     axes[panel].axis('off')
     panel += 1
 
     # --- Predicted Classes ---
-    axes[panel].imshow(class_map_masked, cmap='tab20', vmin=0, vmax=24)
+    axes[panel].imshow(class_map_masked, cmap=class_cmap, norm=class_norm)
     axes[panel].set_title("Predicted Classes")
     axes[panel].axis('off')
     panel += 1
@@ -275,7 +297,7 @@ def plot_lambda_results(lams, mious, overall_accs, avg_uncs, save_name="lambda_c
 
 def visualise_student_uncertainty(class_map, total_entropy, aleatoric, epistemic, alpha0_map,
                                    ground_truth, hide_unlabelled, save_name="student_unc",
-                                   raw_patch=None, patch_info=""):
+                                   raw_patch=None, patch_info="", num_classes=25):
     """
     Dirichlet uncertainty figure for the EnDD student.
     6 panels by default; 7 when raw_patch is provided (prepended as first panel):
@@ -292,6 +314,7 @@ def visualise_student_uncertainty(class_map, total_entropy, aleatoric, epistemic
     epistemic     = np.squeeze(to_np(epistemic))
     alpha0_map    = np.squeeze(to_np(alpha0_map))
     ground_truth  = np.squeeze(to_np(ground_truth))
+    class_cmap, class_norm = _class_cmap_norm(num_classes)
 
     if hide_unlabelled:
         class_map = np.ma.masked_where(ground_truth == 0, class_map)
@@ -310,17 +333,17 @@ def visualise_student_uncertainty(class_map, total_entropy, aleatoric, epistemic
 
     if raw_patch is not None:
         axes[panel].imshow(raw_patch)
-        axes[panel].imshow(ground_truth, cmap='tab20', vmin=0, vmax=24, alpha=0.3)
+        axes[panel].imshow(ground_truth, cmap=class_cmap, norm=class_norm, alpha=0.3)
         axes[panel].set_title(f"Raw Image\n{patch_info}", fontsize=8)
         axes[panel].axis('off')
         panel += 1
 
-    axes[panel].imshow(ground_truth, cmap='tab20', vmin=0, vmax=24)
+    axes[panel].imshow(ground_truth, cmap=class_cmap, norm=class_norm)
     axes[panel].set_title("Ground Truth")
     axes[panel].axis('off')
     panel += 1
 
-    axes[panel].imshow(class_map, cmap='tab20', vmin=0, vmax=24)
+    axes[panel].imshow(class_map, cmap=class_cmap, norm=class_norm)
     axes[panel].set_title("Predicted Classes")
     axes[panel].axis('off')
     panel += 1
