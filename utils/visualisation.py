@@ -416,7 +416,7 @@ def plot_error_localization_heatmap(uncertainty_map, correct_mask, valid_mask,
     boolean). Unlabelled pixels (valid_mask False) are greyed out in every panel.
 
     The "Smoothed error density" panel shows the actual quantity now being correlated
-    against uncertainty (see utils.misc._spearman_error_localization_batch) — a Gaussian
+    against uncertainty (see utils.misc._spatial_error_localization_batch) — a Gaussian
     blur (sigma=smooth_sigma pixels) of the raw binary error map, computed the same way
     here so the figure matches what the reported number represents.
     """

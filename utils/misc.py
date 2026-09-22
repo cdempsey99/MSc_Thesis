@@ -793,12 +793,20 @@ def evaluate_uncertainty_correlation(teacher_model, student_model, test_loader, 
     return results
 
 
-def _spearman_error_localization_batch(uncertainty_t, pred_class_np, test_masks, stats, smooth_sigma=10):
+def _spatial_error_localization_batch(total_ent_t, epistemic_t, pred_class_np, test_masks, total_stats, epi_stats, smooth_sigma=10):
     """
-    Accumulates per-patch Spearman(uncertainty, locally-smoothed error density) into stats
-    dict in place. The raw binary error map (0=correct, 1=wrong) is Gaussian-blurred
-    (sigma=smooth_sigma pixels) before correlating, rather than correlating against the
-    raw binary label directly. Two reasons for this, not one:
+    Accumulates per-patch Spearman(uncertainty, locally-smoothed error density) into
+    total_stats/epi_stats in place, for both uncertainty channels in one pass. Correlations
+    are computed directly as the Pearson correlation of ranks - which is Spearman's rho by
+    definition - rather than via scipy.stats.spearmanr, and the shared rank_target/ceiling
+    (see below) is computed once per patch rather than once per channel: mathematically
+    identical results, without scipy's per-call argument validation/tie-correction/warning
+    overhead or the duplicated ceiling work, which matters once this runs ~240k times across
+    a full reBEN/SAR test-set pass.
+
+    The raw binary error map (0=correct, 1=wrong) is Gaussian-blurred (sigma=smooth_sigma
+    pixels) before correlating, rather than correlating against the raw binary label
+    directly. Two reasons for this, not one:
 
     1. Spatial granularity: a hard block/tile scheme (compute the correlation separately
        within small non-overlapping regions) was considered and rejected - most small
@@ -826,37 +834,57 @@ def _spearman_error_localization_batch(uncertainty_t, pred_class_np, test_masks,
     would just always read 1.0 and tell you nothing. Instead, break the target's ties
     arbitrarily (rankdata's 'ordinal' method - a strictly monotonic, tie-free stand-in that
     still respects the same group ordering) and correlate that against the target's own
-    tie-averaged values.
+    tie-averaged values. That ceiling depends only on the smoothed error map's own tie
+    structure, never on which uncertainty channel is being scored against it - so it's
+    identical for total and epistemic on a given patch, and only needs computing once.
 
-    uncertainty_t: [B, H, W] torch tensor. pred_class_np: [B, H, W] numpy array.
-    test_masks: raw batch of ground-truth masks as loaded from the DataLoader.
+    total_ent_t, epistemic_t: [B, H, W] torch tensors. pred_class_np: [B, H, W] numpy array.
+    test_masks: raw batch of ground-truth masks as loaded from the DataLoader. The Gaussian
+    smoothing is done once for the whole batch (sigma=(0, s, s), so each patch is blurred
+    independently, not blended with its neighbours in the batch) rather than once per sample.
     stats keys: corr_values, ceiling_values, normalized_values (each a list of per-patch
     values), skipped, patch_count. Keeping every patch's value (not just a running sum) is
     what lets _log_and_save_error_localization report the full distribution, not just its mean.
     """
-    uncertainty_np = uncertainty_t.cpu().numpy()
-    for b in range(uncertainty_np.shape[0]):
-        gt = test_masks[b].squeeze().cpu().numpy()
-        mask = gt > 0
+    total_np = total_ent_t.cpu().numpy()
+    epi_np = epistemic_t.cpu().numpy()
+
+    gt_batch = test_masks.cpu().numpy()
+    if gt_batch.ndim == 4:
+        gt_batch = gt_batch.squeeze(1)
+    mask_batch = gt_batch > 0
+
+    error_batch = (pred_class_np != gt_batch).astype(np.float64)
+    error_batch[~mask_batch] = 0.0
+    smoothed_batch = gaussian_filter(error_batch, sigma=(0, smooth_sigma, smooth_sigma))
+
+    for b in range(gt_batch.shape[0]):
+        mask = mask_batch[b]
         if mask.sum() < 100:
             continue
-        stats['patch_count'] += 1
+        total_stats['patch_count'] += 1
+        epi_stats['patch_count'] += 1
 
-        error_map = (pred_class_np[b] != gt).astype(np.float64)
-        error_map[~mask] = 0.0
-        smoothed_error = gaussian_filter(error_map, sigma=smooth_sigma)
-        target = smoothed_error[mask]
+        target = smoothed_batch[b][mask]
+        if np.ptp(target) == 0:
+            total_stats['skipped'] += 1
+            epi_stats['skipped'] += 1
+            continue
 
-        rho, _ = spearmanr(uncertainty_np[b][mask], target)
-        if not math.isnan(rho):
+        rank_target = rankdata(target)
+        oracle_proxy = rankdata(target, method='ordinal')
+        ceiling_rho = float(np.corrcoef(oracle_proxy, rank_target)[0, 1])
+
+        for uncertainty_np, stats in ((total_np, total_stats), (epi_np, epi_stats)):
+            u = uncertainty_np[b][mask]
+            if np.ptp(u) == 0:
+                stats['skipped'] += 1
+                continue
+            rho = float(np.corrcoef(rankdata(u), rank_target)[0, 1])
             stats['corr_values'].append(rho)
-            oracle_proxy = rankdata(target, method='ordinal')
-            ceiling_rho, _ = spearmanr(oracle_proxy, target)
             stats['ceiling_values'].append(ceiling_rho)
             if ceiling_rho != 0:
                 stats['normalized_values'].append(rho / ceiling_rho)
-        else:
-            stats['skipped'] += 1
 
 
 def _log_and_save_error_localization(who, total_stats, epi_stats, run_name):
@@ -990,8 +1018,7 @@ def evaluate_error_localization(compute_fn, test_loader, args, run_name="error_l
         for batch_idx, (batch_input, test_masks) in enumerate(test_loader):
             batch_input = batch_input.to(DEVICE)
             total_ent, epistemic, pred_class = compute_fn(batch_input)
-            _spearman_error_localization_batch(total_ent, pred_class, test_masks, total_stats)
-            _spearman_error_localization_batch(epistemic, pred_class, test_masks, epi_stats)
+            _spatial_error_localization_batch(total_ent, epistemic, pred_class, test_masks, total_stats, epi_stats)
 
             if vis_count < num_vis:
                 total_ent_np = total_ent.cpu().numpy()
