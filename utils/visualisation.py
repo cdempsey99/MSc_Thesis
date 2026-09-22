@@ -164,45 +164,59 @@ def visualise_all_metrics(class_map, variance_map, total_entropy, mi_map,
         class_map_masked = class_map
 
     panel = 0
+    next_letter = lambda: chr(ord('a') + panel)
 
     # --- 0. Raw Image with mask overlay ---
     if raw_patch is not None:
+        letter = next_letter()
         axes[panel].imshow(raw_patch)
         axes[panel].imshow(ground_truth, cmap=class_cmap, norm=class_norm, alpha=0.3)
-        axes[panel].set_title(f"Raw Image\n{patch_info}", fontsize=8)
+        axes[panel].set_title(f"({letter}) Raw Image", pad=14)
+        axes[panel].text(0.5, 1.0, f"({patch_info})", transform=axes[panel].transAxes,
+                          ha='center', va='bottom', fontsize=7)
         axes[panel].axis('off')
         panel += 1
 
     # --- Ground Truth ---
+    letter = next_letter()
     axes[panel].imshow(ground_truth, cmap=class_cmap, norm=class_norm)
-    axes[panel].set_title("Ground Truth")
+    axes[panel].set_title(f"({letter}) Ground Truth")
     axes[panel].axis('off')
     panel += 1
 
     # --- Predicted Classes ---
+    letter = next_letter()
     axes[panel].imshow(class_map_masked, cmap=class_cmap, norm=class_norm)
-    axes[panel].set_title("Predicted Classes")
+    axes[panel].set_title(f"({letter}) Predicted Classes")
     axes[panel].axis('off')
     panel += 1
 
-    # --- Variance ---
-    im2 = axes[panel].imshow(variance_map, cmap='magma')
-    axes[panel].set_title("Ensemble Variance")
+    # --- Variance --- (variance of raw softmax probabilities across heads - unitless,
+    # unlike the entropy-based panels below, so no "nats" colorbar label here)
+    letter = next_letter()
+    var_vmax = max(float(np.max(variance_map)), 1e-6)
+    im2 = axes[panel].imshow(variance_map, cmap='magma', vmin=0, vmax=var_vmax)
+    axes[panel].set_title(f"({letter}) Ensemble Variance")
     fig.colorbar(im2, ax=axes[panel], fraction=0.046, pad=0.04)
     axes[panel].axis('off')
     panel += 1
 
-    # --- Total Entropy ---
+    # --- Total Entropy --- (natural-log entropy, so its unit is nats)
+    letter = next_letter()
     im3 = axes[panel].imshow(total_entropy, cmap='magma', vmin=0, vmax=3.22)
-    axes[panel].set_title("Total Entropy (H)")
-    fig.colorbar(im3, ax=axes[panel], fraction=0.046, pad=0.04)
+    axes[panel].set_title(f"({letter}) Total Entropy (H)")
+    cbar3 = fig.colorbar(im3, ax=axes[panel], fraction=0.046, pad=0.04)
+    cbar3.set_label("nats")
     axes[panel].axis('off')
     panel += 1
 
-    # --- Mutual Information ---
-    im4 = axes[panel].imshow(mi_map, cmap='magma')
-    axes[panel].set_title("Mutual Information (MI)")
-    fig.colorbar(im4, ax=axes[panel], fraction=0.046, pad=0.04)
+    # --- Mutual Information --- (a difference of natural-log entropies, also in nats)
+    letter = next_letter()
+    mi_vmax = max(float(np.max(mi_map)), 1e-6)
+    im4 = axes[panel].imshow(mi_map, cmap='magma', vmin=0, vmax=mi_vmax)
+    axes[panel].set_title(f"({letter}) Mutual Information (MI)")
+    cbar4 = fig.colorbar(im4, ax=axes[panel], fraction=0.046, pad=0.04)
+    cbar4.set_label("nats")
     axes[panel].axis('off')
 
     plt.tight_layout()
@@ -330,45 +344,64 @@ def visualise_student_uncertainty(class_map, total_entropy, aleatoric, epistemic
         fig, axes = plt.subplots(2, 3, figsize=(18, 10))
         axes = axes.flatten()
     panel = 0
+    next_letter = lambda: chr(ord('a') + panel)
 
     if raw_patch is not None:
+        letter = next_letter()
         axes[panel].imshow(raw_patch)
         axes[panel].imshow(ground_truth, cmap=class_cmap, norm=class_norm, alpha=0.3)
-        axes[panel].set_title(f"Raw Image\n{patch_info}", fontsize=8)
+        axes[panel].set_title(f"({letter}) Raw Image", pad=14)
+        axes[panel].text(0.5, 1.0, f"({patch_info})", transform=axes[panel].transAxes,
+                          ha='center', va='bottom', fontsize=7)
         axes[panel].axis('off')
         panel += 1
 
+    letter = next_letter()
     axes[panel].imshow(ground_truth, cmap=class_cmap, norm=class_norm)
-    axes[panel].set_title("Ground Truth")
+    axes[panel].set_title(f"({letter}) Ground Truth")
     axes[panel].axis('off')
     panel += 1
 
+    letter = next_letter()
     axes[panel].imshow(class_map, cmap=class_cmap, norm=class_norm)
-    axes[panel].set_title("Predicted Classes")
+    axes[panel].set_title(f"({letter}) Predicted Classes")
     axes[panel].axis('off')
     panel += 1
 
+    # Entropy-based panels (Total H, Aleatoric, Epistemic MI) are natural-log entropies/
+    # entropy differences, so their unit is nats. Concentration alpha0 is a Dirichlet
+    # pseudo-count sum - unitless, no colorbar label needed.
+    letter = next_letter()
     im2 = axes[panel].imshow(total_entropy, cmap='magma', vmin=0, vmax=3.22)
-    axes[panel].set_title("Total Entropy H(p̄)")
-    fig.colorbar(im2, ax=axes[panel], fraction=0.046, pad=0.04)
+    axes[panel].set_title(f"({letter}) Total Entropy H(p̄)")
+    cbar2 = fig.colorbar(im2, ax=axes[panel], fraction=0.046, pad=0.04)
+    cbar2.set_label("nats")
     axes[panel].axis('off')
     panel += 1
 
-    im3 = axes[panel].imshow(aleatoric, cmap='magma')
-    axes[panel].set_title("Aleatoric E[H[p]]")
-    fig.colorbar(im3, ax=axes[panel], fraction=0.046, pad=0.04)
+    letter = next_letter()
+    alea_vmax = max(float(np.max(aleatoric)), 1e-6)
+    im3 = axes[panel].imshow(aleatoric, cmap='magma', vmin=0, vmax=alea_vmax)
+    axes[panel].set_title(f"({letter}) Aleatoric E[H[p]]")
+    cbar3 = fig.colorbar(im3, ax=axes[panel], fraction=0.046, pad=0.04)
+    cbar3.set_label("nats")
     axes[panel].axis('off')
     panel += 1
 
-    im4 = axes[panel].imshow(epistemic, cmap='magma')
-    axes[panel].set_title("Epistemic MI")
-    fig.colorbar(im4, ax=axes[panel], fraction=0.046, pad=0.04)
+    letter = next_letter()
+    epi_vmax = max(float(np.max(epistemic)), 1e-6)
+    im4 = axes[panel].imshow(epistemic, cmap='magma', vmin=0, vmax=epi_vmax)
+    axes[panel].set_title(f"({letter}) Epistemic MI")
+    cbar4 = fig.colorbar(im4, ax=axes[panel], fraction=0.046, pad=0.04)
+    cbar4.set_label("nats")
     axes[panel].axis('off')
     panel += 1
 
     # viridis (high = certain) to visually distinguish from the uncertainty maps
-    im5 = axes[panel].imshow(alpha0_map, cmap='viridis')
-    axes[panel].set_title("Concentration α₀")
+    letter = next_letter()
+    alpha0_vmax = max(float(np.max(alpha0_map)), 1e-6)
+    im5 = axes[panel].imshow(alpha0_map, cmap='viridis', vmin=0, vmax=alpha0_vmax)
+    axes[panel].set_title(f"({letter}) Concentration α₀")
     fig.colorbar(im5, ax=axes[panel], fraction=0.046, pad=0.04)
     axes[panel].axis('off')
 
