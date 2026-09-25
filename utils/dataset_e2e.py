@@ -104,14 +104,25 @@ class ReBENRawDataset(Dataset):
     def __getitem__(self, idx):
         patch_id = self.patch_ids[idx]
         tile_id = "_".join(patch_id.split("_")[:-2])
+        patch_dir = self.s2_root / tile_id / patch_id
 
-        bands = []
-        for band in self.BANDS:
-            tif = self.s2_root / tile_id / patch_id / f"{patch_id}_{band}.tif"
-            with rasterio.open(tif) as src:
-                bands.append(src.read(1).astype(np.float32))
+        # Prefer a pre-built 3-band VRT (see build_reben_vrts.py) - one rasterio.open()+read()
+        # instead of 3 separate ones, each with its own GDAL driver-init overhead and network
+        # round-trip. Falls back to the 3 raw per-band files if no VRT has been built for this
+        # patch yet, so partial preprocessing coverage never breaks anything.
+        vrt_path = patch_dir / f"{patch_id}_stacked.vrt"
+        if vrt_path.exists():
+            with rasterio.open(vrt_path) as src:
+                stacked = src.read().astype(np.float32)  # [3, 120, 120], band order = self.BANDS
+        else:
+            bands = []
+            for band in self.BANDS:
+                tif = patch_dir / f"{patch_id}_{band}.tif"
+                with rasterio.open(tif) as src:
+                    bands.append(src.read(1).astype(np.float32))
+            stacked = np.stack(bands, axis=0)
 
-        img_tensor = torch.from_numpy(np.stack(bands, axis=0)) / 10000.0  # [3, 120, 120] — S2 DN → reflectance
+        img_tensor = torch.from_numpy(stacked) / 10000.0  # [3, 120, 120] — S2 DN → reflectance
         img_tensor = F.interpolate(img_tensor.unsqueeze(0), size=(224, 224),
                                    mode='bilinear', align_corners=False).squeeze(0)
 
