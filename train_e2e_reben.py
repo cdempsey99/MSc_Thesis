@@ -78,11 +78,11 @@ def train_e2e_reben(args):
     )
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
-                              shuffle=True, num_workers=4, pin_memory=True)
+                              shuffle=True, num_workers=args.num_workers, pin_memory=True)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size,
-                              shuffle=False, num_workers=4, pin_memory=True)
+                              shuffle=False, num_workers=args.num_workers, pin_memory=True)
     test_loader  = DataLoader(test_ds,  batch_size=args.batch_size,
-                              shuffle=False, num_workers=4, pin_memory=True)
+                              shuffle=False, num_workers=args.num_workers, pin_memory=True)
 
     # 2. Models
     log_msg(f"Initialising encoder with {args.n_unfrozen_blocks} unfrozen blocks...")
@@ -1066,6 +1066,11 @@ if __name__ == "__main__":
     # Training
     parser.add_argument("--num_epochs",    type=int,   default=50)
     parser.add_argument("--batch_size",    type=int,   default=16)
+    parser.add_argument("--num_workers",   type=int,   default=8,
+                        help="DataLoader worker processes for train/val/test loaders. Found (23/09) that the "
+                             "old hardcoded 4 was leaving the job I/O-bound - nvidia-smi dmon showed the GPU "
+                             "idle ~70% of the time, bursting to 90%+ only when a batch was ready - despite "
+                             "8 CPUs being allocated per job. Default bumped to 8 to match that allocation.")
     parser.add_argument("--lr_encoder",   type=float, default=1e-6)
     parser.add_argument("--lr_decoder",   type=float, default=1e-4)
     parser.add_argument("--warmup_epochs", type=int,   default=5)

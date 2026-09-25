@@ -75,9 +75,9 @@ def run_training(args):
     test_ds = BakedFeatureDataset(test_files, augment=False)
     log_msg("All datasets initialised")
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
-    test_loader = DataLoader(test_ds, batch_size=64, shuffle=False, num_workers=4, pin_memory=True)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
+    test_loader = DataLoader(test_ds, batch_size=64, shuffle=False, num_workers=args.num_workers, pin_memory=True)
 
     # 3b. Per-head data bagging (--data_bagging): each head gets its own independent
     # bootstrap resample (with replacement, image-level) of train_files instead of every
@@ -212,6 +212,12 @@ if __name__ == "__main__":
     parser.add_argument("--num_epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=0.0001)
     parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--num_workers", type=int, default=4,
+                        help="DataLoader worker processes. Left at the original default (4) since "
+                             "nvidia-smi dmon on a live FBP job showed 99-100% SM utilization with no idle "
+                             "gaps (compute-bound, not I/O-bound) - unlike reBEN's raw-image e2e pipeline, "
+                             "which was found to need this raised. Exposed as a flag for flexibility, not "
+                             "because FBP is known to need a different value.")
     parser.add_argument("--hide_unlabelled_pixels", action="store_true")
     #parser.add_argument("--lam", type=float, default=0.1, help="Lambda diversity")
     #parser.add_argument("--enforce_diversity", action="store_true")
