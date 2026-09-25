@@ -106,13 +106,14 @@ class ReBENRawDataset(Dataset):
         tile_id = "_".join(patch_id.split("_")[:-2])
         patch_dir = self.s2_root / tile_id / patch_id
 
-        # Prefer a pre-built 3-band VRT (see build_reben_vrts.py) - one rasterio.open()+read()
-        # instead of 3 separate ones, each with its own GDAL driver-init overhead and network
-        # round-trip. Falls back to the 3 raw per-band files if no VRT has been built for this
-        # patch yet, so partial preprocessing coverage never breaks anything.
-        vrt_path = patch_dir / f"{patch_id}_stacked.vrt"
-        if vrt_path.exists():
-            with rasterio.open(vrt_path) as src:
+        # Prefer a pre-built combined 3-band file (see build_reben_vrts.py) - one
+        # rasterio.open()+read() instead of 3 separate ones, each with its own GDAL driver-init
+        # overhead and network round-trip. Falls back to the 3 raw per-band files if no combined
+        # file has been built for this patch yet, so partial preprocessing coverage never breaks
+        # anything.
+        stacked_path = patch_dir / f"{patch_id}_stacked.tif"
+        if stacked_path.exists():
+            with rasterio.open(stacked_path) as src:
                 stacked = src.read().astype(np.float32)  # [3, 120, 120], band order = self.BANDS
         else:
             bands = []
