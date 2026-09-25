@@ -115,8 +115,10 @@ class ReBENRawDataset(Dataset):
         img_tensor = F.interpolate(img_tensor.unsqueeze(0), size=(224, 224),
                                    mode='bilinear', align_corners=False).squeeze(0)
 
-        ref_dir = self.ref_root / tile_id / patch_id
-        ref_tif = next(ref_dir.glob("*.tif"))
+        # Direct path, not glob("*.tif") - confirmed 25/09 the reference map filename is always
+        # exactly "{patch_id}_reference_map.tif", so the glob was one wasted network directory
+        # listing per patch for no benefit.
+        ref_tif = self.ref_root / tile_id / patch_id / f"{patch_id}_reference_map.tif"
         with rasterio.open(ref_tif) as src:
             mask = src.read(1).astype(np.uint16)
         mask = _CORINE_LUT[mask]  # CORINE codes → 0-indexed class labels (0 = ignore)
@@ -273,8 +275,10 @@ class ReBENSARRawDataset(Dataset):
         img_tensor = F.interpolate(img_tensor.unsqueeze(0), size=(224, 224),
                                    mode='bilinear', align_corners=False).squeeze(0)
 
-        ref_dir = self.ref_root / "_".join(patch_id.split("_")[:-2]) / patch_id
-        ref_tif = next(ref_dir.glob("*.tif"))
+        # Direct path, not glob("*.tif") - see ReBENRawDataset's __getitem__ for the same fix
+        # and why (confirmed 25/09: filename is always "{patch_id}_reference_map.tif").
+        ref_patch_dir = "_".join(patch_id.split("_")[:-2])
+        ref_tif = self.ref_root / ref_patch_dir / patch_id / f"{patch_id}_reference_map.tif"
         with rasterio.open(ref_tif) as src:
             mask = src.read(1).astype(np.uint16)
         mask = _CORINE_LUT[mask]  # CORINE codes → 0-indexed class labels (0 = ignore)
