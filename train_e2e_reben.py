@@ -77,12 +77,18 @@ def train_e2e_reben(args):
         max_val_patches=args.max_val_patches,
     )
 
+    # persistent_workers avoids respawning num_workers processes at the start of every epoch -
+    # only valid when num_workers > 0, so guarded rather than a bare True.
+    persistent = args.num_workers > 0
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
-                              shuffle=True, num_workers=args.num_workers, pin_memory=True)
+                              shuffle=True, num_workers=args.num_workers, pin_memory=True,
+                              persistent_workers=persistent)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size,
-                              shuffle=False, num_workers=args.num_workers, pin_memory=True)
+                              shuffle=False, num_workers=args.num_workers, pin_memory=True,
+                              persistent_workers=persistent)
     test_loader  = DataLoader(test_ds,  batch_size=args.batch_size,
-                              shuffle=False, num_workers=args.num_workers, pin_memory=True)
+                              shuffle=False, num_workers=args.num_workers, pin_memory=True,
+                              persistent_workers=persistent)
 
     # 2. Models
     log_msg(f"Initialising encoder with {args.n_unfrozen_blocks} unfrozen blocks...")
