@@ -106,7 +106,7 @@ class ReBENRawDataset(Dataset):
         tile_id = "_".join(patch_id.split("_")[:-2])
         patch_dir = self.s2_root / tile_id / patch_id
 
-        # Prefer a pre-built combined 3-band file (see build_reben_vrts.py) - one
+        # Prefer a pre-built combined 3-band file (see combine_input_files_reben.py) - one
         # rasterio.open()+read() instead of 3 separate ones, each with its own GDAL driver-init
         # overhead and network round-trip. Falls back to the 3 raw per-band files if no combined
         # file has been built for this patch yet, so partial preprocessing coverage never breaks

@@ -1,6 +1,6 @@
 """
-build_reben_vrts.py — one-time preprocessing pass that combines each reBEN optical patch's
-3 separate single-band GeoTIFFs (B04/B03/B02) into one physical 3-band GeoTIFF.
+combine_input_files_reben.py — one-time preprocessing pass that combines each reBEN optical
+patch's 3 separate single-band GeoTIFFs (B04/B03/B02) into one physical 3-band GeoTIFF.
 
 Why: ReBENRawDataset.__getitem__ was doing 3 separate rasterio.open() calls per patch (one per
 band), each carrying its own GDAL driver-initialization overhead, plus a network round-trip on
@@ -27,13 +27,20 @@ patch directory - ReBENRawDataset checks for this file first and only falls back
 3 raw band files individually if it's missing, so partial coverage (e.g. only the reduced-scale
 train/val/test split) is safe and doesn't break anything for patches that haven't been built yet.
 
+Parallelized across --num_workers processes: each patch's combine is fully independent (reads 3
+files, writes 1, no shared state, no ordering dependency), and the num_workers DataLoader finding
+this project already confirmed (this same beegfs filesystem tolerates concurrent I/O well) is the
+motivation for not running the full-dataset ~45h estimate serially.
+
 Usage:
-    python build_reben_vrts.py \
+    python combine_input_files_reben.py \
         --s2_root /beegfs/scratch/callumdempsey/data/reben/BigEarthNet-S2 \
         --metadata_path /beegfs/scratch/callumdempsey/data/reben/metadata.parquet \
-        --max_patches 25000
+        --num_workers 16
 """
 import argparse
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 from pathlib import Path
 
 import pandas as pd
@@ -57,19 +64,22 @@ def _stacked_path(s2_root: Path, patch_id: str) -> Path:
     return s2_root / tile_id / patch_id / f"{patch_id}_stacked.tif"
 
 
-def build_stacked_tif_for_patch(s2_root: Path, patch_id: str, overwrite: bool) -> bool:
+def build_stacked_tif_for_patch(s2_root: Path, patch_id: str, overwrite: bool) -> str:
+    """Returns "built", "skipped_existing", or "skipped_missing" - classified here rather than by
+    the caller re-checking file existence afterward, so parallel dispatch doesn't need a second
+    stat call per patch just to categorize the result."""
     tile_id = "_".join(patch_id.split("_")[:-2])
     patch_dir = s2_root / tile_id / patch_id
     out_tif = _stacked_path(s2_root, patch_id)
 
     if out_tif.exists() and not overwrite:
-        return False
+        return "skipped_existing"
 
     band_files = [patch_dir / f"{patch_id}_{band}.tif" for band in BANDS]
     missing = [f for f in band_files if not f.exists()]
     if missing:
         log_msg(f"WARNING: skipping {patch_id}, missing band file(s): {missing}")
-        return False
+        return "skipped_missing"
 
     arrays = []
     profile = None
@@ -84,7 +94,7 @@ def build_stacked_tif_for_patch(s2_root: Path, patch_id: str, overwrite: bool) -
         for i, arr in enumerate(arrays, start=1):
             dst.write(arr, i)
 
-    return True
+    return "built"
 
 
 def main():
@@ -102,6 +112,13 @@ def main():
                              "a quick timing test without waiting on val/test too.")
     parser.add_argument("--overwrite", action="store_true",
                         help="Rebuild files that already exist (default: skip patches that already have one).")
+    parser.add_argument("--num_workers", type=int, default=8,
+                        help="Each patch's combine is fully independent, so this parallelizes across "
+                             "processes rather than running the full-dataset job serially. This is a "
+                             "write-heavy workload, unlike the num_workers DataLoader finding this is "
+                             "motivated by (which was read-only) - scaling behavior on this filesystem "
+                             "hasn't been separately confirmed for writes, so treat higher values as "
+                             "worth testing rather than assumed safe.")
     args = parser.parse_args()
 
     s2_root = Path(args.s2_root)
@@ -111,28 +128,28 @@ def main():
     if not args.include_cloud:
         df = df[~df.contains_cloud_or_shadow]
 
-    built = 0
-    skipped_existing = 0
-    skipped_missing = 0
     for split_name in args.splits:
         is_train = split_name == "train"
         patch_ids = _patch_ids_for_split(df, split_name, args.max_patches, is_train)
-        log_msg(f"Building combined files for {len(patch_ids)} '{split_name}' patches...")
-        for i, patch_id in enumerate(patch_ids):
-            result = build_stacked_tif_for_patch(s2_root, patch_id, args.overwrite)
-            if result:
-                built += 1
-            else:
-                if _stacked_path(s2_root, patch_id).exists():
+        log_msg(f"Building combined files for {len(patch_ids)} '{split_name}' patches "
+                f"({args.num_workers} workers)...")
+
+        built = skipped_existing = skipped_missing = 0
+        worker_fn = partial(build_stacked_tif_for_patch, s2_root, overwrite=args.overwrite)
+        with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
+            for i, status in enumerate(executor.map(worker_fn, patch_ids)):
+                if status == "built":
+                    built += 1
+                elif status == "skipped_existing":
                     skipped_existing += 1
                 else:
                     skipped_missing += 1
-            if (i + 1) % 1000 == 0:
-                log_msg(f"  {split_name}: {i + 1}/{len(patch_ids)} processed "
-                        f"(built={built}, skipped_existing={skipped_existing}, skipped_missing={skipped_missing})")
+                if (i + 1) % 1000 == 0:
+                    log_msg(f"  {split_name}: {i + 1}/{len(patch_ids)} processed "
+                            f"(built={built}, skipped_existing={skipped_existing}, skipped_missing={skipped_missing})")
 
-    log_msg(f"Done. Built {built} new combined files, skipped {skipped_existing} already-existing, "
-            f"{skipped_missing} skipped due to missing band files.")
+        log_msg(f"Done with '{split_name}'. Built {built} new combined files, skipped {skipped_existing} "
+                f"already-existing, {skipped_missing} skipped due to missing band files.")
 
 
 if __name__ == "__main__":
