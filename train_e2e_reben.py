@@ -227,6 +227,18 @@ def train_e2e_reben(args):
             for _ in range(start_epoch):
                 student_scheduler.step()
 
+    if args.compile:
+        # Wrap the actual invoked submodule (encoder_model.model.encoder.transformer), not
+        # encoder_model itself - get_encoder_representation_partial calls the transformer
+        # submodule directly, bypassing encoder_model's own forward(), so compiling the outer
+        # wrapper would silently do nothing. Applied after resume so we compile the already-
+        # loaded weights, not compile-then-load. Default mode only - reduce-overhead (CUDA
+        # graphs) hangs when combined with torch.profiler and was never re-tested without it,
+        # so not used here without further verification.
+        log_msg("Compiling encoder transformer and decoder (mode=default)...")
+        encoder_model.model.encoder.transformer = torch.compile(encoder_model.model.encoder.transformer)
+        decoder = torch.compile(decoder)
+
     # 5. Training loop
     log_msg("Starting training...")
 
@@ -1081,6 +1093,13 @@ if __name__ == "__main__":
     parser.add_argument("--lr_decoder",   type=float, default=1e-4)
     parser.add_argument("--warmup_epochs", type=int,   default=5)
     parser.add_argument("--hide_unlabelled_pixels", action="store_true")
+    parser.add_argument("--compile", action="store_true",
+                        help="Wrap the encoder transformer and decoder in torch.compile(). Profiled "
+                             "(29/09) at ~6.6%% real per-step speedup by fusing many small casting "
+                             "ops that autocast otherwise dispatches separately - modest, not "
+                             "dramatic, confirmed via torch.profiler before adding here. Only tested "
+                             "against the M=1/no-diversity/no-student config; bottleneck and "
+                             "student are not wrapped, scope matches what was actually profiled.")
 
     # Loss
     parser.add_argument("--use_focal_loss", action="store_true")
