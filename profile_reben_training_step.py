@@ -58,6 +58,13 @@ def main():
     parser.add_argument("--trace_out", type=str, default="profiler_trace.json",
                         help="Chrome trace file for visual inspection (chrome://tracing or "
                              "https://ui.perfetto.dev), in addition to the printed table.")
+    parser.add_argument("--compile", action="store_true",
+                        help="Wrap the encoder transformer and decoder in torch.compile() to test "
+                             "whether kernel fusion reduces the many-small-casting-ops overhead "
+                             "found in the uncompiled profile.")
+    parser.add_argument("--compile_mode", type=str, default="reduce-overhead",
+                        help="reduce-overhead uses CUDA graphs specifically to cut per-kernel "
+                             "launch overhead - the mode most relevant to what we found.")
     args = parser.parse_args()
 
     log_msg(f"Profiling reBEN training step: batch_size={args.batch_size}, "
@@ -105,6 +112,16 @@ def main():
     transformer.norm.train()
     decoder.train()
 
+    if args.compile:
+        # Compile the actual invoked submodule (encoder_model.model.encoder.transformer),
+        # not encoder_model itself - get_encoder_representation_partial calls the transformer
+        # submodule directly, bypassing encoder_model's own forward(), so compiling the outer
+        # wrapper would silently do nothing.
+        log_msg(f"Compiling encoder transformer and decoder (mode={args.compile_mode})...")
+        encoder_model.model.encoder.transformer = torch.compile(
+            encoder_model.model.encoder.transformer, mode=args.compile_mode)
+        decoder = torch.compile(decoder, mode=args.compile_mode)
+
     def training_step(batch_imgs, batch_masks):
         optimizer.zero_grad()
         with torch.cuda.amp.autocast():
@@ -123,6 +140,19 @@ def main():
         torch.nn.utils.clip_grad_norm_(clip_params, max_norm=1.0)
         scaler.step(optimizer)
         scaler.update()
+
+    # 2b. Compile warmup — torch.compile's first call(s) trigger actual tracing/compilation,
+    # which is slow and one-time. Must fully settle here, outside the profiler, or that
+    # compilation cost would contaminate the profiled numbers instead of steady-state execution.
+    if args.compile:
+        import time
+        compile_start = time.time()
+        for i in range(8):
+            imgs, masks = cached_batches[i % len(cached_batches)]
+            training_step(imgs, masks)
+        torch.cuda.synchronize()
+        log_msg(f"Compile warmup done in {time.time() - compile_start:.1f}s "
+                f"(one-time cost, excluded from the profiled numbers below).")
 
     # 3. Profile — wait=1 (skip entirely), warmup=1 (measured but discarded), active=3 (recorded).
     prof_schedule = schedule(wait=1, warmup=1, active=3, repeat=1)
