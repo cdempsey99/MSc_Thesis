@@ -7,6 +7,30 @@ import time
 from datetime import datetime
 
 
+def _bn_snapshot(module):
+    """Per-channel running_mean/running_var for every BatchNorm2d in module — cheap to clone every batch."""
+    return {name: (m.running_mean.clone(), m.running_var.clone())
+            for name, m in module.named_modules() if isinstance(m, torch.nn.BatchNorm2d)}
+
+
+def _bn_restore(module, snapshot):
+    """Undo a forward pass's BatchNorm running-stat update after a non-finite loss.
+
+    Unlike the AMP/GradScaler-protected reBEN/SAR pipelines, this training loop has no GradScaler
+    at all — a non-finite loss would otherwise flow straight through backward()/optimizer.step()
+    and permanently corrupt the decoder's weights, not just BatchNorm running stats (confirmed as
+    the actual failure mode in the AS3/AS4 80-epoch extension crashes, 27/09). Skipping the batch
+    (via the isfinite check at the call site) already prevents that; this additionally reverts the
+    one persistent side effect a forward pass leaves behind regardless of whether backward ever
+    runs — running_mean/running_var update unconditionally in train mode.
+    """
+    for name, m in module.named_modules():
+        if isinstance(m, torch.nn.BatchNorm2d) and name in snapshot:
+            mean, var = snapshot[name]
+            m.running_mean.copy_(mean)
+            m.running_var.copy_(var)
+
+
 def _ensemble_forward(decoder_model, features, bottleneck=None):
     """Runs the M-head ensemble forward pass. With a bottleneck, each head samples from
     its own per-head distribution. The student always trains on the raw encoder features
@@ -156,6 +180,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         epoch_kl_loss = 0
         epoch_std_loss = 0
         epoch_student_loss = 0.0
+        n_valid_batches = n_steps  # overridden below for the non-bagged path, where batches can be skipped
         student_T = get_temperature(epoch - student_warmup_epochs, num_epochs - student_warmup_epochs, student_T_start) \
             if (student_model is not None and epoch >= student_warmup_epochs) else None
 
@@ -206,10 +231,14 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
             log_msg(f"  [bagging timing] epoch {epoch}: avg fetch={fetch_time_sum / step:.2f}s/step, "
                     f"avg compute={compute_time_sum / step:.2f}s/step ({step} steps)")
         else:
+            n_valid_batches = 0
+            n_skipped_batches = 0
             for features, targets in train_loader:
                 optimizer.zero_grad()
                 features = features.to(DEVICE)
                 targets = targets.to(DEVICE).long()
+
+                bn_snapshot = _bn_snapshot(decoder_model)
 
                 all_preds, kl_loss, mean_std = _ensemble_forward(decoder_model, features, bottleneck)
 
@@ -253,6 +282,18 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                     + lam_orth * div_loss_orth \
                     + lam_kl * kl_loss
 
+                if not torch.isfinite(total_loss):
+                    _bn_restore(decoder_model, bn_snapshot)
+                    n_skipped_batches += 1
+                    log_msg(f"WARNING: non-finite loss at epoch {epoch+1} — task="
+                            f"{task_loss.item() if torch.is_tensor(task_loss) else task_loss:.4f}, jsd="
+                            f"{div_loss_jsd.item() if torch.is_tensor(div_loss_jsd) else div_loss_jsd:.4f}. "
+                            f"Skipping this batch's backward/optimizer step and rolling back decoder "
+                            f"BatchNorm running stats to their pre-batch snapshot (this is the only "
+                            f"state a single bad batch can otherwise permanently corrupt, since this "
+                            f"training loop has no GradScaler to protect the weights themselves).")
+                    continue
+
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(decoder_model.parameters(), max_norm=1.0)
                 if bottleneck is not None:
@@ -269,16 +310,23 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                 epoch_orth_loss += div_loss_orth.item() if torch.is_tensor(div_loss_orth) else div_loss_orth
                 epoch_kl_loss += kl_loss.item() if torch.is_tensor(kl_loss) else kl_loss
                 epoch_std_loss += mean_std.item() if torch.is_tensor(mean_std) else mean_std
+                n_valid_batches += 1
+
+            if n_skipped_batches > 0:
+                log_msg(f"  Epoch {epoch+1}: skipped {n_skipped_batches}/{n_steps} batches this epoch due to non-finite loss.")
 
         #avg_task = epoch_task_loss / len(train_loader)
         #avg_div = epoch_div_loss / len(train_loader)
         #loss_history["train"].append(avg_task)
-        avg_task = epoch_task_loss / n_steps
-        avg_jsd = epoch_jsd_loss / n_steps
-        avg_pearson = epoch_pearson_loss / n_steps
-        avg_orth = epoch_orth_loss / n_steps
-        avg_kl = epoch_kl_loss / n_steps
-        avg_std = epoch_std_loss / n_steps
+        # Divide by n_valid_batches, not the fixed n_steps, so any batches skipped this epoch
+        # (non-finite loss guard, non-bagged path only) don't silently dilute the reported average.
+        avg_denom = max(n_valid_batches, 1)
+        avg_task = epoch_task_loss / avg_denom
+        avg_jsd = epoch_jsd_loss / avg_denom
+        avg_pearson = epoch_pearson_loss / avg_denom
+        avg_orth = epoch_orth_loss / avg_denom
+        avg_kl = epoch_kl_loss / avg_denom
+        avg_std = epoch_std_loss / avg_denom
 
         loss_history["train"].append(avg_task)
         if "jsd" in diversity_methods:
@@ -291,11 +339,11 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
             loss_history.setdefault("train_kl", []).append(avg_kl)
             loss_history.setdefault("train_bottleneck_std", []).append(avg_std)
         if student_model is not None and epoch >= student_warmup_epochs:
-            loss_history.setdefault("student_train", []).append(epoch_student_loss / len(train_loader))
+            loss_history.setdefault("student_train", []).append(epoch_student_loss / avg_denom)
 
         log_msg(f"Epoch [{epoch + 1}/{num_epochs}] - Task: {avg_task:.4f} | JSD: {avg_jsd:.4f} | Pearson: {avg_pearson:.4f} | Orth: {avg_orth:.4f} | KL: {avg_kl:.4f} | BottleneckStd: {avg_std:.4f}")
         if student_model is not None and epoch >= student_warmup_epochs:
-            log_msg(f"  Student EnDD train loss: {epoch_student_loss / len(train_loader):.4f} | T={student_T:.2f}")
+            log_msg(f"  Student EnDD train loss: {epoch_student_loss / avg_denom:.4f} | T={student_T:.2f}")
 
         """
         if val_loader is not None:
