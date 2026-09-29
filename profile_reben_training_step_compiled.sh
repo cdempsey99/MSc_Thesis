@@ -33,5 +33,5 @@ python3 -u profile_reben_training_step.py \
         --decoder_embed_dim 512 \
         --num_classes    20 \
         --compile \
-        --compile_mode   reduce-overhead \
+        --compile_mode   default \
         --trace_out      /home/users/c/callumdempsey/results/profiler_trace_batch16_compiled.json
