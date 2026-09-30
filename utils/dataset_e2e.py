@@ -271,11 +271,22 @@ class ReBENSARRawDataset(Dataset):
         # to get the on-disk scene folder, not just row/col as with the S2 patch_id.
         tile_id = "_".join(s1_name.split("_")[:-3])
 
+        # Prefer a pre-built combined VV+VH file (see combine_input_files_reben_sar.py) - one
+        # rasterio.open() instead of two. Falls back to the raw per-band files if it hasn't been
+        # built for this patch, so partial preprocessing coverage never breaks anything.
+        patch_dir = self.s1_root / tile_id / s1_name
+        stacked_path = patch_dir / f"{s1_name}_stacked.tif"
+        if stacked_path.exists():
+            with rasterio.open(stacked_path) as src:
+                raw_bands = list(src.read().astype(np.float32))  # band order = self.BANDS
+        else:
+            raw_bands = []
+            for band in self.BANDS:
+                with rasterio.open(patch_dir / f"{s1_name}_{band}.tif") as src:
+                    raw_bands.append(src.read(1).astype(np.float32))
+
         bands = []
-        for band in self.BANDS:
-            tif = self.s1_root / tile_id / s1_name / f"{s1_name}_{band}.tif"
-            with rasterio.open(tif) as src:
-                arr = src.read(1).astype(np.float32)
+        for band, arr in zip(self.BANDS, raw_bands):
             if self.despeckle:
                 arr = median_filter(arr, size=3)  # light speckle reduction, applied in dB before z-scoring
             if self.lee_filter_despeckle:
