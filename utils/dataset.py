@@ -160,9 +160,12 @@ class BakedFeatureDataset(Dataset):
             patches_per_image * (i + 1) for i in range(len(self.file_paths))
         ]
 
-        # Smart buffer
-        self._current_file_path = None
-        self._current_data = None
+        # Every file this worker has opened stays open (path -> mmapped dict). With shuffle=True
+        # consecutive patches come from random images, so the old one-file cache reopened a file
+        # on nearly every __getitem__. mmap=True means an open file costs almost no RAM - pages
+        # are only read in when a patch is indexed, and are clean file-backed pages the OS can drop.
+        # Starts empty, so each DataLoader worker builds its own cache after forking.
+        self._open_files = {}
 
     def __len__(self):
         return self.cumulative_sizes[-1] if self.cumulative_sizes else 0
@@ -176,12 +179,13 @@ class BakedFeatureDataset(Dataset):
 
         path = self.file_paths[file_idx]
 
-        if path != self._current_file_path:
-            self._current_file_path = path
-            self._current_data = torch.load(path, map_location="cpu", mmap=True)
+        data = self._open_files.get(path)
+        if data is None:
+            data = torch.load(path, map_location="cpu", mmap=True)
+            self._open_files[path] = data
 
-        features = self._current_data['features'][local_idx]
-        mask = self._current_data['masks'][local_idx]
+        features = data['features'][local_idx]
+        mask = data['masks'][local_idx]
 
         if self.augment:
             features, mask = random_augment(features, mask)
@@ -203,9 +207,10 @@ class FileLocalitySampler(Sampler):
     of shuffling individual patch indices across the whole flattened dataset the way
     DataLoader's default shuffle=True does.
 
-    BakedFeatureDataset caches exactly one file at a time (_current_file_path/_current_data,
-    reloaded via torch.load(mmap=True) whenever __getitem__ is asked for a patch from a
-    different file). Patch-level shuffling picks indices randomly across every file in the
+    [Written when BakedFeatureDataset cached exactly one file at a time, reloaded via
+    torch.load(mmap=True) whenever __getitem__ was asked for a patch from a different file.
+    It now keeps every opened file, so the reopen cost below no longer applies; the sampler
+    is kept so bagged runs stay reproducible.] Patch-level shuffling picks indices randomly across every file in the
     dataset, so with more than a handful of files, consecutive __getitem__ calls very likely
     land on different files - forcing a fresh mmap reopen almost every call. Keeping each
     file's patches contiguous in the iteration order lets that cache stay valid for an

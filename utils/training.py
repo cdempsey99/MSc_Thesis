@@ -211,6 +211,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
             if (student_model is not None and epoch >= student_warmup_epochs) else None
 
         decoder_model.train()
+        train_phase_start = time.perf_counter()
 
         if bagged_train_loaders is not None:
             # Each head trains on its own bootstrap-resampled batch this step - no shared
@@ -340,6 +341,11 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
             if n_skipped_batches > 0:
                 log_msg(f"  Epoch {epoch+1}: skipped {n_skipped_batches}/{n_steps} batches this epoch due to non-finite loss.")
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        train_phase_time = time.perf_counter() - train_phase_start
+        log_msg(f"Train phase: {train_phase_time:.1f}s | {train_phase_time / max(n_steps, 1):.4f} s/batch ({n_steps} batches)")
 
         #avg_task = epoch_task_loss / len(train_loader)
         #avg_div = epoch_div_loss / len(train_loader)

@@ -75,8 +75,13 @@ def run_training(args):
     test_ds = BakedFeatureDataset(test_files, augment=False)
     log_msg("All datasets initialised")
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
+    # persistent_workers keeps each worker (and its open-file cache) alive across epochs instead
+    # of respawning and reopening every file each epoch - only valid when num_workers > 0.
+    persistent = args.num_workers > 0
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+                              pin_memory=True, persistent_workers=persistent)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
+                            pin_memory=True, persistent_workers=persistent)
     test_loader = DataLoader(test_ds, batch_size=64, shuffle=False, num_workers=args.num_workers, pin_memory=True)
 
     # 3b. Per-head data bagging (--data_bagging): each head gets its own independent
