@@ -188,6 +188,7 @@ def train_e2e_reben(args):
     best_student_val_loss = float('inf')
 
     if args.resume:
+        resume_ckpt_epochs = {}
         decoder_ckpt = Path(args.resume_decoder_path) if args.resume_decoder_path else None
         encoder_ckpt = Path(args.resume_encoder_path) if args.resume_encoder_path else None
         if decoder_ckpt and decoder_ckpt.exists():
@@ -200,6 +201,13 @@ def train_e2e_reben(args):
             for g in optimizer.param_groups:
                 g['fused'] = True
             best_val_loss = ckpt.get('best_val_loss', float('inf'))
+            resume_ckpt_epochs['decoder'] = ckpt.get('epoch')
+            # ReduceLROnPlateau's memory (best val loss, epochs without improvement) and the AMP
+            # GradScaler's scale - both previously reset on resume. Missing in older checkpoints.
+            if ckpt.get('plateau_scheduler_state_dict') is not None:
+                plateau_scheduler.load_state_dict(ckpt['plateau_scheduler_state_dict'])
+            if ckpt.get('scaler_state_dict') is not None:
+                scaler.load_state_dict(ckpt['scaler_state_dict'])
             if bottleneck is not None:
                 if ckpt.get('bottleneck_state_dict') is not None:
                     bottleneck.load_state_dict(ckpt['bottleneck_state_dict'])
@@ -209,6 +217,7 @@ def train_e2e_reben(args):
         if encoder_ckpt and encoder_ckpt.exists():
             log_msg(f"Resuming encoder from {encoder_ckpt}...")
             enc_ckpt = torch.load(encoder_ckpt, map_location=DEVICE)
+            resume_ckpt_epochs['encoder'] = enc_ckpt.get('epoch')
             encoder_model.load_state_dict(enc_ckpt['encoder_state_dict'], strict=False)
         if student_model is not None and args.resume_student_path:
             student_ckpt_path = Path(args.resume_student_path)
@@ -221,9 +230,20 @@ def train_e2e_reben(args):
                     for g in student_optimizer.param_groups:
                         g['fused'] = True
                 best_student_val_loss = student_ckpt.get('best_student_val_loss', float('inf'))
+                resume_ckpt_epochs['student'] = student_ckpt.get('epoch')
+                if student_ckpt.get('scaler_state_dict') is not None:
+                    student_scaler.load_state_dict(student_ckpt['scaler_state_dict'])
             else:
                 log_msg(f"WARNING: --resume_student_path given but not found at {student_ckpt_path}, student starts fresh")
         start_epoch = args.resume_epoch
+        # --resume_epoch is typed by hand; every checkpoint records the epoch it was saved at.
+        # A mismatch means the wrong checkpoint (e.g. a 'best' instead of 'last', or another run's)
+        # - stop before training on it. Skipped when resume_epoch >= num_epochs (reeval-only).
+        if start_epoch < args.num_epochs:
+            mismatched = {k: v for k, v in resume_ckpt_epochs.items() if v is not None and v != start_epoch}
+            if mismatched:
+                raise ValueError(f"--resume_epoch {start_epoch} does not match the checkpoint(s) being "
+                                 f"resumed: {mismatched}. Check the resume paths / resume_epoch.")
         loss_path = os.path.join(runs_dir, f"{args.run_name}_loss_history.json")
         if os.path.exists(loss_path):
             with open(loss_path) as f:
@@ -428,6 +448,16 @@ def train_e2e_reben(args):
         loss_history["val"].append(avg_val_loss)
         log_msg(f"Validation Loss: {avg_val_loss:.8f}")
 
+        # Stepped here, before any checkpoint is written, so a saved checkpoint always carries the
+        # lr for the NEXT epoch - previously a plateau halving on a save epoch (every 5th) was
+        # written after the save and silently lost on resume. Same between-epoch timing as before.
+        if epoch < args.warmup_epochs:
+            warmup_scheduler.step()
+        else:
+            plateau_scheduler.step(avg_val_loss)
+        if student_scheduler is not None:
+            student_scheduler.step()
+
         if student_model is not None and epoch >= args.student_warmup_epochs:
             avg_student_val = student_val_loss / len(val_loader)
             loss_history.setdefault("student_val", []).append(avg_student_val)
@@ -453,6 +483,8 @@ def train_e2e_reben(args):
             save_checkpoint({'epoch': epoch + 1, 'model_state_dict': decoder.state_dict(),
                              'optimizer_state_dict': optimizer.state_dict(),
                              'best_val_loss': best_val_loss,
+                             'plateau_scheduler_state_dict': plateau_scheduler.state_dict(),
+                             'scaler_state_dict': scaler.state_dict(),
                              'bottleneck_state_dict': bottleneck.state_dict() if bottleneck is not None else None},
                             str(CHECKPOINT_DIR), filename=f"{run_name}_last_decoder.pth")
             save_checkpoint({'epoch': epoch + 1, 'encoder_state_dict': encoder_model.state_dict()},
@@ -460,18 +492,13 @@ def train_e2e_reben(args):
             if student_model is not None:
                 save_checkpoint({'epoch': epoch + 1, 'model_state_dict': student_model.state_dict(),
                                  'optimizer_state_dict': student_optimizer.state_dict(),
-                                 'best_student_val_loss': best_student_val_loss},
+                                 'best_student_val_loss': best_student_val_loss,
+                                 'scaler_state_dict': student_scaler.state_dict()},
                                 str(CHECKPOINT_DIR), filename=f"{run_name}_last_student.pth")
             loss_path = os.path.join(runs_dir, f"{run_name}_loss_history.json")
             with open(loss_path, "w") as f:
                 json.dump(loss_history, f, indent=2)
 
-        if epoch < args.warmup_epochs:
-            warmup_scheduler.step()
-        else:
-            plateau_scheduler.step(avg_val_loss)
-        if student_scheduler is not None:
-            student_scheduler.step()
 
     record_compute_cost(flops_profile, epochs_completed=args.num_epochs - compute_start_epoch,
                         batches_per_epoch=len(train_loader), start_time=training_start_time,
