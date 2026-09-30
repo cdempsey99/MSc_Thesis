@@ -49,28 +49,49 @@ def _ensemble_forward(decoder_model, features, bottleneck=None):
         return decoder_model(features), zero, zero
 
 
-def student_step(student_model, student_optimizer, features, teacher_logits_detached, temperature=1.0):
-    """Single batch update for the AS4 student. Teacher logits must already be detached."""
+def student_step(student_model, student_optimizer, features, teacher_logits_detached, temperature=1.0,
+                 scaler=None, use_amp=False):
+    """Single batch update for the AS4 student. Teacher logits must already be detached.
+    With use_amp, the student's forward runs under fp16 autocast and the EnDD loss is computed in
+    fp32 (same split as train_e2e_reben.py); scaler must then be the student's own GradScaler."""
     student_optimizer.zero_grad()
-    alphas = student_model(features)
-    loss = endd_loss(alphas, teacher_logits_detached, temperature=temperature)
-    loss.backward()
-    torch.nn.utils.clip_grad_norm_(student_model.parameters(), max_norm=1.0)
-    student_optimizer.step()
+    with torch.autocast('cuda', dtype=torch.float16, enabled=use_amp):
+        alphas = student_model(features)
+    loss = endd_loss(alphas.float(), teacher_logits_detached.float(), temperature=temperature)
+    if scaler is not None:
+        scaler.scale(loss).backward()
+        scaler.unscale_(student_optimizer)
+        torch.nn.utils.clip_grad_norm_(student_model.parameters(), max_norm=1.0)
+        scaler.step(student_optimizer)
+        scaler.update()
+    else:
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(student_model.parameters(), max_norm=1.0)
+        student_optimizer.step()
     return loss.item()
 
 
-def student_val_epoch(student_model, teacher_model, val_loader, temperature=1.0, bottleneck=None):
+def student_val_epoch(student_model, teacher_model, val_loader, temperature=1.0, bottleneck=None, use_amp=False):
     """Compute student EnDD loss on the validation set."""
     student_model.eval()
     total_loss = 0.0
     with torch.no_grad():
         for features, _ in val_loader:
             features = features.to(DEVICE)
-            teacher_logits, _, _ = _ensemble_forward(teacher_model, features, bottleneck)
-            alphas = student_model(features)
-            total_loss += endd_loss(alphas, teacher_logits, temperature=temperature).item()
+            with torch.autocast('cuda', dtype=torch.float16, enabled=use_amp):
+                teacher_logits, _, _ = _ensemble_forward(teacher_model, features, bottleneck)
+                alphas = student_model(features)
+            total_loss += endd_loss(alphas.float(), teacher_logits.float(), temperature=temperature).item()
     return total_loss / len(val_loader)
+
+
+def _to_224(x):
+    """Upsample logits to the 224x224 label resolution - skipped when they're already there.
+    Every current decoder head already ends in its own upsample to 224x224, so the call here
+    used to be a same-size bilinear pass (an exact copy, but 11 full-resolution copies per batch)."""
+    if x.shape[-2:] == (224, 224):
+        return x
+    return F.interpolate(x, size=(224, 224), mode='bilinear', align_corners=False)
 
 
 def _restart_cosine(optimizer, base_lrs, n_epochs):
@@ -130,6 +151,16 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
     student_T_start = input_dict.get("student_T_start", 4.0)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
 
+    # Mixed precision (--amp): forward passes under fp16 autocast so the heads' convolutions run on
+    # tensor cores; losses/softmax stay fp32 (autocast's own rules, plus explicit .float() for the
+    # diversity and EnDD losses as in the reBEN/SAR scripts); fp32 master weights. GradScalers guard
+    # fp16 gradients against underflow. With amp off these are disabled no-ops, i.e. plain fp32.
+    use_amp = bool(input_dict.get("amp", False))
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+    student_scaler = torch.amp.GradScaler('cuda', enabled=use_amp) if student_model is not None else None
+    if use_amp:
+        log_msg("Mixed precision (fp16 autocast + GradScaler) enabled")
+
     loss_history = {"train": [], "val": []}
 
     # Build checkpoint path
@@ -167,6 +198,12 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                     f"over epochs {start_epoch + 1}-{num_epochs} (lr={optimizer.param_groups[0]['lr']:.2e} -> 1e-06)")
         best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         best_student_val_loss = checkpoint.get('best_student_val_loss', float('inf'))
+        # Only present in checkpoints saved by an --amp run; a fp32 checkpoint resumed with --amp
+        # simply starts the scaler at its default scale (it recalibrates within a few steps).
+        if use_amp and checkpoint.get('scaler_state_dict'):
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        if use_amp and student_scaler is not None and checkpoint.get('student_scaler_state_dict'):
+            student_scaler.load_state_dict(checkpoint['student_scaler_state_dict'])
         if bottleneck is not None and checkpoint.get('bottleneck_state_dict') is not None:
             bottleneck.load_state_dict(checkpoint['bottleneck_state_dict'])
             log_msg("--> Resumed VariationalBottleneck weights")
@@ -250,14 +287,16 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                 for head_idx, (features_m, targets_m) in enumerate(batches):
                     features_m = features_m.to(DEVICE)
                     targets_m = targets_m.to(DEVICE).long()
-                    head_high_res = F.interpolate(decoder_model.heads[head_idx](features_m), size=(224, 224),
-                                                  mode='bilinear', align_corners=False)
-                    total_task_loss += criterion(head_high_res, targets_m)
+                    with torch.autocast('cuda', dtype=torch.float16, enabled=use_amp):
+                        head_high_res = _to_224(decoder_model.heads[head_idx](features_m))
+                        total_task_loss += criterion(head_high_res, targets_m)
                 task_loss = total_task_loss / decoder_model.M
 
-                task_loss.backward()
+                scaler.scale(task_loss).backward()
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(decoder_model.parameters(), max_norm=1.0)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 compute_time_sum += time.time() - compute_start
 
                 epoch_task_loss += task_loss.item()
@@ -274,18 +313,22 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
                 bn_snapshot = _bn_snapshot(decoder_model)
 
-                all_preds, kl_loss, mean_std = _ensemble_forward(decoder_model, features, bottleneck)
+                with torch.autocast('cuda', dtype=torch.float16, enabled=use_amp):
+                    all_preds, kl_loss, mean_std = _ensemble_forward(decoder_model, features, bottleneck)
 
-                total_task_loss = 0
-                for head_idx in range(decoder_model.M):
-                    head_high_res = F.interpolate(all_preds[head_idx], size=(224, 224),
-                                                  mode='bilinear', align_corners=False)
-                    total_task_loss += criterion(head_high_res, targets)
+                    # FocalLoss is built on F.cross_entropy, which autocast always runs in fp32
+                    total_task_loss = 0
+                    for head_idx in range(decoder_model.M):
+                        head_high_res = _to_224(all_preds[head_idx])
+                        total_task_loss += criterion(head_high_res, targets)
 
-                mean_logits_low = all_preds.mean(dim=0)
-                mean_logits_high = F.interpolate(mean_logits_low, size=(224, 224), mode='bilinear')
-                total_task_loss += criterion(mean_logits_high, targets)
-                task_loss = total_task_loss / (decoder_model.M + 1)
+                    mean_logits_low = all_preds.mean(dim=0)
+                    mean_logits_high = _to_224(mean_logits_low)
+                    total_task_loss += criterion(mean_logits_high, targets)
+                    task_loss = total_task_loss / (decoder_model.M + 1)
+                # Diversity losses below are computed outside autocast on fp32 logits - they compare
+                # small differences between heads' probabilities, where fp16 rounding would matter.
+                all_preds = all_preds.float()
 
                 #div_loss = 0
                 #if enforce_diversity:
@@ -324,19 +367,21 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                             f"{div_loss_jsd.item() if torch.is_tensor(div_loss_jsd) else div_loss_jsd:.4f}. "
                             f"Skipping this batch's backward/optimizer step and rolling back decoder "
                             f"BatchNorm running stats to their pre-batch snapshot (this is the only "
-                            f"state a single bad batch can otherwise permanently corrupt, since this "
-                            f"training loop has no GradScaler to protect the weights themselves).")
+                            f"state a single bad batch can otherwise permanently corrupt - without --amp "
+                            f"there is no GradScaler to protect the weights themselves).")
                     continue
 
-                total_loss.backward()
+                scaler.scale(total_loss).backward()
+                scaler.unscale_(optimizer)  # clip on the true (unscaled) gradients; covers the bottleneck too (same optimizer)
                 torch.nn.utils.clip_grad_norm_(decoder_model.parameters(), max_norm=1.0)
                 if bottleneck is not None:
                     torch.nn.utils.clip_grad_norm_(bottleneck.parameters(), max_norm=1.0)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
 
                 if student_model is not None and epoch >= student_warmup_epochs:
                     epoch_student_loss += student_step(student_model, student_optimizer, features.detach(), all_preds.detach(),
-                                                       temperature=student_T)
+                                                       temperature=student_T, scaler=student_scaler, use_amp=use_amp)
 
                 epoch_task_loss += task_loss.item() if torch.is_tensor(task_loss) else task_loss
                 epoch_jsd_loss += div_loss_jsd.item() if torch.is_tensor(div_loss_jsd) else div_loss_jsd
@@ -394,7 +439,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                     v_targets = v_targets.to(DEVICE).long()
                     all_preds = decoder_model(v_features)
                     mean_logits_low = all_preds.mean(dim=0)
-                    mean_logits_high = F.interpolate(mean_logits_low, size=(224, 224), mode='bilinear')
+                    mean_logits_high = _to_224(mean_logits_low)
                     v_loss = criterion(mean_logits_high, v_targets)
                     val_task_loss += v_loss.item()
 
@@ -410,17 +455,17 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                 for v_features, v_targets in val_loader:
                     v_features = v_features.to(DEVICE)
                     v_targets = v_targets.to(DEVICE).long()
-                    all_preds, _, _ = _ensemble_forward(decoder_model, v_features, bottleneck)
+                    with torch.autocast('cuda', dtype=torch.float16, enabled=use_amp):
+                        all_preds, _, _ = _ensemble_forward(decoder_model, v_features, bottleneck)
 
-                    total_val_loss = 0
-                    for head_idx in range(decoder_model.M):
-                        head_high = F.interpolate(all_preds[head_idx], size=(224, 224),
-                                                  mode='bilinear', align_corners=False)
-                        total_val_loss += criterion(head_high, v_targets)
-                    mean_logits_low = all_preds.mean(dim=0)
-                    mean_logits_high = F.interpolate(mean_logits_low, size=(224, 224), mode='bilinear')
-                    total_val_loss += criterion(mean_logits_high, v_targets)
-                    v_loss = total_val_loss / (decoder_model.M + 1)
+                        total_val_loss = 0
+                        for head_idx in range(decoder_model.M):
+                            head_high = _to_224(all_preds[head_idx])
+                            total_val_loss += criterion(head_high, v_targets)
+                        mean_logits_low = all_preds.mean(dim=0)
+                        mean_logits_high = _to_224(mean_logits_low)
+                        total_val_loss += criterion(mean_logits_high, v_targets)
+                        v_loss = total_val_loss / (decoder_model.M + 1)
 
                     val_task_loss += v_loss.item()
             avg_val_loss = val_task_loss / len(val_loader)
@@ -441,7 +486,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
             if student_model is not None and epoch >= student_warmup_epochs:
                 avg_student_val = student_val_epoch(student_model, decoder_model, val_loader, temperature=student_T,
-                                                     bottleneck=bottleneck)
+                                                     bottleneck=bottleneck, use_amp=use_amp)
                 loss_history.setdefault("student_val", []).append(avg_student_val)
                 log_msg(f"  Student Val Loss: {avg_student_val:.6f}")
                 if avg_student_val < best_student_val_loss:
@@ -473,6 +518,8 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                 'student_model_state_dict': student_model.state_dict() if student_model is not None else None,
                 'student_optimizer_state_dict': student_optimizer.state_dict() if student_optimizer is not None else None,
                 'student_scheduler_state_dict': student_scheduler.state_dict() if student_scheduler is not None else None,
+                'scaler_state_dict': scaler.state_dict(),
+                'student_scaler_state_dict': student_scaler.state_dict() if student_scaler is not None else None,
             }
             save_checkpoint(current_state, str(CHECKPOINT_DIR),
                             filename=f"{run_name}_last_checkpoint.pth")

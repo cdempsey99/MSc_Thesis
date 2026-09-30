@@ -19,6 +19,9 @@ from models.ensemble import VBEvalWrapper
 
 # Set Device
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Input shapes are fixed (28x28 embeddings, fixed batch size), so let cuDNN time its convolution
+# algorithms once and keep the fastest - FBP is GPU-bound on the decoder heads' 3x3 convs.
+torch.backends.cudnn.benchmark = True
 
 
 def run_training(args):
@@ -217,6 +220,12 @@ if __name__ == "__main__":
     parser.add_argument("--num_epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=0.0001)
     parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--amp", action="store_true",
+                        help="Mixed precision: decoder forward passes under fp16 autocast (tensor cores), "
+                             "losses in fp32, fp32 master weights, GradScaler - the same scheme the reBEN/SAR "
+                             "e2e scripts always use. FBP is GPU-bound on the heads' fp32 convolutions "
+                             "(30/09 QA: 4 vs 8 workers identical), so this is its main speed lever. Off by "
+                             "default = plain fp32 as in all FBP runs before 30/09.")
     parser.add_argument("--num_workers", type=int, default=4,
                         help="DataLoader worker processes. Left at the original default (4) since "
                              "nvidia-smi dmon on a live FBP job showed 99-100% SM utilization with no idle "
