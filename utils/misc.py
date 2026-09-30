@@ -381,10 +381,48 @@ def get_decoder_output_maps(trained_decoder_model, grid_features, save_name="hea
     return mean_probs, class_map, variance_map, total_entropy, mutual_info
 
 def get_temperature(epoch, num_epochs, T_start, T_end=1.0):
-    """Linear annealing from T_start down to T_end over training."""
+    """Linear annealing from T_start down to T_end over training, held at T_end afterwards.
+
+    The clamp matters for extended runs: callers pass the ORIGINAL run's schedule length as
+    num_epochs, so every added epoch stays at T_end (distilling the teacher's actual
+    distribution) instead of the schedule being re-stretched over the new length - which
+    previously bumped T from 1.0 back up to 1.77 at the start of the FBP AS4 60->80 extension."""
     if num_epochs <= 1:
         return T_end
+    epoch = min(epoch, num_epochs - 1)
     return T_start - (T_start - T_end) * epoch / (num_epochs - 1)
+
+
+def resume_student_cosine(optimizer, base_lrs, start_epoch, num_epochs, original_num_epochs=None, eta_min=1e-6):
+    """Rebuild the student's CosineAnnealingLR at the right position when resuming (reBEN/SAR
+    scripts, which don't checkpoint scheduler state).
+
+    Resets lr to its base value before stepping: CosineAnnealingLR's chainable form computes each
+    step from the CURRENT group['lr'], which optimizer.load_state_dict has already set to the
+    saved, already-decayed value - stepping start_epoch times from there applied the decay twice.
+
+    Extensions (original_num_epochs < num_epochs) follow the same rule as the FBP pipeline: an
+    explicit warm restart from base lr over the added epochs only, positioned correctly for
+    walltime resumes partway through the extension too."""
+    for group, lr in zip(optimizer.param_groups, base_lrs):
+        group['lr'] = lr
+        group['initial_lr'] = lr
+
+    extending = original_num_epochs is not None and original_num_epochs < num_epochs
+    if extending and start_epoch < original_num_epochs:
+        raise ValueError(f"Resuming at epoch {start_epoch} inside the original {original_num_epochs}-epoch "
+                         f"schedule while also extending to {num_epochs} is not supported - finish the "
+                         f"original run first, then extend from its final checkpoint.")
+    if extending:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=num_epochs - original_num_epochs, eta_min=eta_min)
+        n_steps = start_epoch - original_num_epochs
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=eta_min)
+        n_steps = start_epoch
+    for _ in range(n_steps):
+        scheduler.step()
+    return scheduler
 
 
 def fit_temperature(logits, targets, max_iter=50, lr=0.01):

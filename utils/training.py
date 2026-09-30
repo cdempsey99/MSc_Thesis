@@ -121,6 +121,9 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
     save_interval = 5
     decoder_model.to(DEVICE)
     start_epoch = 0
+    # Epoch the student's EnDD temperature finishes annealing at - the run's own num_epochs unless
+    # this is an extension, in which case it stays at the original run's end (T held at 1.0 after).
+    temperature_end_epoch = num_epochs
     best_val_loss = float('inf')
     best_student_val_loss = float('inf')
     student_warmup_epochs = input_dict.get("student_warmup_epochs", 10)
@@ -151,6 +154,10 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         saved_sched = checkpoint.get('scheduler_state_dict')
         saved_end = checkpoint.get('lr_schedule_end_epoch', saved_sched['T_max'] if saved_sched else None)
         extending = saved_end != num_epochs
+        # Carried forward from the checkpoint if an earlier extension already set it; otherwise the
+        # original schedule end is this checkpoint's own end. Unknown (very old checkpoint with no
+        # scheduler state) falls back to num_epochs, i.e. the previous behaviour.
+        temperature_end_epoch = min(checkpoint.get('temperature_end_epoch', saved_end or num_epochs), num_epochs)
         if not extending:
             scheduler.load_state_dict(saved_sched)
             log_msg(f"--> Resumed LR scheduler state (lr={optimizer.param_groups[0]['lr']:.2e})")
@@ -207,7 +214,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         epoch_std_loss = 0
         epoch_student_loss = 0.0
         n_valid_batches = n_steps  # overridden below for the non-bagged path, where batches can be skipped
-        student_T = get_temperature(epoch - student_warmup_epochs, num_epochs - student_warmup_epochs, student_T_start) \
+        student_T = get_temperature(epoch - student_warmup_epochs, temperature_end_epoch - student_warmup_epochs, student_T_start) \
             if (student_model is not None and epoch >= student_warmup_epochs) else None
 
         decoder_model.train()
@@ -459,6 +466,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'lr_schedule_end_epoch': num_epochs,
+                'temperature_end_epoch': temperature_end_epoch,
                 'best_val_loss': best_val_loss,
                 'best_student_val_loss': best_student_val_loss,
                 'bottleneck_state_dict': bottleneck.state_dict() if bottleneck is not None else None,

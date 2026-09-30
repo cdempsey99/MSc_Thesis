@@ -18,7 +18,7 @@ from rasterio.windows import Window
 
 from utils.misc import (log_msg, save_checkpoint, FocalLoss, js_divergence_loss, pearson_diversity_loss,
                         orthogonality_loss, evaluate_error_localization, ensemble_uncertainty_and_pred,
-                        endd_loss, get_temperature, dirichlet_uncertainty_and_pred,
+                        endd_loss, get_temperature, resume_student_cosine, dirichlet_uncertainty_and_pred,
                         _select_visualization_patches)
 from utils.dataset_e2e import load_reben_sar_splits, ReBENSARRawDataset
 S1_WAVES = ReBENSARRawDataset.WAVELENGTHS  # [3.5, 4.0] μm — Clay metadata.yaml nominal SAR values
@@ -117,6 +117,7 @@ def train_e2e_reben_sar(args):
         student_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             student_optimizer, T_max=args.num_epochs, eta_min=1e-6
         )
+        student_base_lrs = list(student_scheduler.base_lrs)  # captured before any checkpoint load overwrites lr
         student_scaler = torch.cuda.amp.GradScaler()
         log_msg("StudentHead instantiated for parallel AS4 training")
 
@@ -213,8 +214,10 @@ def train_e2e_reben_sar(args):
             for _ in range(start_epoch):
                 warmup_scheduler.step()
         if student_scheduler is not None:
-            for _ in range(start_epoch):
-                student_scheduler.step()
+            student_scheduler = resume_student_cosine(student_optimizer, student_base_lrs, start_epoch,
+                                                      args.num_epochs, args.original_num_epochs)
+            log_msg(f"Student LR schedule positioned at epoch {start_epoch} "
+                    f"(lr={student_optimizer.param_groups[0]['lr']:.2e})")
 
     if args.compile:
         # Same scope as train_e2e_reben.py: wrap the submodule get_encoder_representation_partial
@@ -246,7 +249,9 @@ def train_e2e_reben_sar(args):
         epoch_student_loss = torch.zeros((), device=DEVICE)
         n_valid_batches = 0
         n_skipped_batches = 0
-        student_T = get_temperature(epoch - args.student_warmup_epochs, args.num_epochs - args.student_warmup_epochs,
+        # Annealed over the ORIGINAL run's length and held at 1.0 for any extension epochs
+        temp_end = args.original_num_epochs or args.num_epochs
+        student_T = get_temperature(epoch - args.student_warmup_epochs, temp_end - args.student_warmup_epochs,
                                     args.student_T_start) \
             if (student_model is not None and epoch >= args.student_warmup_epochs) else None
 
@@ -1101,6 +1106,11 @@ if __name__ == "__main__":
     # AS4 in-parallel student
     parser.add_argument("--train_student", action="store_true", help="Train AS4 StudentHead in parallel with teacher ensemble")
     parser.add_argument("--student_warmup_epochs", type=int, default=10, help="Epochs to train teacher only before student starts updating")
+    parser.add_argument("--original_num_epochs", type=int, default=None,
+                        help="Set ONLY when extending a finished run to a larger --num_epochs: the run's "
+                             "original num_epochs. The student then gets a cosine warm restart over the "
+                             "added epochs and its EnDD temperature stays at 1.0 for them (same rule as "
+                             "the FBP pipeline). Keep passing it on walltime resumes of the extended run.")
     parser.add_argument("--student_T_start", type=float, default=4.0, help="Initial temperature for EnDD teacher softmax annealing, linearly anneals to 1.0 over the student's training window")
 
     # Resume
