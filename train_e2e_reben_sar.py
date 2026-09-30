@@ -78,12 +78,18 @@ def train_e2e_reben_sar(args):
         lee_filter_despeckle=args.lee_filter,
     )
 
+    # persistent_workers avoids respawning num_workers processes at the start of every epoch -
+    # only valid when num_workers > 0, so guarded rather than a bare True.
+    persistent = args.num_workers > 0
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
-                              shuffle=True, num_workers=args.num_workers, pin_memory=True)
+                              shuffle=True, num_workers=args.num_workers, pin_memory=True,
+                              persistent_workers=persistent)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size,
-                              shuffle=False, num_workers=args.num_workers, pin_memory=True)
+                              shuffle=False, num_workers=args.num_workers, pin_memory=True,
+                              persistent_workers=persistent)
     test_loader  = DataLoader(test_ds,  batch_size=args.batch_size,
-                              shuffle=False, num_workers=args.num_workers, pin_memory=True)
+                              shuffle=False, num_workers=args.num_workers, pin_memory=True,
+                              persistent_workers=persistent)
 
     # 2. Models
     log_msg(f"Initialising encoder with {args.n_unfrozen_blocks} unfrozen blocks...")
@@ -107,7 +113,7 @@ def train_e2e_reben_sar(args):
     if args.train_student:
         student_model = StudentHead(in_channels=1024, embed_dim=args.decoder_embed_dim, num_classes=args.num_classes)
         student_model.to(DEVICE)
-        student_optimizer = torch.optim.AdamW(student_model.parameters(), lr=args.lr_decoder, weight_decay=0.05)
+        student_optimizer = torch.optim.AdamW(student_model.parameters(), lr=args.lr_decoder, weight_decay=0.05, fused=True)
         student_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             student_optimizer, T_max=args.num_epochs, eta_min=1e-6
         )
@@ -135,10 +141,12 @@ def train_e2e_reben_sar(args):
 
     # 3. Optimiser with differential LRs
     trainable_enc = [p for p in encoder_model.parameters() if p.requires_grad]
+    # fused=True runs the whole AdamW update as a few multi-tensor CUDA kernels instead of a
+    # loop of small per-parameter kernels (see train_e2e_reben.py, profiled ~4.8ms/step unfused).
     optimizer = torch.optim.AdamW([
         {'params': trainable_enc,         'lr': args.lr_encoder, 'weight_decay': 0.01},
         {'params': decoder.parameters(),  'lr': args.lr_decoder, 'weight_decay': 0.05},
-    ])
+    ], fused=True)
 
     def warmup_lambda(epoch):
         return min(1.0, float(epoch + 1) / float(max(1, args.warmup_epochs)))
@@ -173,6 +181,10 @@ def train_e2e_reben_sar(args):
             ckpt = torch.load(decoder_ckpt, map_location=DEVICE)
             decoder.load_state_dict(ckpt['model_state_dict'])
             optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            # load_state_dict copies the saved param_group settings wholesale, including
+            # fused=None from pre-fused checkpoints - re-enable it so resumed runs keep the speedup.
+            for g in optimizer.param_groups:
+                g['fused'] = True
             best_val_loss = ckpt.get('best_val_loss', float('inf'))
         if encoder_ckpt and encoder_ckpt.exists():
             log_msg(f"Resuming encoder from {encoder_ckpt}...")
@@ -186,6 +198,8 @@ def train_e2e_reben_sar(args):
                 student_model.load_state_dict(student_ckpt['model_state_dict'])
                 if 'optimizer_state_dict' in student_ckpt:
                     student_optimizer.load_state_dict(student_ckpt['optimizer_state_dict'])
+                    for g in student_optimizer.param_groups:
+                        g['fused'] = True
                 best_student_val_loss = student_ckpt.get('best_student_val_loss', float('inf'))
             else:
                 log_msg(f"WARNING: --resume_student_path given but not found at {student_ckpt_path}, student starts fresh")
@@ -202,19 +216,34 @@ def train_e2e_reben_sar(args):
             for _ in range(start_epoch):
                 student_scheduler.step()
 
+    if args.compile:
+        # Same scope as train_e2e_reben.py: wrap the submodule get_encoder_representation_partial
+        # actually calls (not the outer encoder_model wrapper), after resume so the loaded weights
+        # are what gets compiled. Default mode only - reduce-overhead hung under torch.profiler.
+        # In-place nn.Module.compile(), not the torch.compile() wrapper - keeps state_dict keys
+        # free of the "_orig_mod." prefix so checkpoints stay loadable into uncompiled models.
+        log_msg("Compiling encoder transformer and decoder (mode=default)...")
+        encoder_model.model.encoder.transformer.compile()
+        decoder.compile()
+
     # 5. Training loop
     log_msg("Starting training...")
 
     compute_start_epoch = start_epoch
     training_start_time = start_compute_tracking()
 
+    # Built once rather than per batch - the trainable set doesn't change during training.
+    clip_params = [p for p in encoder_model.parameters() if p.requires_grad] + list(decoder.parameters())
+
     for epoch in range(start_epoch, args.num_epochs):
         log_msg(f"Starting epoch {epoch + 1}...")
-        epoch_task_loss = 0
-        epoch_jsd_loss = 0
-        epoch_pearson_loss = 0
-        epoch_orth_loss = 0
-        epoch_student_loss = 0.0
+        # Loss accumulators live on the GPU and are only .item()'d once per epoch - a per-batch
+        # .item() forces a CPU-GPU sync that stops the CPU queueing the next batch's kernels early.
+        epoch_task_loss = torch.zeros((), device=DEVICE)
+        epoch_jsd_loss = torch.zeros((), device=DEVICE)
+        epoch_pearson_loss = torch.zeros((), device=DEVICE)
+        epoch_orth_loss = torch.zeros((), device=DEVICE)
+        epoch_student_loss = torch.zeros((), device=DEVICE)
         n_valid_batches = 0
         n_skipped_batches = 0
         student_T = get_temperature(epoch - args.student_warmup_epochs, args.num_epochs - args.student_warmup_epochs,
@@ -228,10 +257,12 @@ def train_e2e_reben_sar(args):
         transformer.norm.train()
         decoder.train()
 
+        train_phase_start = time.perf_counter()
         for batch_imgs, batch_masks in train_loader:
             optimizer.zero_grad()
-            batch_imgs  = batch_imgs.to(DEVICE)
-            batch_masks = batch_masks.to(DEVICE).long()
+            # non_blocking lets the host->GPU copy overlap with compute (loaders use pin_memory=True)
+            batch_imgs  = batch_imgs.to(DEVICE, non_blocking=True)
+            batch_masks = batch_masks.to(DEVICE, non_blocking=True).long()
 
             bn_snapshot = _bn_snapshot(decoder)
 
@@ -274,11 +305,7 @@ def train_e2e_reben_sar(args):
 
             scaler.scale(total_loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(
-                [p for p in encoder_model.parameters() if p.requires_grad] +
-                list(decoder.parameters()),
-                max_norm=1.0
-            )
+            torch.nn.utils.clip_grad_norm_(clip_params, max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
 
@@ -293,18 +320,25 @@ def train_e2e_reben_sar(args):
                 torch.nn.utils.clip_grad_norm_(student_model.parameters(), max_norm=1.0)
                 student_scaler.step(student_optimizer)
                 student_scaler.update()
-                epoch_student_loss += d_loss.item()
+                epoch_student_loss += d_loss.detach()
 
-            epoch_task_loss += task_loss.item()
-            epoch_jsd_loss += div_loss_jsd.item() if torch.is_tensor(div_loss_jsd) else div_loss_jsd
-            epoch_pearson_loss += div_loss_pearson.item() if torch.is_tensor(div_loss_pearson) else div_loss_pearson
-            epoch_orth_loss += div_loss_orth.item() if torch.is_tensor(div_loss_orth) else div_loss_orth
+            epoch_task_loss += task_loss.detach()
+            epoch_jsd_loss += div_loss_jsd.detach()
+            epoch_pearson_loss += div_loss_pearson.detach()
+            epoch_orth_loss += div_loss_orth.detach()
             n_valid_batches += 1
 
-        avg_task = epoch_task_loss / max(n_valid_batches, 1)
-        avg_jsd = epoch_jsd_loss / max(n_valid_batches, 1)
-        avg_pearson = epoch_pearson_loss / max(n_valid_batches, 1)
-        avg_orth = epoch_orth_loss / max(n_valid_batches, 1)
+        torch.cuda.synchronize()
+        train_phase_time = time.perf_counter() - train_phase_start
+        n_train_batches = n_valid_batches + n_skipped_batches
+        log_msg(f"Train phase: {train_phase_time:.1f}s | {train_phase_time / max(n_train_batches, 1):.4f} s/batch | "
+                f"{train_phase_time / max(n_train_batches * args.batch_size, 1):.4f} s/patch")
+
+        avg_task = epoch_task_loss.item() / max(n_valid_batches, 1)
+        avg_jsd = epoch_jsd_loss.item() / max(n_valid_batches, 1)
+        avg_pearson = epoch_pearson_loss.item() / max(n_valid_batches, 1)
+        avg_orth = epoch_orth_loss.item() / max(n_valid_batches, 1)
+        epoch_student_loss = epoch_student_loss.item()
 
         loss_history["train"].append(avg_task)
         if "jsd" in args.diversity_methods:
@@ -1038,6 +1072,10 @@ if __name__ == "__main__":
     # Training
     parser.add_argument("--num_epochs",    type=int,   default=50)
     parser.add_argument("--batch_size",    type=int,   default=16)
+    parser.add_argument("--compile", action="store_true",
+                        help="Wrap the encoder transformer and decoder in torch.compile(), as in "
+                             "train_e2e_reben.py. Measured (30/09) at only ~5%% on reBEN optical once "
+                             "data loading was fixed - optional, not required for the main speedup.")
     parser.add_argument("--num_workers",   type=int,   default=8,
                         help="DataLoader worker processes for train/val/test loaders. Default raised to 8 "
                              "(from the old hardcoded 4) to match this pipeline's raw per-patch loading "

@@ -243,9 +243,13 @@ def train_e2e_reben(args):
         # loaded weights, not compile-then-load. Default mode only - reduce-overhead (CUDA
         # graphs) hangs when combined with torch.profiler and was never re-tested without it,
         # so not used here without further verification.
+        # nn.Module.compile() compiles in place rather than returning a torch.compile wrapper -
+        # the wrapper prefixes every state_dict key with "_orig_mod.", which made checkpoints from
+        # compiled runs unloadable into uncompiled models (the encoder's strict=False load would
+        # even skip the fine-tuned transformer weights silently).
         log_msg("Compiling encoder transformer and decoder (mode=default)...")
-        encoder_model.model.encoder.transformer = torch.compile(encoder_model.model.encoder.transformer)
-        decoder = torch.compile(decoder)
+        encoder_model.model.encoder.transformer.compile()
+        decoder.compile()
 
     # 5. Training loop
     log_msg("Starting training...")
