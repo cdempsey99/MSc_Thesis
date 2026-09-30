@@ -122,7 +122,7 @@ def train_e2e_reben(args):
     if args.train_student:
         student_model = StudentHead(in_channels=1024, embed_dim=args.decoder_embed_dim, num_classes=args.num_classes)
         student_model.to(DEVICE)
-        student_optimizer = torch.optim.AdamW(student_model.parameters(), lr=args.lr_decoder, weight_decay=0.05)
+        student_optimizer = torch.optim.AdamW(student_model.parameters(), lr=args.lr_decoder, weight_decay=0.05, fused=True)
         student_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             student_optimizer, T_max=args.num_epochs, eta_min=1e-6
         )
@@ -157,7 +157,9 @@ def train_e2e_reben(args):
     ]
     if bottleneck is not None:
         optimizer_param_groups.append({'params': bottleneck.parameters(), 'lr': args.lr_decoder, 'weight_decay': 0.05})
-    optimizer = torch.optim.AdamW(optimizer_param_groups)
+    # fused=True runs the whole AdamW update as a few multi-tensor CUDA kernels instead of a
+    # loop of small per-parameter kernels (profiled ~4.8ms/step on the unfused version).
+    optimizer = torch.optim.AdamW(optimizer_param_groups, fused=True)
 
     def warmup_lambda(epoch):
         return min(1.0, float(epoch + 1) / float(max(1, args.warmup_epochs)))
@@ -192,6 +194,10 @@ def train_e2e_reben(args):
             ckpt = torch.load(decoder_ckpt, map_location=DEVICE)
             decoder.load_state_dict(ckpt['model_state_dict'])
             optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            # load_state_dict copies the saved param_group settings wholesale, including
+            # fused=None from pre-fused checkpoints - re-enable it so resumed runs keep the speedup.
+            for g in optimizer.param_groups:
+                g['fused'] = True
             best_val_loss = ckpt.get('best_val_loss', float('inf'))
             if bottleneck is not None:
                 if ckpt.get('bottleneck_state_dict') is not None:
@@ -211,6 +217,8 @@ def train_e2e_reben(args):
                 student_model.load_state_dict(student_ckpt['model_state_dict'])
                 if 'optimizer_state_dict' in student_ckpt:
                     student_optimizer.load_state_dict(student_ckpt['optimizer_state_dict'])
+                    for g in student_optimizer.param_groups:
+                        g['fused'] = True
                 best_student_val_loss = student_ckpt.get('best_student_val_loss', float('inf'))
             else:
                 log_msg(f"WARNING: --resume_student_path given but not found at {student_ckpt_path}, student starts fresh")
@@ -245,13 +253,20 @@ def train_e2e_reben(args):
     compute_start_epoch = start_epoch
     training_start_time = start_compute_tracking()
 
+    # Built once rather than per batch - the trainable set doesn't change during training.
+    clip_params = [p for p in encoder_model.parameters() if p.requires_grad] + list(decoder.parameters())
+    if bottleneck is not None:
+        clip_params += list(bottleneck.parameters())
+
     for epoch in range(start_epoch, args.num_epochs):
         log_msg(f"Starting epoch {epoch + 1}...")
-        epoch_task_loss = 0
-        epoch_jsd_loss = 0
-        epoch_pearson_loss = 0
-        epoch_orth_loss = 0
-        epoch_student_loss = 0.0
+        # Loss accumulators live on the GPU and are only .item()'d once per epoch - a per-batch
+        # .item() forces a CPU-GPU sync that stops the CPU queueing the next batch's kernels early.
+        epoch_task_loss = torch.zeros((), device=DEVICE)
+        epoch_jsd_loss = torch.zeros((), device=DEVICE)
+        epoch_pearson_loss = torch.zeros((), device=DEVICE)
+        epoch_orth_loss = torch.zeros((), device=DEVICE)
+        epoch_student_loss = torch.zeros((), device=DEVICE)
         n_valid_batches = 0
         n_skipped_batches = 0
         student_T = get_temperature(epoch - args.student_warmup_epochs, args.num_epochs - args.student_warmup_epochs,
@@ -267,10 +282,12 @@ def train_e2e_reben(args):
         if bottleneck is not None:
             bottleneck.train()
 
+        train_phase_start = time.perf_counter()
         for batch_imgs, batch_masks in train_loader:
             optimizer.zero_grad()
-            batch_imgs  = batch_imgs.to(DEVICE)
-            batch_masks = batch_masks.to(DEVICE).long()
+            # non_blocking lets the host->GPU copy overlap with compute (loaders use pin_memory=True)
+            batch_imgs  = batch_imgs.to(DEVICE, non_blocking=True)
+            batch_masks = batch_masks.to(DEVICE, non_blocking=True).long()
 
             bn_snapshot = _bn_snapshot(decoder)
 
@@ -314,9 +331,6 @@ def train_e2e_reben(args):
 
             scaler.scale(total_loss).backward()
             scaler.unscale_(optimizer)
-            clip_params = [p for p in encoder_model.parameters() if p.requires_grad] + list(decoder.parameters())
-            if bottleneck is not None:
-                clip_params += list(bottleneck.parameters())
             torch.nn.utils.clip_grad_norm_(clip_params, max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
@@ -332,18 +346,25 @@ def train_e2e_reben(args):
                 torch.nn.utils.clip_grad_norm_(student_model.parameters(), max_norm=1.0)
                 student_scaler.step(student_optimizer)
                 student_scaler.update()
-                epoch_student_loss += d_loss.item()
+                epoch_student_loss += d_loss.detach()
 
-            epoch_task_loss += task_loss.item()
-            epoch_jsd_loss += div_loss_jsd.item() if torch.is_tensor(div_loss_jsd) else div_loss_jsd
-            epoch_pearson_loss += div_loss_pearson.item() if torch.is_tensor(div_loss_pearson) else div_loss_pearson
-            epoch_orth_loss += div_loss_orth.item() if torch.is_tensor(div_loss_orth) else div_loss_orth
+            epoch_task_loss += task_loss.detach()
+            epoch_jsd_loss += div_loss_jsd.detach()
+            epoch_pearson_loss += div_loss_pearson.detach()
+            epoch_orth_loss += div_loss_orth.detach()
             n_valid_batches += 1
 
-        avg_task = epoch_task_loss / max(n_valid_batches, 1)
-        avg_jsd = epoch_jsd_loss / max(n_valid_batches, 1)
-        avg_pearson = epoch_pearson_loss / max(n_valid_batches, 1)
-        avg_orth = epoch_orth_loss / max(n_valid_batches, 1)
+        torch.cuda.synchronize()
+        train_phase_time = time.perf_counter() - train_phase_start
+        n_train_batches = n_valid_batches + n_skipped_batches
+        log_msg(f"Train phase: {train_phase_time:.1f}s | {train_phase_time / max(n_train_batches, 1):.4f} s/batch | "
+                f"{train_phase_time / max(n_train_batches * args.batch_size, 1):.4f} s/patch")
+
+        avg_task = epoch_task_loss.item() / max(n_valid_batches, 1)
+        avg_jsd = epoch_jsd_loss.item() / max(n_valid_batches, 1)
+        avg_pearson = epoch_pearson_loss.item() / max(n_valid_batches, 1)
+        avg_orth = epoch_orth_loss.item() / max(n_valid_batches, 1)
+        epoch_student_loss = epoch_student_loss.item()
 
         loss_history["train"].append(avg_task)
         if "jsd" in args.diversity_methods:

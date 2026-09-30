@@ -73,6 +73,17 @@ def student_val_epoch(student_model, teacher_model, val_loader, temperature=1.0,
     return total_loss / len(val_loader)
 
 
+def _restart_cosine(optimizer, base_lrs, n_epochs):
+    """Fresh cosine schedule from base_lrs down to eta_min over n_epochs (an explicit SGDR-style
+    warm restart). optimizer.load_state_dict restores the old run's already-annealed lr (~1e-6),
+    and CosineAnnealingLR's chainable form starts from whatever group['lr'] is, so lr has to be
+    reset to the base value by hand or the new schedule would just sit at eta_min."""
+    for group, lr in zip(optimizer.param_groups, base_lrs):
+        group['lr'] = lr
+        group['initial_lr'] = lr
+    return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, n_epochs), eta_min=1e-6)
+
+
 def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, input_dict,
                 student_model=None, student_optimizer=None, student_scheduler=None, flops_profile=None,
                 bottleneck=None, bagged_train_loaders=None):
@@ -128,13 +139,25 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         log_msg(f"--> Resuming from {checkpoint_path}...")
         checkpoint = torch.load(checkpoint_path, map_location=DEVICE)
         decoder_model.load_state_dict(checkpoint['model_state_dict'])
+        base_lrs = list(scheduler.base_lrs)  # this run's configured lr, before the checkpoint overwrites it
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if checkpoint.get('scheduler_state_dict') is not None:
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        start_epoch = checkpoint['epoch']
+        # Only restore the saved schedule if it was aiming at the same final epoch as this run
+        # (a plain walltime resume). Restoring it into an extended run also restores the old
+        # T_max, and CosineAnnealingLR is periodic past T_max, so a 20->80 extension silently
+        # cycled lr back up to its peak (confirmed T_max=20 in the AS3 20ep checkpoint, 30/09).
+        # Checkpoints from before 'lr_schedule_end_epoch' was saved always started their
+        # schedule at epoch 0, so their T_max is their end epoch.
+        saved_sched = checkpoint.get('scheduler_state_dict')
+        saved_end = checkpoint.get('lr_schedule_end_epoch', saved_sched['T_max'] if saved_sched else None)
+        extending = saved_end != num_epochs
+        if not extending:
+            scheduler.load_state_dict(saved_sched)
             log_msg(f"--> Resumed LR scheduler state (lr={optimizer.param_groups[0]['lr']:.2e})")
         else:
-            log_msg(f"--> WARNING: checkpoint has no saved scheduler state — LR schedule restarting from epoch 0 (lr={optimizer.param_groups[0]['lr']:.2e})")
-        start_epoch = checkpoint['epoch']
+            scheduler = _restart_cosine(optimizer, base_lrs, num_epochs - start_epoch)
+            log_msg(f"--> Schedule end changed ({saved_end} -> {num_epochs}): warm-restarting cosine "
+                    f"over epochs {start_epoch + 1}-{num_epochs} (lr={optimizer.param_groups[0]['lr']:.2e} -> 1e-06)")
         best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         best_student_val_loss = checkpoint.get('best_student_val_loss', float('inf'))
         if bottleneck is not None and checkpoint.get('bottleneck_state_dict') is not None:
@@ -143,8 +166,11 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         if student_model is not None:
             if checkpoint.get('student_model_state_dict') is not None:
                 student_model.load_state_dict(checkpoint['student_model_state_dict'])
+                student_base_lrs = list(student_scheduler.base_lrs)
                 student_optimizer.load_state_dict(checkpoint['student_optimizer_state_dict'])
-                if checkpoint.get('student_scheduler_state_dict') is not None:
+                if extending or checkpoint.get('student_scheduler_state_dict') is None:
+                    student_scheduler = _restart_cosine(student_optimizer, student_base_lrs, num_epochs - start_epoch)
+                else:
                     student_scheduler.load_state_dict(checkpoint['student_scheduler_state_dict'])
                 log_msg("--> Resumed StudentHead weights")
             else:
@@ -413,6 +439,12 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                     )
                     log_msg(f"  New best student val loss {best_student_val_loss:.6f} — saved")
 
+        # Stepped before the periodic save so the saved scheduler state matches the saved 'epoch'
+        # (previously saved one step behind, so every walltime resume repeated one epoch's lr).
+        scheduler.step()
+        if student_scheduler is not None:
+            student_scheduler.step()
+
         if (epoch + 1) % save_interval == 0:
             log_msg(f"Periodic save at epoch {epoch + 1}")
             current_state = {
@@ -420,6 +452,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                 'model_state_dict': decoder_model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
+                'lr_schedule_end_epoch': num_epochs,
                 'best_val_loss': best_val_loss,
                 'best_student_val_loss': best_student_val_loss,
                 'bottleneck_state_dict': bottleneck.state_dict() if bottleneck is not None else None,
@@ -432,10 +465,6 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
             loss_path = os.path.join(runs_dir, f"{run_name}_loss_history.json")
             with open(loss_path, "w") as f:
                 json.dump(loss_history, f, indent=2)
-
-        scheduler.step()
-        if student_scheduler is not None:
-            student_scheduler.step()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     final_state = {
