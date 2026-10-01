@@ -38,6 +38,20 @@ from profile_flops import ensure_flops_profile, start_compute_tracking, record_c
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+class _WithIndex(torch.utils.data.Dataset):
+    """Wraps a dataset so each item also returns its index - needed by --head_mask_mode fixed to
+    look up a patch's permanent head assignment. Module-level so DataLoader workers can pickle it."""
+    def __init__(self, ds):
+        self.ds = ds
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, i):
+        img, mask = self.ds[i]
+        return img, mask, i
+
+
 def _bn_snapshot(module):
     """Per-channel running_mean/running_var for every BatchNorm2d in module — cheap to clone every batch."""
     return {name: (m.running_mean.clone(), m.running_var.clone())
@@ -80,9 +94,26 @@ def train_e2e_reben(args):
     # persistent_workers avoids respawning num_workers processes at the start of every epoch -
     # only valid when num_workers > 0, so guarded rather than a bare True.
     persistent = args.num_workers > 0
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size,
+    # Training loader also yields each patch's dataset index, used by --head_mask_mode fixed to
+    # give every patch a permanent head assignment. Val/test loaders are untouched.
+    train_loader = DataLoader(_WithIndex(train_ds), batch_size=args.batch_size,
                               shuffle=True, num_workers=args.num_workers, pin_memory=True,
                               persistent_workers=persistent)
+
+    # Per-head sample masks (Bootstrapped-DQN-style, Osband et al. 2016): each head's task loss only
+    # counts the patches its mask selects, so heads learn from different subsets despite sharing one
+    # encoder pass. p=1 (default) = every head trains on every patch, i.e. the original behaviour.
+    use_head_masks = args.head_mask_prob < 1.0
+    fixed_head_masks = None
+    if use_head_masks:
+        if args.head_mask_mode == "fixed":
+            g = torch.Generator().manual_seed(args.head_mask_seed)
+            fixed_head_masks = (torch.rand(len(train_ds), args.ensemble_size, generator=g)
+                                < args.head_mask_prob).to(DEVICE)  # [N, M], drawn once for the whole run
+        log_msg(f"Per-head sample masking: p={args.head_mask_prob}, mode={args.head_mask_mode} "
+                f"(each head trains on ~{args.head_mask_prob * args.batch_size:.0f} of {args.batch_size} patches per batch)")
+    if args.no_mean_logit_loss:
+        log_msg("Ensemble-mean (averaged-logit) task loss term disabled: per-head losses only")
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size,
                               shuffle=False, num_workers=args.num_workers, pin_memory=True,
                               persistent_workers=persistent)
@@ -312,7 +343,7 @@ def train_e2e_reben(args):
             bottleneck.train()
 
         train_phase_start = time.perf_counter()
-        for batch_imgs, batch_masks in train_loader:
+        for batch_imgs, batch_masks, batch_idx in train_loader:
             optimizer.zero_grad()
             # non_blocking lets the host->GPU copy overlap with compute (loaders use pin_memory=True)
             batch_imgs  = batch_imgs.to(DEVICE, non_blocking=True)
@@ -324,12 +355,27 @@ def train_e2e_reben(args):
                 features = get_encoder_representation_partial(batch_imgs, encoder_model, waves=S2_WAVES)
                 all_preds, kl_loss, mean_std = _ensemble_forward(decoder, features, bottleneck)
 
+                if use_head_masks:
+                    if fixed_head_masks is not None:
+                        head_masks = fixed_head_masks[batch_idx.to(DEVICE)].T  # [M, B]
+                    else:
+                        head_masks = torch.rand(decoder.M, batch_imgs.shape[0], device=DEVICE) < args.head_mask_prob
                 total_task_loss = 0
+                n_loss_terms = 0
                 for head_idx in range(decoder.M):
-                    total_task_loss += criterion(all_preds[head_idx], batch_masks)
-                mean_logits = all_preds.mean(dim=0)
-                total_task_loss += criterion(mean_logits, batch_masks)
-                task_loss = total_task_loss / (decoder.M + 1)
+                    if use_head_masks:
+                        sel = head_masks[head_idx]
+                        if not sel.any():  # vanishingly rare at p=0.5, batch 32: head simply skips this step
+                            continue
+                        total_task_loss += criterion(all_preds[head_idx][sel], batch_masks[sel])
+                    else:
+                        total_task_loss += criterion(all_preds[head_idx], batch_masks)
+                    n_loss_terms += 1
+                if not args.no_mean_logit_loss:
+                    mean_logits = all_preds.mean(dim=0)
+                    total_task_loss += criterion(mean_logits, batch_masks)
+                    n_loss_terms += 1
+                task_loss = total_task_loss / max(n_loss_terms, 1)
 
             # Diversity losses computed in float32, outside autocast, for numerical stability
             div_loss_jsd = torch.tensor(0.0, device=DEVICE)
@@ -1166,6 +1212,19 @@ if __name__ == "__main__":
     parser.add_argument("--diversity_methods", type=str, nargs="+", default=[], choices=["jsd", "pearson", "orthogonality"],
                         help="One or more diversity methods to combine")
     parser.add_argument("--lam_jsd",     type=float, default=0.0)
+    parser.add_argument("--head_mask_prob", type=float, default=1.0,
+                        help="Per-head sample masking (Bootstrapped DQN, Osband et al. 2016): each head's task "
+                             "loss only uses a random fraction p of each batch's patches, so heads learn from "
+                             "different data despite one shared encoder pass. 1.0 = off (original behaviour).")
+    parser.add_argument("--head_mask_mode", type=str, default="batch", choices=["batch", "fixed"],
+                        help="batch: new random masks every batch (each head gets its own training noise but "
+                             "sees all data over an epoch). fixed: each patch is permanently assigned to a random "
+                             "subset of heads for the whole run (bagging-like: heads see different data).")
+    parser.add_argument("--head_mask_seed", type=int, default=0,
+                        help="Seed for the fixed per-patch masks, so a resume reproduces the same assignment.")
+    parser.add_argument("--no_mean_logit_loss", action="store_true",
+                        help="Drop the ensemble-mean (averaged-logit) term from the task loss, leaving the plain "
+                             "average of per-head losses as in a standard deep ensemble.")
     parser.add_argument("--lam_pearson", type=float, default=0.0)
     parser.add_argument("--lam_orth",    type=float, default=0.0)
 

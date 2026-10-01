@@ -19,3 +19,6 @@ logs/
 
 # Claude Code session data
 .claude/
+
+# Local HTML sources for published diagram pages
+docs/
