@@ -196,10 +196,37 @@ def train_e2e_reben(args):
     def warmup_lambda(epoch):
         return min(1.0, float(epoch + 1) / float(max(1, args.warmup_epochs)))
 
-    warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lambda)
+    # --lr_schedule cosine: same linear warmup, then cosine decay from the base lr (reached on the
+    # last warmup epoch) to lr_min_ratio * base on the final epoch. Every run follows the identical
+    # lr path, unlike plateau halving, which fired at different epochs (or never) between repeats of
+    # the same config and was the main confounder in the 01-02/10 noise runs. lambda(k) is the lr
+    # factor for 0-indexed epoch k, matching warmup_lambda's convention.
+    # Extensions: 'end' is the original planned length, saved in the last checkpoint. Resuming at or
+    # past it with a larger --num_epochs sets 'restart' to the resume epoch: a deliberate SGDR warm
+    # restart (base lr, then a fresh cosine to the floor over the added epochs), as FBP's
+    # _restart_cosine and the student's resume_student_cosine already do. Without this the curve
+    # would be redrawn over the new length and the lr would jump to wherever it landed mid-curve.
+    cosine_state = {'end': args.num_epochs, 'restart': None}
+
+    def _cosine(t):
+        return args.lr_min_ratio + (1.0 - args.lr_min_ratio) * 0.5 * (1.0 + math.cos(math.pi * min(1.0, t)))
+
+    def cosine_lambda(epoch):
+        if cosine_state['restart'] is not None and epoch >= cosine_state['restart']:
+            restart = cosine_state['restart']
+            return _cosine((epoch - restart) / max(1, args.num_epochs - 1 - restart))
+        if epoch < args.warmup_epochs - 1:
+            return warmup_lambda(epoch)
+        return _cosine((epoch - (args.warmup_epochs - 1)) / max(1, cosine_state['end'] - args.warmup_epochs))
+
+    warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, cosine_lambda if args.lr_schedule == "cosine" else warmup_lambda)
     plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-8
     )
+    log_msg(f"LR schedule: {args.lr_schedule} ({args.warmup_epochs} warmup epochs"
+            + (f", cosine to {args.lr_min_ratio}x base by epoch {args.num_epochs})" if args.lr_schedule == "cosine"
+               else ", then halve on 5-epoch val plateau)"))
     scaler = torch.cuda.amp.GradScaler()
 
     if args.use_focal_loss:
@@ -220,6 +247,7 @@ def train_e2e_reben(args):
 
     if args.resume:
         resume_ckpt_epochs = {}
+        saved_lr_plan = None
         decoder_ckpt = Path(args.resume_decoder_path) if args.resume_decoder_path else None
         encoder_ckpt = Path(args.resume_encoder_path) if args.resume_encoder_path else None
         if decoder_ckpt and decoder_ckpt.exists():
@@ -239,6 +267,8 @@ def train_e2e_reben(args):
                 plateau_scheduler.load_state_dict(ckpt['plateau_scheduler_state_dict'])
             if ckpt.get('scaler_state_dict') is not None:
                 scaler.load_state_dict(ckpt['scaler_state_dict'])
+            if ckpt.get('lr_schedule') == "cosine":
+                saved_lr_plan = (ckpt.get('lr_schedule_num_epochs'), ckpt.get('lr_schedule_restart_epoch'))
             if bottleneck is not None:
                 if ckpt.get('bottleneck_state_dict') is not None:
                     bottleneck.load_state_dict(ckpt['bottleneck_state_dict'])
@@ -280,7 +310,25 @@ def train_e2e_reben(args):
             with open(loss_path) as f:
                 loss_history = json.load(f)
         log_msg(f"Resuming from epoch {start_epoch + 1}")
-        if start_epoch < args.warmup_epochs:
+        if args.lr_schedule == "cosine" and start_epoch < args.num_epochs:
+            if saved_lr_plan is None:
+                raise ValueError("--lr_schedule cosine resume needs a last_decoder checkpoint saved by a cosine "
+                                 "run; this one has no cosine schedule info (plateau run, or a 'best' checkpoint?)")
+            saved_num_epochs, saved_restart = saved_lr_plan
+            if saved_num_epochs == args.num_epochs:
+                # Cut-off run, same plan: continue the original curve (including any earlier restart)
+                cosine_state.update(end=saved_num_epochs, restart=saved_restart)
+            elif args.num_epochs > saved_num_epochs and start_epoch >= saved_num_epochs:
+                cosine_state.update(end=saved_num_epochs, restart=start_epoch)
+                log_msg(f"Extension {saved_num_epochs} -> {args.num_epochs} epochs: cosine warm restart "
+                        f"from base lr over epochs {start_epoch + 1}-{args.num_epochs}")
+            else:
+                raise ValueError(f"Cosine schedule was planned for {saved_num_epochs} epochs; resuming at epoch "
+                                 f"{start_epoch} with --num_epochs {args.num_epochs} is ambiguous. Finish the "
+                                 f"original {saved_num_epochs} epochs first, then extend from there.")
+        # LambdaLR sets lr = base * lambda(step count) absolutely, so stepping start_epoch times
+        # repositions it exactly. Cosine needs this for every epoch, plateau only inside warmup.
+        if args.lr_schedule == "cosine" or start_epoch < args.warmup_epochs:
             for _ in range(start_epoch):
                 warmup_scheduler.step()
         if student_scheduler is not None:
@@ -497,7 +545,7 @@ def train_e2e_reben(args):
         # Stepped here, before any checkpoint is written, so a saved checkpoint always carries the
         # lr for the NEXT epoch - previously a plateau halving on a save epoch (every 5th) was
         # written after the save and silently lost on resume. Same between-epoch timing as before.
-        if epoch < args.warmup_epochs:
+        if args.lr_schedule == "cosine" or epoch < args.warmup_epochs:
             warmup_scheduler.step()
         else:
             plateau_scheduler.step(avg_val_loss)
@@ -530,6 +578,9 @@ def train_e2e_reben(args):
                              'optimizer_state_dict': optimizer.state_dict(),
                              'best_val_loss': best_val_loss,
                              'plateau_scheduler_state_dict': plateau_scheduler.state_dict(),
+                             'lr_schedule': args.lr_schedule,
+                             'lr_schedule_num_epochs': args.num_epochs,
+                             'lr_schedule_restart_epoch': cosine_state['restart'],
                              'scaler_state_dict': scaler.state_dict(),
                              'bottleneck_state_dict': bottleneck.state_dict() if bottleneck is not None else None},
                             str(CHECKPOINT_DIR), filename=f"{run_name}_last_decoder.pth")
@@ -1195,6 +1246,12 @@ if __name__ == "__main__":
     parser.add_argument("--lr_encoder",   type=float, default=1e-6)
     parser.add_argument("--lr_decoder",   type=float, default=1e-4)
     parser.add_argument("--warmup_epochs", type=int,   default=5)
+    parser.add_argument("--lr_schedule", type=str, default="plateau", choices=["plateau", "cosine"],
+                        help="plateau: warmup then halve lr after 5 epochs without a new best val loss "
+                             "(original behaviour). cosine: warmup then cosine decay to "
+                             "lr_min_ratio * base lr at the final epoch, identical for every run.")
+    parser.add_argument("--lr_min_ratio", type=float, default=0.01,
+                        help="Cosine schedule only: final lr as a fraction of each group's base lr.")
     parser.add_argument("--hide_unlabelled_pixels", action="store_true")
     parser.add_argument("--compile", action="store_true",
                         help="Wrap the encoder transformer and decoder in torch.compile(). Profiled "
