@@ -684,9 +684,20 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
     nll_count = 0
     auroc_entropy = []
     auroc_errors  = []
+    auroc_epistemic = []  # same pixels as auroc_entropy: does head disagreement (MI) rank the errors?
+    auroc_aleatoric = []  # ... and the mean per-head entropy, for comparison
     AUROC_MAX = 2_000_000
     n_pairs = decoder.M * (decoder.M - 1) // 2
     head_conf_matrices = [np.zeros((num_classes, num_classes), dtype=np.int64) for _ in range(decoder.M)]
+    # Decision-level diversity counts over all labelled pixels, kept on GPU until the end:
+    # pairwise disagreements, pairwise double-faults (both heads wrong), per-head errors,
+    # ensemble errors, and pixels where at least one head is right (oracle).
+    div_pixels = 0
+    pair_disagree = torch.zeros(decoder.M, decoder.M, device=DEVICE)
+    pair_double_fault = torch.zeros(decoder.M, decoder.M, device=DEVICE)
+    head_errors = torch.zeros(decoder.M, device=DEVICE)
+    ens_errors = torch.zeros((), device=DEVICE)
+    oracle_correct = torch.zeros((), device=DEVICE)
     total_ent_sum = 0.0
     aleatoric_sum = 0.0
     jsd_sum = 0.0
@@ -719,10 +730,11 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
                 nll_count += labelled_t.sum().item()
                 ent_t = -(mean_probs_f32 * torch.log(mean_probs_f32.clamp(min=1e-10))).sum(dim=1)
                 auroc_collected = sum(len(x) for x in auroc_entropy) if auroc_entropy else 0
-                if auroc_collected < AUROC_MAX:
-                    err_t = (torch.argmax(mean_probs_f32, dim=1) != test_masks_t).float()
+                collect_auroc = auroc_collected < AUROC_MAX
+                ens_wrong_t = torch.argmax(mean_probs_f32, dim=1) != test_masks_t
+                if collect_auroc:
                     auroc_entropy.append(ent_t[labelled_t].cpu().numpy())
-                    auroc_errors.append(err_t[labelled_t].cpu().numpy())
+                    auroc_errors.append(ens_wrong_t.float()[labelled_t].cpu().numpy())
                 # UQ decomposition
                 total_ent_sum += ent_t[labelled_t].sum().item()
                 aleat = torch.zeros_like(ent_t)
@@ -732,6 +744,21 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
                 aleat /= decoder.M
                 aleatoric_sum += aleat[labelled_t].sum().item()
                 uq_count += labelled_t.sum().item()
+                if collect_auroc and decoder.M > 1:
+                    auroc_aleatoric.append(aleat[labelled_t].cpu().numpy())
+                    auroc_epistemic.append((ent_t - aleat).clamp(min=0)[labelled_t].cpu().numpy())
+                if decoder.M > 1:
+                    gt_l = test_masks_t[labelled_t]                                     # [P]
+                    head_pred_l = torch.argmax(all_head_probs_f32, dim=2)[:, labelled_t]  # [M, P]
+                    head_wrong_l = head_pred_l != gt_l                                  # [M, P]
+                    div_pixels += gt_l.numel()
+                    head_errors += head_wrong_l.sum(dim=1)
+                    ens_errors += ens_wrong_t[labelled_t].sum()
+                    oracle_correct += (~head_wrong_l).any(dim=0).sum()
+                    for i in range(decoder.M):
+                        for j in range(i + 1, decoder.M):
+                            pair_disagree[i, j] += (head_pred_l[i] != head_pred_l[j]).sum()
+                            pair_double_fault[i, j] += (head_wrong_l[i] & head_wrong_l[j]).sum()
                 if n_pairs > 0:
                     for i in range(decoder.M):
                         for j in range(i + 1, decoder.M):
@@ -824,6 +851,34 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
     else:
         global_auroc = 0.0
 
+    # Decision-level diversity (M > 1 only; None otherwise)
+    #   normalised disagreement (Fort et al. 2019): mean pairwise fraction of pixels where two heads
+    #     predict different classes, divided by the ensemble error rate - disagreement relative to
+    #     how much room for it there is, so weaker ensembles don't look more diverse just by erring more.
+    #   error correlation ratio: per pair, double-fault rate / (e_i * e_j), averaged over pairs.
+    #     1 = independent errors (ideal for averaging), >1 = heads fail on the same pixels.
+    #     Raw double-fault would rise just because heads get weaker (masking, arch var) - this doesn't.
+    #   oracle accuracy: fraction of pixels where at least one head is right (ceiling for any combiner).
+    norm_disagreement = error_corr_ratio = oracle_acc = ens_acc_labelled = None
+    auroc_epistemic_score = auroc_aleatoric_score = None
+    if decoder.M > 1 and div_pixels > 0:
+        n = float(div_pixels)
+        head_err_rate = (head_errors / n).cpu().numpy()
+        ens_err_rate = ens_errors.item() / n
+        pair_dis = (pair_disagree / n).cpu().numpy()
+        pair_df = (pair_double_fault / n).cpu().numpy()
+        pairs = [(i, j) for i in range(decoder.M) for j in range(i + 1, decoder.M)]
+        mean_disagreement = float(np.mean([pair_dis[i, j] for i, j in pairs]))
+        norm_disagreement = mean_disagreement / ens_err_rate if ens_err_rate > 0 else None
+        ratios = [pair_df[i, j] / (head_err_rate[i] * head_err_rate[j]) for i, j in pairs
+                  if head_err_rate[i] > 0 and head_err_rate[j] > 0]
+        error_corr_ratio = float(np.mean(ratios)) if ratios else None
+        oracle_acc = oracle_correct.item() / n
+        ens_acc_labelled = 1.0 - ens_err_rate
+        if auroc_epistemic and len(np.unique(all_err)) > 1:
+            auroc_epistemic_score = float(roc_auc_score(all_err, np.concatenate(auroc_epistemic)))
+            auroc_aleatoric_score = float(roc_auc_score(all_err, np.concatenate(auroc_aleatoric)))
+
     # Per-head mIoU
     head_mious = []
     for m in range(decoder.M):
@@ -861,6 +916,12 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
     log_msg(f"Uncertainty: total={mean_total_ent:.4f} | aleatoric={mean_aleatoric:.4f} | "
             f"epistemic={mean_epistemic:.4f} | pairwise_JSD={mean_pairwise_jsd:.4f}")
     log_msg(f"Per-head mIoU: {' | '.join(f'head{m}={v:.4f}' for m, v in enumerate(head_mious))}")
+    if norm_disagreement is not None or error_corr_ratio is not None:
+        fmt = lambda v: f"{v:.4f}" if v is not None else "n/a"
+        log_msg(f"Diversity: norm_disagreement={fmt(norm_disagreement)} | error_corr_ratio={fmt(error_corr_ratio)} | "
+                f"oracle_acc={fmt(oracle_acc)} (ensemble acc on same pixels={fmt(ens_acc_labelled)}) | "
+                f"AUROC epistemic={fmt(auroc_epistemic_score)} aleatoric={fmt(auroc_aleatoric_score)} "
+                f"total={global_auroc:.4f}")
     log_msg("Per-class IoU (descending frequency):")
     freq_order = np.argsort(class_pixel_counts)[::-1]
     for class_idx in freq_order:
@@ -884,6 +945,12 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
         "mean_aleatoric": mean_aleatoric,
         "mean_epistemic": mean_epistemic,
         "mean_pairwise_jsd": mean_pairwise_jsd,
+        "normalised_disagreement": norm_disagreement,
+        "error_correlation_ratio": error_corr_ratio,
+        "oracle_accuracy": oracle_acc,
+        "ensemble_accuracy_labelled": ens_acc_labelled,
+        "auroc_epistemic": auroc_epistemic_score,
+        "auroc_aleatoric": auroc_aleatoric_score,
         "per_head_miou": {f"head_{m}": v for m, v in enumerate(head_mious)},
         "num_patches": patch_count,
         "per_class_iou": {class_names[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)},
