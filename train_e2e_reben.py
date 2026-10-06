@@ -431,7 +431,9 @@ def train_e2e_reben(args):
             div_loss_orth = torch.tensor(0.0, device=DEVICE)
 
             if "jsd" in args.diversity_methods:
-                div_loss_jsd = js_divergence_loss(all_preds.float())
+                # No per-pair empty_cache here (see js_divergence_loss); launch scripts set
+                # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to handle fragmentation instead.
+                div_loss_jsd = js_divergence_loss(all_preds.float(), release_cache=False)
             if "pearson" in args.diversity_methods:
                 div_loss_pearson = pearson_diversity_loss(all_preds.float())
             if "orthogonality" in args.diversity_methods:

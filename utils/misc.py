@@ -100,7 +100,12 @@ def js_divergence_loss_old(all_preds):
     return total_kl / M
 
 
-def js_divergence_loss(all_preds):
+def js_divergence_loss(all_preds, release_cache=True):
+    # release_cache: call torch.cuda.empty_cache() after every head pair. Works around allocator
+    # fragmentation OOMs (removing it OOM'd in July - commits 4d2dfc4/88826f8/bb501f1, most likely
+    # FBP M=10) but forces a sync + cudaMalloc churn per pair, a large slowdown. Default True keeps
+    # existing callers (FBP) unchanged; the reBEN pipeline passes False and relies on
+    # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True in its launch script instead.
 
     M = all_preds.shape[0]
 
@@ -125,7 +130,8 @@ def js_divergence_loss(all_preds):
             kl_j = F.kl_div(torch.log(avg_ij + 1e-10), all_probs[j], reduction="sum")
 
             del avg_ij, p_i, p_j
-            torch.cuda.empty_cache()
+            if release_cache:
+                torch.cuda.empty_cache()
 
             n_pixels = all_probs.size(1) * all_probs.size(3) * all_probs.size(4)
             # JSD is a symmetrised version of KLD
