@@ -403,8 +403,11 @@ class BakedReBENDataset(Dataset):
             running += s
             self.cumulative.append(running)
 
-        self._current_path = None
-        self._current_data = None
+        # Every shard opened so far, per DataLoader worker (each worker gets its own copy of this
+        # dict). Previously only the last shard was kept, so with shuffle=True nearly every item
+        # re-opened a different shard file - the same issue fixed in FBP's BakedFeatureDataset.
+        # Shards are memory-mapped, so caching all of them costs page cache, not process RAM.
+        self._open_shards = {}
 
         log_msg(f"BakedReBENDataset ({split}): {self.cumulative[-1]} patches, "
                 f"{len(self.shard_files)} shards")
@@ -416,13 +419,13 @@ class BakedReBENDataset(Dataset):
         shard_idx = bisect.bisect_right(self.cumulative, idx)
         local_idx = idx - (self.cumulative[shard_idx - 1] if shard_idx > 0 else 0)
 
-        path = self.shard_files[shard_idx]
-        if path != self._current_path:
-            self._current_path = path
-            self._current_data = torch.load(path, map_location='cpu', mmap=True)
+        data = self._open_shards.get(shard_idx)
+        if data is None:
+            data = torch.load(self.shard_files[shard_idx], map_location='cpu', mmap=True)
+            self._open_shards[shard_idx] = data
 
-        features = self._current_data['features'][local_idx]       # [1024, 28, 28] float32
-        mask = self._current_data['masks'][local_idx].long()        # [224, 224]
+        features = data['features'][local_idx]       # [1024, 28, 28] float32
+        mask = data['masks'][local_idx].long()        # [224, 224]
 
         if self.augment:
             features, mask = self._augment_fn(features, mask)
