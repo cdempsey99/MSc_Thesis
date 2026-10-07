@@ -11,7 +11,8 @@ import math
 import numpy as np
 import os
 
-from utils.misc import log_msg, save_checkpoint, FocalLoss, evaluate_error_localization, ensemble_uncertainty_and_pred
+from utils.misc import (log_msg, save_checkpoint, FocalLoss, evaluate_error_localization, ensemble_uncertainty_and_pred,
+                        js_divergence_loss)
 from utils.dataset_e2e import BakedReBENDataset
 from utils.visualisation import plot_loss_curves, plot_confusion_matrix
 from models.ensemble import DecoderEnsemble
@@ -333,6 +334,9 @@ def train_decoders_reben(args):
                 f"(each head trains on ~{args.head_mask_prob * args.batch_size:.0f} of {args.batch_size} patches per batch)")
     if args.no_mean_logit_loss:
         log_msg("Ensemble-mean (averaged-logit) task loss term disabled: per-head losses only")
+    use_jsd = "jsd" in args.diversity_methods
+    if use_jsd:
+        log_msg(f"JSD diversity loss enabled (lam_jsd={args.lam_jsd})")
 
     # 2. Model
     decoder = DecoderEnsemble(
@@ -359,6 +363,7 @@ def train_decoders_reben(args):
             "in_channels": None,
             "batch_size": args.batch_size,
             "include_student": False,
+            "diversity_methods": args.diversity_methods,
         },
         decoder=decoder,
     )
@@ -479,6 +484,7 @@ def train_decoders_reben(args):
         decoder.train()
         # Loss accumulated on the GPU and read back once per epoch (a per-batch .item() forces a sync)
         epoch_loss = torch.zeros((), device=DEVICE)
+        epoch_jsd = torch.zeros((), device=DEVICE)
 
         train_phase_start = time.perf_counter()
         for batch_features, batch_masks, batch_idx in train_loader:
@@ -512,21 +518,32 @@ def train_decoders_reben(args):
                     n_loss_terms += 1
                 loss = total_loss / max(n_loss_terms, 1)
 
-            scaler.scale(loss).backward()
+            # JSD in float32 outside autocast, as in train_e2e_reben. No per-pair empty_cache;
+            # launch scripts set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True instead.
+            div_loss_jsd = torch.tensor(0.0, device=DEVICE)
+            if use_jsd:
+                div_loss_jsd = js_divergence_loss(all_preds.float(), release_cache=False)
+            train_loss = loss + args.lam_jsd * div_loss_jsd
+
+            scaler.scale(train_loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(clip_params, max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
             epoch_loss += loss.detach()
+            epoch_jsd += div_loss_jsd.detach()
 
         train_phase_time = time.perf_counter() - train_phase_start
         n_batches = len(train_loader)
         log_msg(f"Train phase: {train_phase_time:.1f}s | {train_phase_time / n_batches:.4f} s/batch | "
                 f"{train_phase_time / (n_batches * args.batch_size):.4f} s/patch")
 
-        avg_train_loss = epoch_loss.item() / n_batches
+        avg_train_loss = epoch_loss.item() / n_batches  # task loss only, comparable across settings
+        avg_jsd = epoch_jsd.item() / n_batches
         loss_history["train"].append(avg_train_loss)
-        log_msg(f"Epoch [{epoch + 1}/{args.num_epochs}] - Train Loss: {avg_train_loss:.4f} | "
+        if use_jsd:
+            loss_history.setdefault("train_jsd", []).append(avg_jsd)
+        log_msg(f"Epoch [{epoch + 1}/{args.num_epochs}] - Train Loss: {avg_train_loss:.4f} | JSD: {avg_jsd:.4f} | "
                 f"LR: {optimizer.param_groups[0]['lr']:.2e}")
 
         # Validation (always includes the averaged-logit term, as in the fine-tuned pipeline, so
@@ -676,6 +693,9 @@ if __name__ == "__main__":
                         help="Seed for the fixed per-patch masks")
     parser.add_argument("--no_mean_logit_loss", action="store_true",
                         help="Drop the averaged-logit term from the training task loss (per-head losses only)")
+    parser.add_argument("--diversity_methods", type=str, nargs="+", default=[], choices=["jsd"],
+                        help="Diversity losses; only jsd is ported from train_e2e_reben")
+    parser.add_argument("--lam_jsd", type=float, default=0.0)
 
     # Loss
     parser.add_argument("--use_focal_loss", action="store_true")
