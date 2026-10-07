@@ -295,6 +295,19 @@ def train_decoders_reben(args):
     log_msg("Loading test dataset...")
     test_ds  = BakedReBENDataset(embedding_dir, split="test",  augment=False)
 
+    # Same subset semantics as load_reben_splits(max_patches, max_val_patches) in the fine-tuned
+    # pipeline: first N train, first N//5 val and test, max_val_patches overriding val. The
+    # extractor wrote each split in metadata order (shuffle=False), so the first N baked patches
+    # are exactly the patches the fine-tuned --max_patches N runs use.
+    if args.max_patches:
+        train_ds = torch.utils.data.Subset(train_ds, range(min(args.max_patches, len(train_ds))))
+        val_ds   = torch.utils.data.Subset(val_ds,   range(min(args.max_patches // 5, len(val_ds))))
+        test_ds  = torch.utils.data.Subset(test_ds,  range(min(args.max_patches // 5, len(test_ds))))
+    if args.max_val_patches:
+        val_ds = torch.utils.data.Subset(val_ds, range(min(args.max_val_patches, len(val_ds))))
+    if args.max_patches or args.max_val_patches:
+        log_msg(f"Using subset: {len(train_ds)} train | {len(val_ds)} val | {len(test_ds)} test")
+
     # persistent_workers avoids respawning workers every epoch (only valid with num_workers > 0).
     # Training loader also yields each patch's index, used by --head_mask_mode fixed.
     persistent = args.num_workers > 0
@@ -640,6 +653,11 @@ if __name__ == "__main__":
                              "lr_min_ratio * base lr at the final epoch (as train_e2e_reben).")
     parser.add_argument("--lr_min_ratio", type=float, default=0.01,
                         help="Cosine schedule only: final lr as a fraction of the base lr.")
+    parser.add_argument("--max_patches", type=int, default=None,
+                        help="Use only the first N train patches (and first N//5 val/test), matching "
+                             "train_e2e_reben --max_patches N. Default: all extracted patches.")
+    parser.add_argument("--max_val_patches", type=int, default=None,
+                        help="Cap val patches independently of --max_patches")
     parser.add_argument("--num_workers", type=int, default=4,
                         help="DataLoader worker processes for train/val/test loaders")
     parser.add_argument("--compile", action="store_true",
