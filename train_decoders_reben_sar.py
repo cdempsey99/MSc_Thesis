@@ -10,7 +10,8 @@ import argparse
 import numpy as np
 import os
 
-from utils.misc import log_msg, save_checkpoint, FocalLoss, evaluate_error_localization, ensemble_uncertainty_and_pred
+from utils.misc import (log_msg, save_checkpoint, FocalLoss, evaluate_error_localization, ensemble_uncertainty_and_pred,
+                        auroc_pixels_per_batch, auroc_pixel_sample)
 from utils.dataset_e2e import BakedReBENDataset
 from utils.visualisation import plot_loss_curves, plot_confusion_matrix
 from models.ensemble import DecoderEnsemble
@@ -35,7 +36,9 @@ def evaluate_baked_reben_sar(decoder, test_loader, args, run_name):
     nll_count = 0
     auroc_entropy = []
     auroc_errors  = []
-    AUROC_MAX = 2_000_000
+    # Seeded uniform pixel sample from every batch (see utils.misc.auroc_pixel_sample) - was first 2M pixels
+    auroc_per_batch = auroc_pixels_per_batch(test_loader)
+    auroc_gen = torch.Generator().manual_seed(0)
     n_pairs = decoder.M * (decoder.M - 1) // 2
     head_conf_matrices = [np.zeros((num_classes, num_classes), dtype=np.int64) for _ in range(decoder.M)]
     total_ent_sum = 0.0
@@ -63,11 +66,10 @@ def evaluate_baked_reben_sar(decoder, test_loader, args, run_name):
                 nll_sum  += (-log_probs.gather(1, gt_idx).squeeze(1)[labelled_t]).sum().item()
                 nll_count += labelled_t.sum().item()
                 ent_t = -(mean_probs_f32 * torch.log(mean_probs_f32.clamp(min=1e-10))).sum(dim=1)
-                collected = sum(len(x) for x in auroc_entropy) if auroc_entropy else 0
-                if collected < AUROC_MAX:
-                    err_t = (torch.argmax(mean_probs_f32, dim=1) != masks_t).float()
-                    auroc_entropy.append(ent_t[labelled_t].cpu().numpy())
-                    auroc_errors.append(err_t[labelled_t].cpu().numpy())
+                auroc_t = auroc_pixel_sample(labelled_t, auroc_per_batch, auroc_gen)
+                err_t = (torch.argmax(mean_probs_f32, dim=1) != masks_t).float()
+                auroc_entropy.append(ent_t[auroc_t].cpu().numpy())
+                auroc_errors.append(err_t[auroc_t].cpu().numpy())
                 # UQ decomposition
                 total_ent_sum += ent_t[labelled_t].sum().item()
                 aleat = torch.zeros_like(ent_t)

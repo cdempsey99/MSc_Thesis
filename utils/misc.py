@@ -1126,6 +1126,31 @@ def save_checkpoint(state, out_dir, filename="last_checkpoint.pth"):
     log_msg(f"=> Saving checkpoint to {last_path}")
 
 
+# Pixel-level AUROC (total / epistemic / aleatoric uncertainty vs error) is computed on a sample of
+# labelled pixels, since all test pixels would not fit in memory. Until 08/10/2026 the evaluators kept
+# the FIRST 2M labelled pixels, i.e. only the first ~45-64 test patches (~1% of a 5k test set, clustered
+# at the start of the metadata order). Now every batch contributes a seeded uniform random sample, so the
+# ~5M sampled pixels are spread across the whole test set, whatever its size.
+AUROC_TARGET_PIXELS = 5_000_000
+
+
+def auroc_pixels_per_batch(loader, target=AUROC_TARGET_PIXELS):
+    """How many labelled pixels to sample from each batch so the total is ~target."""
+    return max(1, math.ceil(target / max(len(loader), 1)))
+
+
+def auroc_pixel_sample(labelled_t, per_batch, generator):
+    """Boolean mask (same shape as labelled_t) selecting up to per_batch of its True pixels uniformly at
+    random. generator is a seeded CPU torch.Generator, so the sample is reproducible run to run."""
+    flat_idx = labelled_t.reshape(-1).nonzero(as_tuple=True)[0]
+    if flat_idx.numel() > per_batch:
+        keep = torch.randperm(flat_idx.numel(), generator=generator)[:per_batch].to(flat_idx.device)
+        flat_idx = flat_idx[keep]
+    mask = torch.zeros(labelled_t.numel(), dtype=torch.bool, device=labelled_t.device)
+    mask[flat_idx] = True
+    return mask.view_as(labelled_t)
+
+
 def _select_visualization_patches(dataset, num_vis=6, max_unlabelled_frac=0.10, max_attempts=200):
     """Rejection-samples num_vis global indices from dataset whose ground-truth mask has at
     most max_unlabelled_frac unlabelled pixels, so the handful of qualitative eval figures

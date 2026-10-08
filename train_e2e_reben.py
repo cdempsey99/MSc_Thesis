@@ -21,7 +21,7 @@ from scipy.stats import spearmanr
 from utils.misc import (log_msg, save_checkpoint, FocalLoss, js_divergence_loss, pearson_diversity_loss,
                         orthogonality_loss, endd_loss, get_temperature, resume_student_cosine, evaluate_error_localization,
                         ensemble_uncertainty_and_pred, dirichlet_uncertainty_and_pred,
-                        _select_visualization_patches)
+                        _select_visualization_patches, auroc_pixels_per_batch, auroc_pixel_sample)
 from utils.dataset_e2e import load_reben_splits, ReBENRawDataset
 S2_WAVES = ReBENRawDataset.WAVELENGTHS  # [0.6646, 0.5598, 0.4924] μm — S2 B04/B03/B02
 from utils.visualisation import (plot_loss_curves, visualise_all_metrics, plot_confusion_matrix,
@@ -689,7 +689,9 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
     auroc_errors  = []
     auroc_epistemic = []  # same pixels as auroc_entropy: does head disagreement (MI) rank the errors?
     auroc_aleatoric = []  # ... and the mean per-head entropy, for comparison
-    AUROC_MAX = 2_000_000
+    # Seeded uniform pixel sample from every batch (see utils.misc.auroc_pixel_sample) - was first 2M pixels
+    auroc_per_batch = auroc_pixels_per_batch(test_loader)
+    auroc_gen = torch.Generator().manual_seed(0)
     n_pairs = decoder.M * (decoder.M - 1) // 2
     head_conf_matrices = [np.zeros((num_classes, num_classes), dtype=np.int64) for _ in range(decoder.M)]
     # Decision-level diversity counts over all labelled pixels, kept on GPU until the end:
@@ -732,12 +734,10 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
                 nll_sum  += (-log_probs.gather(1, gt_idx).squeeze(1)[labelled_t]).sum().item()
                 nll_count += labelled_t.sum().item()
                 ent_t = -(mean_probs_f32 * torch.log(mean_probs_f32.clamp(min=1e-10))).sum(dim=1)
-                auroc_collected = sum(len(x) for x in auroc_entropy) if auroc_entropy else 0
-                collect_auroc = auroc_collected < AUROC_MAX
+                auroc_t = auroc_pixel_sample(labelled_t, auroc_per_batch, auroc_gen)
                 ens_wrong_t = torch.argmax(mean_probs_f32, dim=1) != test_masks_t
-                if collect_auroc:
-                    auroc_entropy.append(ent_t[labelled_t].cpu().numpy())
-                    auroc_errors.append(ens_wrong_t.float()[labelled_t].cpu().numpy())
+                auroc_entropy.append(ent_t[auroc_t].cpu().numpy())
+                auroc_errors.append(ens_wrong_t.float()[auroc_t].cpu().numpy())
                 # UQ decomposition
                 total_ent_sum += ent_t[labelled_t].sum().item()
                 aleat = torch.zeros_like(ent_t)
@@ -747,9 +747,9 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
                 aleat /= decoder.M
                 aleatoric_sum += aleat[labelled_t].sum().item()
                 uq_count += labelled_t.sum().item()
-                if collect_auroc and decoder.M > 1:
-                    auroc_aleatoric.append(aleat[labelled_t].cpu().numpy())
-                    auroc_epistemic.append((ent_t - aleat).clamp(min=0)[labelled_t].cpu().numpy())
+                if decoder.M > 1:
+                    auroc_aleatoric.append(aleat[auroc_t].cpu().numpy())
+                    auroc_epistemic.append((ent_t - aleat).clamp(min=0)[auroc_t].cpu().numpy())
                 if decoder.M > 1:
                     gt_l = test_masks_t[labelled_t]                                     # [P]
                     head_pred_l = torch.argmax(all_head_probs_f32, dim=2)[:, labelled_t]  # [M, P]
@@ -989,7 +989,9 @@ def evaluate_student_test_set_reben(encoder_model, student_model, test_loader, a
     nll_count = 0
     auroc_entropy = []
     auroc_errors  = []
-    AUROC_MAX = 2_000_000
+    # Seeded uniform pixel sample from every batch (see utils.misc.auroc_pixel_sample) - was first 2M pixels
+    auroc_per_batch = auroc_pixels_per_batch(test_loader)
+    auroc_gen = torch.Generator().manual_seed(0)
 
     # Dirichlet uncertainty decomposition aggregates — mirrors the teacher's
     # mean_total_ent/mean_aleatoric/mean_epistemic so the student's headline epistemic
@@ -1029,12 +1031,11 @@ def evaluate_student_test_set_reben(encoder_model, student_model, test_loader, a
                 gt_idx = test_masks_t.unsqueeze(1).clamp(0, num_classes - 1)
                 nll_sum += (-log_probs.gather(1, gt_idx).squeeze(1)[labelled_t]).sum().item()
                 nll_count += labelled_t.sum().item()
-                auroc_collected = sum(len(x) for x in auroc_entropy) if auroc_entropy else 0
-                if auroc_collected < AUROC_MAX:
-                    ent_t = -(mean_probs * torch.log(mean_probs.clamp(min=1e-10))).sum(dim=1)
-                    err_t = (torch.argmax(mean_probs, dim=1) != test_masks_t).float()
-                    auroc_entropy.append(ent_t[labelled_t].cpu().numpy())
-                    auroc_errors.append(err_t[labelled_t].cpu().numpy())
+                auroc_t = auroc_pixel_sample(labelled_t, auroc_per_batch, auroc_gen)
+                ent_t = -(mean_probs * torch.log(mean_probs.clamp(min=1e-10))).sum(dim=1)
+                err_t = (torch.argmax(mean_probs, dim=1) != test_masks_t).float()
+                auroc_entropy.append(ent_t[auroc_t].cpu().numpy())
+                auroc_errors.append(err_t[auroc_t].cpu().numpy())
                 total_ent_sum += total_entropy_map[labelled_t].sum().item()
                 aleatoric_sum += aleatoric_map[labelled_t].sum().item()
                 uq_count += labelled_t.sum().item()
