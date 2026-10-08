@@ -89,6 +89,7 @@ def train_e2e_reben(args):
         exclude_cloud=not args.include_cloud,
         max_patches=args.max_patches,
         max_val_patches=args.max_val_patches,
+        exclude_countries=getattr(args, "exclude_countries", None),
     )
 
     # persistent_workers avoids respawning num_workers processes at the start of every epoch -
@@ -1291,6 +1292,9 @@ if __name__ == "__main__":
                         help="Include patches flagged as containing seasonal snow")
     parser.add_argument("--include_cloud", action="store_true",
                         help="Include patches flagged as containing cloud or shadow")
+    parser.add_argument("--exclude_countries", nargs="+", default=None,
+                        help="Drop these countries (metadata 'country' column) from train/val/test before the "
+                             "max_patches cut - held-out-country geographic-shift experiments. Default: none.")
 
     # Model
     parser.add_argument("--ensemble_size",     type=int,   default=5)

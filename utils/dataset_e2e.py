@@ -164,17 +164,23 @@ class ReBENRawDataset(Dataset):
 
 def load_reben_splits(metadata_path, s2_root, ref_root,
                       exclude_snow=True, exclude_cloud=True, max_patches=None,
-                      max_val_patches=None):
+                      max_val_patches=None, exclude_countries=None, only_countries=None):
     """
     Reads metadata.parquet and returns train/val/test ReBENRawDataset objects
     using the official reBEN splits. Filters snowy/cloudy patches by default.
     max_patches limits each split independently (useful for QA runs).
+    exclude_countries / only_countries (default None = no filtering) drop or keep whole countries
+    in every split, before the max_patches cut - for the held-out-country (geographic shift) tests.
     """
     df = pd.read_parquet(metadata_path)
     if exclude_snow:
         df = df[~df.contains_seasonal_snow]
     if exclude_cloud:
         df = df[~df.contains_cloud_or_shadow]
+    if exclude_countries:
+        df = df[~df.country.isin(exclude_countries)]
+    if only_countries:
+        df = df[df.country.isin(only_countries)]
 
     train_ids = df[df.split == 'train'].patch_id.tolist()
     val_ids   = df[df.split == 'validation'].patch_id.tolist()
@@ -189,6 +195,11 @@ def load_reben_splits(metadata_path, s2_root, ref_root,
 
     log_msg(f"reBEN splits (exclude_snow={exclude_snow}, exclude_cloud={exclude_cloud}): "
             f"{len(train_ids)} train | {len(val_ids)} val | {len(test_ids)} test")
+    if exclude_countries or only_countries:
+        country_of = df.set_index('patch_id').country
+        log_msg(f"Country filter: exclude={exclude_countries} only={only_countries}")
+        for name, ids in (("train", train_ids), ("val", val_ids), ("test", test_ids)):
+            log_msg(f"  {name} countries: {country_of.loc[ids].value_counts().to_dict()}")
 
     return (
         ReBENRawDataset(train_ids, s2_root, ref_root, augment=True),

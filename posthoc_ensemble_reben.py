@@ -245,6 +245,12 @@ def main():
                    help="Must match the members' training config (all fine-tuned runs so far: 4)")
     p.add_argument("--include_snow", action="store_true")
     p.add_argument("--include_cloud", action="store_true")
+    p.add_argument("--test_countries", nargs="+", default=None,
+                   help="Finetuned only: evaluate on test patches from ONLY these countries (geographic-shift "
+                        "test, e.g. Portugal). Same max_patches semantics: first max_patches//5 of them.")
+    p.add_argument("--exclude_test_countries", nargs="+", default=None,
+                   help="Finetuned only: drop these countries from the test patches (in-distribution reference "
+                        "for a model trained with train_e2e_reben_country.py --exclude_countries)")
     # frozen pipeline
     p.add_argument("--embedding_dir", type=str)
     p.add_argument("--skip_unanimous", action="store_true", help="Skip the extra unanimous-error pass")
@@ -266,7 +272,8 @@ def main():
         _, _, test_ds = load_reben_splits(
             metadata_path=args.metadata_path, s2_root=args.s2_root, ref_root=args.ref_root,
             exclude_snow=not args.include_snow, exclude_cloud=not args.include_cloud,
-            max_patches=args.max_patches)
+            max_patches=args.max_patches, only_countries=args.test_countries,
+            exclude_countries=args.exclude_test_countries)
         real_encoder_fn = fte.get_encoder_representation_partial
         model = build_members(args, encoder_fn=real_encoder_fn)
         test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False,
@@ -284,6 +291,8 @@ def main():
     else:
         if not args.embedding_dir:
             p.error("--pipeline frozen needs --embedding_dir")
+        if args.test_countries or args.exclude_test_countries:
+            p.error("--test_countries / --exclude_test_countries are only supported for --pipeline finetuned")
         import train_decoders_reben as frz
         from utils.dataset_e2e import BakedReBENDataset
         args._waves = None
