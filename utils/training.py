@@ -362,20 +362,45 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                 if not torch.isfinite(total_loss):
                     _bn_restore(decoder_model, bn_snapshot)
                     n_skipped_batches += 1
+                    # Which of the two failure modes is this: a bad input batch, or weights already
+                    # corrupted by an earlier step? The latter can't recover, so stop rather than skip
+                    # every remaining batch until walltime.
+                    inputs_finite = bool(torch.isfinite(features).all())
+                    weights_finite = all(bool(torch.isfinite(p).all()) for p in decoder_model.parameters())
                     log_msg(f"WARNING: non-finite loss at epoch {epoch+1} — task="
                             f"{task_loss.item() if torch.is_tensor(task_loss) else task_loss:.4f}, jsd="
-                            f"{div_loss_jsd.item() if torch.is_tensor(div_loss_jsd) else div_loss_jsd:.4f}. "
+                            f"{div_loss_jsd.item() if torch.is_tensor(div_loss_jsd) else div_loss_jsd:.4f} | "
+                            f"inputs finite={inputs_finite}, decoder weights finite={weights_finite}. "
                             f"Skipping this batch's backward/optimizer step and rolling back decoder "
                             f"BatchNorm running stats to their pre-batch snapshot (this is the only "
                             f"state a single bad batch can otherwise permanently corrupt - without --amp "
                             f"there is no GradScaler to protect the weights themselves).")
+                    if not weights_finite:
+                        raise RuntimeError(f"Decoder weights are non-finite at epoch {epoch+1} - the model "
+                                           f"was corrupted by an earlier step, skipping batches cannot recover it.")
+                    # Free this batch's autograd graph before the next forward pass - otherwise both
+                    # graphs are alive at once and the next batch OOMs (AS3/AS4 FBP extensions, 08/10).
+                    del all_preds, kl_loss, mean_std, total_task_loss, task_loss, head_high_res, \
+                        mean_logits_low, mean_logits_high, div_loss_jsd, div_loss_pearson, div_loss_orth, total_loss
                     continue
 
                 scaler.scale(total_loss).backward()
                 scaler.unscale_(optimizer)  # clip on the true (unscaled) gradients; covers the bottleneck too (same optimizer)
-                torch.nn.utils.clip_grad_norm_(decoder_model.parameters(), max_norm=1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(decoder_model.parameters(), max_norm=1.0)
                 if bottleneck is not None:
-                    torch.nn.utils.clip_grad_norm_(bottleneck.parameters(), max_norm=1.0)
+                    grad_norm = grad_norm + torch.nn.utils.clip_grad_norm_(bottleneck.parameters(), max_norm=1.0)
+                # A finite loss can still give inf/NaN gradients; clip_grad_norm_ then scales every
+                # gradient by 1/inf and optimizer.step() writes NaN into all weights. With --amp the
+                # GradScaler already skips such steps (and needs scaler.update() to run), so only fp32.
+                if not use_amp and not torch.isfinite(grad_norm):
+                    optimizer.zero_grad()
+                    _bn_restore(decoder_model, bn_snapshot)
+                    n_skipped_batches += 1
+                    log_msg(f"WARNING: non-finite gradient norm at epoch {epoch+1} (loss was finite: "
+                            f"{total_loss.item():.4f}). Skipping this optimizer step so the weights stay intact.")
+                    del all_preds, kl_loss, mean_std, total_task_loss, task_loss, head_high_res, \
+                        mean_logits_low, mean_logits_high, div_loss_jsd, div_loss_pearson, div_loss_orth, total_loss
+                    continue
                 scaler.step(optimizer)
                 scaler.update()
 
