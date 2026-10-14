@@ -4,7 +4,7 @@
 #SBATCH -o /home/users/c/callumdempsey/logs/job_portugal_eval_%j.out
 #SBATCH -e /home/users/c/callumdempsey/logs/job_portugal_eval_%j.err
 #SBATCH -p ex_scioi_gpu,gpu,scioi_gpu
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:v100s:1
 #SBATCH --mem=32G
 #SBATCH --time=12:00:00
 #SBATCH --cpus-per-task=8

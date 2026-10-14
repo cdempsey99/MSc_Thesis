@@ -4,7 +4,7 @@
 #SBATCH -o /home/users/c/callumdempsey/logs/job_posthoc_%j.out
 #SBATCH -e /home/users/c/callumdempsey/logs/job_posthoc_%j.err
 #SBATCH -p ex_scioi_gpu,gpu,scioi_gpu,gpu_short
-#SBATCH --gres=gpu:a100:1
+#SBATCH --gres=gpu:v100s:1
 #SBATCH --mem=32G
 #SBATCH --time=04:00:00
 #SBATCH --cpus-per-task=8
