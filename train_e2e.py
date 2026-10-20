@@ -18,7 +18,8 @@ from rasterio.windows import Window
 
 from utils.misc import get_ece
 from utils.dataset_e2e import FBPRawDataset
-from utils.misc import log_msg, save_checkpoint, FocalLoss, evaluate_error_localization, ensemble_uncertainty_and_pred
+from utils.misc import (log_msg, save_checkpoint, FocalLoss, evaluate_error_localization, ensemble_uncertainty_and_pred,
+                        auroc_pixels_per_batch, auroc_pixel_sample)
 from utils.visualisation import plot_loss_curves
 from models.ensemble import DecoderEnsemble
 from models.encoder import (
@@ -350,7 +351,9 @@ def evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, 
     nll_count = 0
     auroc_entropy = []
     auroc_errors = []
-    AUROC_MAX = 2_000_000
+    # Seeded uniform pixel sample from every batch (see utils.misc.auroc_pixel_sample) - was first 2M pixels
+    auroc_per_batch = auroc_pixels_per_batch(test_loader)
+    auroc_gen = torch.Generator().manual_seed(0)
 
     vis_global_indices = set(random.sample(
         range(len(test_loader.dataset)),
@@ -378,12 +381,11 @@ def evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, 
                 gt_idx = test_masks_t.unsqueeze(1).clamp(0, num_classes - 1)
                 nll_sum += (-log_probs.gather(1, gt_idx).squeeze(1)[labelled_t]).sum().item()
                 nll_count += labelled_t.sum().item()
-                auroc_collected = sum(len(x) for x in auroc_entropy) if auroc_entropy else 0
-                if auroc_collected < AUROC_MAX:
-                    ent_t = -(mean_probs_f32 * torch.log(mean_probs_f32.clamp(min=1e-10))).sum(dim=1)
-                    err_t = (torch.argmax(mean_probs_f32, dim=1) != test_masks_t).float()
-                    auroc_entropy.append(ent_t[labelled_t].cpu().numpy())
-                    auroc_errors.append(err_t[labelled_t].cpu().numpy())
+                ent_t = -(mean_probs_f32 * torch.log(mean_probs_f32.clamp(min=1e-10))).sum(dim=1)
+                err_t = (torch.argmax(mean_probs_f32, dim=1) != test_masks_t).float()
+                auroc_t = auroc_pixel_sample(labelled_t, auroc_per_batch, auroc_gen)
+                auroc_entropy.append(ent_t[auroc_t].cpu().numpy())
+                auroc_errors.append(err_t[auroc_t].cpu().numpy())
 
             for b in range(test_imgs.shape[0]):
                 g_idx = batch_idx * test_loader.batch_size + b

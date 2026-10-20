@@ -45,7 +45,7 @@ from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader
 
 from utils.dataset import BakedFeatureDataset
-from utils.misc import log_msg, fit_temperature
+from utils.misc import log_msg, fit_temperature, auroc_pixels_per_batch, auroc_pixel_sample
 from utils.visualisation import plot_reliability_diagram
 from models.ensemble import DecoderEnsemble
 
@@ -151,7 +151,7 @@ def bootstrap_temperature_stability(per_image, n_bootstrap):
     }
 
 
-def stream_test_calibration(decoder, test_loader, temperature, num_classes, num_bins=10, auroc_max=2_000_000):
+def stream_test_calibration(decoder, test_loader, temperature, num_classes, num_bins=10):
     """
     One pass over the test set computing raw (T=1) and temperature-scaled calibration
     metrics simultaneously, so the (large) test set only needs to be read once. Never
@@ -163,7 +163,9 @@ def stream_test_calibration(decoder, test_loader, temperature, num_classes, num_
     correctness check.
 
     AUROC uses the same recipe as evaluate_test_set elsewhere (roc_auc_score(is_wrong,
-    entropy), capped at auroc_max pixels) - entropy of softmax(logits/T) as the
+    entropy), on the seeded per-batch pixel sample from utils.misc.auroc_pixel_sample - was
+    the first 2M pixels until 20/10/2026; raw and calibrated score the same sampled pixels) -
+    entropy of softmax(logits/T) as the
     uncertainty score. Note this genuinely can differ between raw and calibrated (unlike
     mIoU): dividing every pixel's logits by the same T doesn't preserve entropy's RANK
     ORDER across different pixels with different original logit distributions, so it's
@@ -183,12 +185,13 @@ def stream_test_calibration(decoder, test_loader, temperature, num_classes, num_
             "n": 0,
             "auroc_entropy": [],
             "auroc_errors": [],
-            "auroc_collected": 0,
         }
         for tag in ("raw", "calibrated")
     }
     mismatches = 0
     conf_matrix = np.zeros((num_classes, num_classes), dtype=np.int64)
+    auroc_per_batch = auroc_pixels_per_batch(test_loader)
+    auroc_gen = torch.Generator().manual_seed(0)
 
     with torch.no_grad():
         for features, masks in test_loader:
@@ -200,6 +203,7 @@ def stream_test_calibration(decoder, test_loader, temperature, num_classes, num_
                 continue
             logits_flat = logits.permute(0, 2, 3, 1)[valid]  # [N, K]
             targets_flat = masks[valid]                       # [N]
+            auroc_sel = auroc_pixel_sample(valid, auroc_per_batch, auroc_gen)[valid]  # [N] bool
 
             pred_raw = None
             for tag, T in (("raw", 1.0), ("calibrated", temperature)):
@@ -220,12 +224,10 @@ def stream_test_calibration(decoder, test_loader, temperature, num_classes, num_
                         s["bin_acc_sums"][i] += correct_cpu[in_bin].sum()
                         s["bin_counts"][i] += in_bin.sum()
 
-                if s["auroc_collected"] < auroc_max:
-                    entropy = -(probs * torch.log(probs.clamp(min=1e-10))).sum(dim=1)
-                    err = 1.0 - correct
-                    s["auroc_entropy"].append(entropy.cpu().numpy())
-                    s["auroc_errors"].append(err.cpu().numpy())
-                    s["auroc_collected"] += err.numel()
+                entropy = -(probs * torch.log(probs.clamp(min=1e-10))).sum(dim=1)
+                err = 1.0 - correct
+                s["auroc_entropy"].append(entropy[auroc_sel].cpu().numpy())
+                s["auroc_errors"].append(err[auroc_sel].cpu().numpy())
 
                 if tag == "raw":
                     pred_raw = pred

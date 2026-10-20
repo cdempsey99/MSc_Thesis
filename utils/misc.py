@@ -524,7 +524,9 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
     nll_count = 0
     auroc_entropy = []
     auroc_errors = []
-    AUROC_MAX = 2_000_000
+    # Seeded uniform pixel sample from every batch (see auroc_pixel_sample) - was first 2M pixels
+    auroc_per_batch = auroc_pixels_per_batch(test_loader)
+    auroc_gen = torch.Generator().manual_seed(0)
 
     # Dirichlet uncertainty decomposition aggregates — mirrors evaluate_test_set's
     # mean_total_ent/mean_aleatoric/mean_epistemic so the student's headline epistemic
@@ -551,12 +553,11 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
                 gt_idx = test_masks_t.unsqueeze(1).clamp(0, num_classes - 1)
                 nll_sum += (-log_probs.gather(1, gt_idx).squeeze(1)[labelled_t]).sum().item()
                 nll_count += labelled_t.sum().item()
-                auroc_collected = sum(len(x) for x in auroc_entropy) if auroc_entropy else 0
-                if auroc_collected < AUROC_MAX:
-                    ent_t = -(mean_probs * torch.log(mean_probs.clamp(min=1e-10))).sum(dim=1)
-                    err_t = (torch.argmax(mean_probs, dim=1) != test_masks_t).float()
-                    auroc_entropy.append(ent_t[labelled_t].cpu().numpy())
-                    auroc_errors.append(err_t[labelled_t].cpu().numpy())
+                ent_t = -(mean_probs * torch.log(mean_probs.clamp(min=1e-10))).sum(dim=1)
+                err_t = (torch.argmax(mean_probs, dim=1) != test_masks_t).float()
+                auroc_t = auroc_pixel_sample(labelled_t, auroc_per_batch, auroc_gen)
+                auroc_entropy.append(ent_t[auroc_t].cpu().numpy())
+                auroc_errors.append(err_t[auroc_t].cpu().numpy())
             alpha0_sq = alpha0.squeeze(1)                                  # [B, H, W]
 
             class_maps = torch.argmax(mean_probs, dim=1).cpu().numpy()    # [B, H, W]
@@ -1218,10 +1219,25 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
     nll_count = 0
     auroc_entropy = []
     auroc_errors = []
-    AUROC_MAX = 2_000_000
+    auroc_epistemic = []  # same pixels as auroc_entropy: does head disagreement (MI) rank the errors?
+    auroc_aleatoric = []  # ... and the mean per-head entropy, for comparison
+    # Seeded uniform pixel sample from every batch (see auroc_pixel_sample) - was first 2M pixels
+    auroc_per_batch = auroc_pixels_per_batch(test_loader)
+    auroc_gen = torch.Generator().manual_seed(0)
 
     n_pairs = trained_model.M * (trained_model.M - 1) // 2
     head_conf_matrices = [np.zeros((num_classes, num_classes), dtype=np.int64) for _ in range(trained_model.M)]
+    # Decision-level diversity counts over all labelled pixels (same definitions as the reBEN
+    # evaluators): pairwise disagreements, pairwise double-faults (both heads wrong), per-head
+    # errors, ensemble errors, pixels where at least one head is right (oracle), and ensemble
+    # errors that every head also makes (unanimous)
+    div_pixels = 0
+    pair_disagree = torch.zeros(trained_model.M, trained_model.M, device=DEVICE)
+    pair_double_fault = torch.zeros(trained_model.M, trained_model.M, device=DEVICE)
+    head_errors = torch.zeros(trained_model.M, device=DEVICE)
+    ens_errors = torch.zeros((), device=DEVICE)
+    oracle_correct = torch.zeros((), device=DEVICE)
+    unanimous_errors = torch.zeros((), device=DEVICE)
     total_ent_sum = 0.0
     aleatoric_sum = 0.0
     jsd_sum = 0.0
@@ -1259,11 +1275,10 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                 nll_sum += (-log_probs.gather(1, gt_idx).squeeze(1)[labelled_t]).sum().item()
                 nll_count += labelled_t.sum().item()
                 ent_t = -(mean_probs * torch.log(mean_probs.clamp(min=1e-10))).sum(dim=1)
-                auroc_collected = sum(len(x) for x in auroc_entropy) if auroc_entropy else 0
-                if auroc_collected < AUROC_MAX:
-                    err_t = (torch.argmax(mean_probs, dim=1) != test_masks_t).float()
-                    auroc_entropy.append(ent_t[labelled_t].cpu().numpy())
-                    auroc_errors.append(err_t[labelled_t].cpu().numpy())
+                auroc_t = auroc_pixel_sample(labelled_t, auroc_per_batch, auroc_gen)
+                ens_wrong_t = torch.argmax(mean_probs, dim=1) != test_masks_t
+                auroc_entropy.append(ent_t[auroc_t].cpu().numpy())
+                auroc_errors.append(ens_wrong_t.float()[auroc_t].cpu().numpy())
                 total_ent_sum += ent_t[labelled_t].sum().item()
                 aleat = torch.zeros_like(ent_t)
                 for m in range(trained_model.M):
@@ -1272,6 +1287,22 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                 aleat /= trained_model.M
                 aleatoric_sum += aleat[labelled_t].sum().item()
                 uq_count += labelled_t.sum().item()
+                if trained_model.M > 1:
+                    auroc_aleatoric.append(aleat[auroc_t].cpu().numpy())
+                    auroc_epistemic.append((ent_t - aleat).clamp(min=0)[auroc_t].cpu().numpy())
+                    gt_l = test_masks_t[labelled_t]                                     # [P]
+                    head_pred_l = torch.argmax(all_head_probs_f32, dim=2)[:, labelled_t]  # [M, P]
+                    head_wrong_l = head_pred_l != gt_l                                  # [M, P]
+                    ens_wrong_l = ens_wrong_t[labelled_t]
+                    div_pixels += gt_l.numel()
+                    head_errors += head_wrong_l.sum(dim=1)
+                    ens_errors += ens_wrong_l.sum()
+                    oracle_correct += (~head_wrong_l).any(dim=0).sum()
+                    unanimous_errors += (ens_wrong_l & head_wrong_l.all(dim=0)).sum()
+                    for i in range(trained_model.M):
+                        for j in range(i + 1, trained_model.M):
+                            pair_disagree[i, j] += (head_pred_l[i] != head_pred_l[j]).sum()
+                            pair_double_fault[i, j] += (head_wrong_l[i] & head_wrong_l[j]).sum()
                 if n_pairs > 0:
                     for i in range(trained_model.M):
                         for j in range(i + 1, trained_model.M):
@@ -1397,6 +1428,32 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
     else:
         global_auroc = 0.0
 
+    # Decision-level diversity (M > 1 only; None otherwise) - same definitions as
+    # evaluate_test_set_reben: normalised disagreement (Fort et al. 2019), error correlation ratio
+    # (per-pair double-fault / (e_i * e_j), 1 = independent errors), oracle accuracy, plus the
+    # share of ensemble errors that every head also makes
+    norm_disagreement = error_corr_ratio = oracle_acc = unanimous_share = None
+    auroc_epistemic_score = auroc_aleatoric_score = None
+    if trained_model.M > 1 and div_pixels > 0:
+        n = float(div_pixels)
+        head_err_rate = (head_errors / n).cpu().numpy()
+        ens_err_rate = ens_errors.item() / n
+        pair_dis = (pair_disagree / n).cpu().numpy()
+        pair_df = (pair_double_fault / n).cpu().numpy()
+        pairs = [(i, j) for i in range(trained_model.M) for j in range(i + 1, trained_model.M)]
+        mean_disagreement = float(np.mean([pair_dis[i, j] for i, j in pairs]))
+        norm_disagreement = mean_disagreement / ens_err_rate if ens_err_rate > 0 else None
+        ratios = [pair_df[i, j] / (head_err_rate[i] * head_err_rate[j]) for i, j in pairs
+                  if head_err_rate[i] > 0 and head_err_rate[j] > 0]
+        error_corr_ratio = float(np.mean(ratios)) if ratios else None
+        oracle_acc = oracle_correct.item() / n
+        unanimous_share = unanimous_errors.item() / ens_errors.item() if ens_errors.item() > 0 else None
+        if auroc_epistemic:
+            all_err = np.concatenate(auroc_errors)
+            if len(np.unique(all_err)) > 1:
+                auroc_epistemic_score = float(roc_auc_score(all_err, np.concatenate(auroc_epistemic)))
+                auroc_aleatoric_score = float(roc_auc_score(all_err, np.concatenate(auroc_aleatoric)))
+
     # Overall accuracy (labelled pixels only)
     global_acc = float(np.diag(conf_matrix)[1:].sum() / max(conf_matrix[1:, :].sum(), 1))
 
@@ -1439,6 +1496,12 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
     log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f} | NLL: {global_nll:.4f} | AUROC: {global_auroc:.4f}")
     log_msg(f"UQ: Total H={mean_total_ent:.4f} | Aleatoric={mean_aleatoric:.4f} | Epistemic={mean_epistemic:.4f} | Pairwise JSD={mean_pairwise_jsd:.4f}")
     log_msg(f"Per-head mIoU: {[f'{x:.4f}' for x in per_head_miou]}")
+    if norm_disagreement is not None or error_corr_ratio is not None:
+        fmt = lambda v: f"{v:.4f}" if v is not None else "n/a"
+        log_msg(f"Diversity: norm_disagreement={fmt(norm_disagreement)} | error_corr_ratio={fmt(error_corr_ratio)} | "
+                f"oracle_acc={fmt(oracle_acc)} | unanimous_share_of_errors={fmt(unanimous_share)} | "
+                f"AUROC epistemic={fmt(auroc_epistemic_score)} aleatoric={fmt(auroc_aleatoric_score)} "
+                f"total={global_auroc:.4f}")
     log_msg("Per-class IoU (descending frequency):")
     freq_order = np.argsort(class_pixel_counts)[::-1]
     for class_idx in freq_order:
@@ -1462,6 +1525,12 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
         "mean_aleatoric": mean_aleatoric,
         "mean_epistemic": mean_epistemic,
         "mean_pairwise_jsd": mean_pairwise_jsd,
+        "auroc_epistemic": auroc_epistemic_score,
+        "auroc_aleatoric": auroc_aleatoric_score,
+        "normalised_disagreement": norm_disagreement,
+        "error_correlation_ratio": error_corr_ratio,
+        "oracle_accuracy": oracle_acc,
+        "unanimous_share_of_errors": unanimous_share,
         "per_head_miou": per_head_miou,
         "num_patches": patch_count,
         "per_class_iou": {class_names[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)},
