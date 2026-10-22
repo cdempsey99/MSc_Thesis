@@ -36,6 +36,11 @@ _last_checkpoint.pth). The AS4 student is picked up automatically from the same 
 holds student_model_state_dict) or the matching sibling (_best_model -> _best_student,
 _final_model_<ts> -> _final_student_<ts>); give it explicitly as "<teacher file>::<student file>" otherwise.
 
+--calibration_dir additionally saves, per checkpoint and model, the arrays plot_calibration.py turns into
+reliability / error-confidence curves (pixel and error mass per confidence bin, equal-mass error curves,
+correct-vs-wrong confidence histograms, risk-coverage, class-wise ECE). Pairwise error diversity is also
+reported as the standard correlation coefficient rho and Yule's Q (Kuncheva & Whitaker 2003).
+
 All runs in one call share one test set, so group them by pipeline and --max_patches (25k subset runs vs
 full-scale runs) and call the script once per group. A summary table is printed at the end and every result
 is appended to <OUT_DIR>/runs/<--tag>_auroc_reeval.json.
@@ -59,6 +64,8 @@ from utils.misc import log_msg, auroc_pixels_per_batch, auroc_pixel_sample
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 NUM_BINS = 10
+FINE_BINS = 100   # --calibration_dir: exact per-bin pixel / correct / confidence sums over all scored pixels
+CLASS_BINS = 15   # --calibration_dir: per predicted-class reliability bins (class-wise ECE)
 
 
 def _student_from_state_dict(st_sd):
@@ -171,7 +178,14 @@ class _Tracker:
 
     def __init__(self, num_classes, M, fbp_style):
         self.C, self.M, self.fbp_style = num_classes, M, fbp_style
-        self.auroc = {"err": [], "tot": [], "ale": [], "epi": []}
+        self.auroc = {"err": [], "tot": [], "ale": [], "epi": [], "conf": []}
+        # calibration detail (saved with --calibration_dir): same pixels as ECE (patches with >= 100 labelled)
+        self.cal_n = torch.zeros(FINE_BINS, dtype=torch.float64, device=DEVICE)
+        self.cal_correct = torch.zeros(FINE_BINS, dtype=torch.float64, device=DEVICE)
+        self.cal_conf = torch.zeros(FINE_BINS, dtype=torch.float64, device=DEVICE)
+        self.cls_n = torch.zeros(num_classes * CLASS_BINS, dtype=torch.float64, device=DEVICE)
+        self.cls_correct = torch.zeros_like(self.cls_n)
+        self.cls_conf = torch.zeros_like(self.cls_n)
         self.conf = torch.zeros(num_classes, num_classes, dtype=torch.long, device=DEVICE)
         self.head_conf = torch.zeros(M, num_classes, num_classes, dtype=torch.long, device=DEVICE)
         self.bin_conf = torch.zeros(NUM_BINS, dtype=torch.float64, device=DEVICE)
@@ -195,6 +209,8 @@ class _Tracker:
         self.auroc["tot"].append(tot[smp].cpu().numpy())
         self.auroc["ale"].append(ale[smp].cpu().numpy())
         self.auroc["epi"].append(epi[smp].cpu().numpy())
+        conf_all = mean_p.max(dim=1)[0]
+        self.auroc["conf"].append(conf_all[smp].float().cpu().numpy())
 
         gt_idx = y.unsqueeze(1).clamp(0, self.C - 1)
         self.nll += (-torch.log(mean_p.clamp(min=1e-10)).gather(1, gt_idx).squeeze(1)[lab]).sum().item()
@@ -219,6 +235,15 @@ class _Tracker:
             self.bin_conf += torch.bincount(b, weights=conf_v, minlength=NUM_BINS)
             self.bin_acc += torch.bincount(b, weights=corr_v, minlength=NUM_BINS)
             self.bin_n += torch.bincount(b, minlength=NUM_BINS).double()
+        fb = (conf_v * FINE_BINS).long().clamp(max=FINE_BINS - 1)
+        self.cal_n += torch.bincount(fb, minlength=FINE_BINS).double()
+        self.cal_correct += torch.bincount(fb, weights=corr_v, minlength=FINE_BINS)
+        self.cal_conf += torch.bincount(fb, weights=conf_v, minlength=FINE_BINS)
+        cb = pred[conf_lab] * CLASS_BINS + (conf_v * CLASS_BINS).long().clamp(max=CLASS_BINS - 1)
+        n_cb = self.C * CLASS_BINS
+        self.cls_n += torch.bincount(cb, minlength=n_cb).double()
+        self.cls_correct += torch.bincount(cb, weights=corr_v, minlength=n_cb)
+        self.cls_conf += torch.bincount(cb, weights=conf_v, minlength=n_cb)
 
         if head_pred is not None:   # [M, B, H, W]
             for m in range(self.M):
@@ -265,7 +290,23 @@ class _Tracker:
             pdf = (self.pair_df / dn).cpu().numpy()
             pairs = [(i, j) for i in range(self.M) for j in range(i + 1, self.M)]
             ratios = [pdf[i, j] / (her[i] * her[j]) for i, j in pairs if her[i] > 0 and her[j] > 0]
+            # Standard pairwise error-diversity measures (Kuncheva & Whitaker 2003) on the heads' binary
+            # error indicators: correlation coefficient rho and Yule's Q, from the 2x2 table of fractions
+            # n11 = both wrong, n10 / n01 = only one wrong, n00 = both right. Unlike the ratio above they
+            # are bounded and not capped at 1/e, so they compare across datasets with different error rates.
+            rhos, qs = [], []
+            for i, j in pairs:
+                n11 = pdf[i, j]
+                n10, n01 = her[i] - n11, her[j] - n11
+                n00 = 1.0 - her[i] - her[j] + n11
+                den_rho = np.sqrt(her[i] * (1 - her[i]) * her[j] * (1 - her[j]))
+                if den_rho > 0:
+                    rhos.append((n11 * n00 - n10 * n01) / den_rho)
+                if n11 * n00 + n10 * n01 > 0:
+                    qs.append((n11 * n00 - n10 * n01) / (n11 * n00 + n10 * n01))
             out.update({
+                "error_correlation_rho": float(np.mean(rhos)) if rhos else None,
+                "error_yule_q": float(np.mean(qs)) if qs else None,
                 "normalised_disagreement": float(np.mean([pdis[i, j] for i, j in pairs])) / ens_rate
                 if ens_rate > 0 else None,
                 "error_correlation_ratio": float(np.mean(ratios)) if ratios else None,
@@ -275,6 +316,23 @@ class _Tracker:
                 "per_head_miou": [_miou(self.head_conf[m].cpu().numpy(), self.fbp_style) for m in range(self.M)],
             })
         return out
+
+    def calibration_arrays(self):
+        """Raw material for the error-confidence / reliability plots (plot_calibration.py): exact
+        per-bin sums over every scored pixel (FINE_BINS equal-width confidence bins, and CLASS_BINS bins
+        per predicted class) plus the AUROC pixel sample (confidence, error, uncertainties) for
+        equal-mass curves and correct/wrong confidence histograms."""
+        return {
+            "fine_n": self.cal_n.cpu().numpy(), "fine_correct": self.cal_correct.cpu().numpy(),
+            "fine_conf": self.cal_conf.cpu().numpy(),
+            "class_n": self.cls_n.view(self.C, CLASS_BINS).cpu().numpy(),
+            "class_correct": self.cls_correct.view(self.C, CLASS_BINS).cpu().numpy(),
+            "class_conf": self.cls_conf.view(self.C, CLASS_BINS).cpu().numpy(),
+            "sample_conf": np.concatenate(self.auroc["conf"]).astype(np.float32),
+            "sample_err": np.concatenate(self.auroc["err"]).astype(np.uint8),
+            "sample_total_unc": np.concatenate(self.auroc["tot"]).astype(np.float32),
+            "sample_epistemic": np.concatenate(self.auroc["epi"]).astype(np.float32),
+        }
 
 
 def evaluate(encoder, decoder, student, loader, waves, num_classes, fbp=False):
@@ -320,9 +378,11 @@ def evaluate(encoder, decoder, student, loader, waves, num_classes, fbp=False):
                 s.add(mp, y, lab, conf_lab, ssmp, stot, sale)
 
     res = {"teacher": t.summary(decoder.M > 1)}
+    cal = {"teacher": t.calibration_arrays()}
     if s is not None:
         res["student"] = s.summary(True)
-    return res
+        cal["student"] = s.calibration_arrays()
+    return res, cal
 
 
 def _fmt(v, pct=False):
@@ -359,6 +419,10 @@ def main():
     p.add_argument("--skip_done", action="store_true",
                    help="Skip runs already in <tag>_auroc_reeval.json, so a resubmission after a timeout only "
                         "evaluates the missing ones")
+    p.add_argument("--calibration_dir", type=str, default=None,
+                   help="Also save per-checkpoint calibration arrays (<dir>/<tag>__<run>__<teacher|student>.npz) "
+                        "for plot_calibration.py: reliability / error-confidence curves, pixel and error mass per "
+                        "confidence bin, correct-vs-wrong confidence histograms, class-wise ECE")
     args = p.parse_args()
     fbp = args.pipeline == "fbp"
     if args.num_classes is None:
@@ -411,13 +475,20 @@ def main():
             else:
                 full = run if os.path.isabs(run) else os.path.join(args.checkpoint_dir, run)
                 encoder, decoder, student = load_models(full, args.pipeline, args.n_unfrozen_blocks)
-            res = evaluate(encoder, decoder, student, loader, waves, args.num_classes, fbp=fbp)
+            res, cal = evaluate(encoder, decoder, student, loader, waves, args.num_classes, fbp=fbp)
         except Exception as e:   # one bad checkpoint must not cost the rest of the batch
             log_msg(f"  FAILED: {type(e).__name__}: {e}")
             continue
         res.update({"pipeline": args.pipeline, "max_patches": args.max_patches, "test_patches": len(test_ds),
                     "M": decoder.M})
         results[run] = res
+        if args.calibration_dir:
+            os.makedirs(args.calibration_dir, exist_ok=True)
+            safe_run = Path(run.split("::")[0]).name.replace(".pth", "")
+            for who, arrays in cal.items():
+                np.savez_compressed(os.path.join(args.calibration_dir, f"{args.tag}__{safe_run}__{who}.npz"),
+                                    run=run, who=who, tag=args.tag, **arrays)
+            log_msg(f"  calibration arrays saved to {args.calibration_dir}")
         for who, r in res.items():
             if isinstance(r, dict):
                 log_msg(f"  {who}: Acc {r['acc']:.4f} | mIoU {r['miou']:.4f} | ECE {r['ece']:.4f} | NLL {r['nll']:.4f} | "
@@ -425,7 +496,8 @@ def main():
                         f"aleatoric {_fmt(r.get('auroc_aleatoric'))} | epistemic share {_fmt(r['epistemic_share'], True)}")
                 if r.get("normalised_disagreement") is not None or r.get("oracle_accuracy") is not None:
                     log_msg(f"  {who} diversity: norm_disagreement {_fmt(r.get('normalised_disagreement'))} | "
-                            f"error_corr_ratio {_fmt(r.get('error_correlation_ratio'))} | "
+                            f"error_corr_ratio {_fmt(r.get('error_correlation_ratio'))} "
+                            f"(rho {_fmt(r.get('error_correlation_rho'))}, Q {_fmt(r.get('error_yule_q'))}) | "
                             f"oracle_acc {_fmt(r.get('oracle_accuracy'))} | "
                             f"unanimous errors {_fmt(r.get('unanimous_share_of_errors'), True)} | "
                             f"per-head mIoU {[round(v, 4) for v in r.get('per_head_miou', [])]}")

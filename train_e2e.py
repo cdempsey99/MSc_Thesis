@@ -479,7 +479,7 @@ def evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, 
     total_samples = bin_counts.sum()
     global_ece = (np.sum(bin_counts * np.abs(bin_accs - bin_confs)) / total_samples
                   if total_samples > 0 else 0.0)
-    plot_reliability_diagram(bin_accs, bin_counts, save_name=f"{run_name}_reliability")
+    plot_reliability_diagram(bin_accs, save_name=f"{run_name}_reliability", bin_confs=bin_confs, bin_weights=bin_counts)
 
     log_msg(f"FINAL TEST RESULTS ({patch_count} patches):")
     log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | Acc: {global_acc:.4f} | ECE: {global_ece:.4f} | NLL: {global_nll:.4f} | AUROC: {global_auroc:.4f}")

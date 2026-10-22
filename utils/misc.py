@@ -682,7 +682,8 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
                 bin_accs[i]  = avg_acc
                 bin_props[i] = prop
                 ece += abs(avg_acc - avg_conf) * prop
-    plot_reliability_diagram(bin_accs, bin_props, save_name=f"{run_name}_reliability")
+    bin_confs = np.where(bin_counts > 0, bin_conf_sums / np.maximum(bin_counts, 1), 0.0)
+    plot_reliability_diagram(bin_accs, save_name=f"{run_name}_reliability", bin_confs=bin_confs, bin_weights=bin_counts)
     global_ece = float(ece)
 
     mean_total_ent = total_ent_sum / max(uq_count, 1)
@@ -1489,7 +1490,8 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                 bin_accs[i]  = avg_acc
                 bin_props[i] = prop
                 ece += abs(avg_acc - avg_conf) * prop
-    plot_reliability_diagram(bin_accs, bin_props, save_name=f"{run_name}_reliability")
+    bin_confs = np.where(bin_counts > 0, bin_conf_sums / np.maximum(bin_counts, 1), 0.0)
+    plot_reliability_diagram(bin_accs, save_name=f"{run_name}_reliability", bin_confs=bin_confs, bin_weights=bin_counts)
     global_ece = float(ece)
 
     log_msg(f"FINAL TEST RESULTS ({patch_count} patches):")

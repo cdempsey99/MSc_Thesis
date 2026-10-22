@@ -242,7 +242,16 @@ def display_truth_proportions(ground_truth):
 
 
 # Plot the accuracy versus confidence of the model 
-def plot_reliability_diagram(bin_accs_all, bin_counts, save_name="reliability_diagram"):
+def plot_reliability_diagram(bin_accs_all, bin_counts=None, save_name="reliability_diagram",
+                             bin_confs=None, bin_weights=None):
+    """Reliability diagram over 10 equal-width confidence bins.
+
+    With bin_confs (each bin's mean confidence) and bin_weights (pixel count or share per bin), draws the
+    full version: accuracy plotted at each non-empty bin's ACTUAL mean confidence against the diagonal, and
+    a lower panel with the share of all pixels and the share of all errors in each bin - so it shows where
+    the mass and the errors sit, not just per-bin accuracy. Without them (older callers, e.g. the
+    calibration scripts), falls back to the original single-panel bars at the bin centres. The second
+    positional argument is kept only for those older call sites and is not used."""
 
     # Use env var for results dir, with default results for Windows setup
     #base_results_dir = os.getenv("OUT_DIR", "results")
@@ -252,6 +261,39 @@ def plot_reliability_diagram(bin_accs_all, bin_counts, save_name="reliability_di
 
     # bin_accs_all should be an array of 10 values
     bin_centers = np.linspace(0.05, 0.95, 10)
+
+    if bin_confs is not None and bin_weights is not None:
+        accs = np.asarray(bin_accs_all, dtype=float)
+        confs = np.asarray(bin_confs, dtype=float)
+        weights = np.asarray(bin_weights, dtype=float)
+        nonempty = weights > 0
+        pix_share = weights / max(weights.sum(), 1e-12)
+        errs = weights * (1.0 - accs)
+        err_share = errs / max(errs.sum(), 1e-12)
+        ece = float(np.sum(pix_share[nonempty] * np.abs(accs[nonempty] - confs[nonempty])))
+
+        fig, (ax, ax2) = plt.subplots(2, 1, figsize=(6, 8), sharex=True,
+                                      gridspec_kw={"height_ratios": [3, 1]})
+        ax.plot([0, 1], [0, 1], linestyle='--', color='gray', label='Perfect Calibration')
+        ax.plot(confs[nonempty], accs[nonempty], 'o-', color='blue', label='Model (bin mean confidence)')
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.set_ylabel('Observed Accuracy')
+        ax.set_title(f'Reliability Diagram (ECE={ece:.4f})')
+        ax.legend()
+        ax.grid(alpha=0.3)
+        w = 0.04
+        ax2.bar(bin_centers - w / 2, pix_share, width=w, label='Share of pixels')
+        ax2.bar(bin_centers + w / 2, err_share, width=w, label='Share of errors')
+        ax2.set_xlabel('Confidence (Mean Max Probability)')
+        ax2.set_ylabel('Share')
+        ax2.legend(fontsize=8)
+        ax2.grid(alpha=0.3)
+        fig.tight_layout()
+        current_time = (datetime.now().strftime("%Y%m%d%H%M"))
+        fig.savefig(os.path.join(save_path, f"{save_name}_{current_time}.png"), bbox_inches='tight')
+        plt.close(fig)
+        return
 
     plt.figure(figsize=(6, 6))
 

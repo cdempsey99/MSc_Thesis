@@ -910,7 +910,7 @@ def evaluate_test_set_reben(encoder_model, decoder, test_loader, args, run_name)
     total_samples = bin_counts.sum()
     global_ece = (np.sum(bin_counts * np.abs(bin_accs - bin_confs)) / total_samples
                   if total_samples > 0 else 0.0)
-    plot_reliability_diagram(bin_accs, bin_confs, save_name=f"{run_name}_reliability")
+    plot_reliability_diagram(bin_accs, save_name=f"{run_name}_reliability", bin_confs=bin_confs, bin_weights=bin_counts)
 
     log_msg(f"REBEN TEST RESULTS ({patch_count} patches):")
     log_msg(f"Global mIoU: {global_miou:.4f} | fw-IoU: {fw_iou:.4f} | "
@@ -1122,7 +1122,7 @@ def evaluate_student_test_set_reben(encoder_model, student_model, test_loader, a
     total_samples = bin_counts.sum()
     global_ece = (np.sum(bin_counts * np.abs(bin_accs - bin_confs)) / total_samples
                   if total_samples > 0 else 0.0)
-    plot_reliability_diagram(bin_accs, bin_confs, save_name=f"{run_name}_reliability")
+    plot_reliability_diagram(bin_accs, save_name=f"{run_name}_reliability", bin_confs=bin_confs, bin_weights=bin_counts)
 
     mean_total_ent = total_ent_sum / max(uq_count, 1)
     mean_aleatoric = aleatoric_sum / max(uq_count, 1)
