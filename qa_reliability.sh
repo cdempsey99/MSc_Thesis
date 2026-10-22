@@ -6,7 +6,7 @@
 #SBATCH -p ex_scioi_gpu,gpu,scioi_gpu
 #SBATCH --gres=gpu:v100s:1
 #SBATCH --mem=32G
-#SBATCH --time=00:30:00
+#SBATCH --time=01:00:00
 #SBATCH --cpus-per-task=16
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=callum.dempsey@campus.tu-berlin.de

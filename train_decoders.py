@@ -81,7 +81,10 @@ def run_training(args):
     # persistent_workers keeps each worker (and its open-file cache) alive across epochs instead
     # of respawning and reopening every file each epoch - only valid when num_workers > 0.
     persistent = args.num_workers > 0
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+    # With per-head masking the training loader also yields each patch's dataset index, used by
+    # --head_mask_mode fixed to look up the patch's permanent head assignment. Off: loader unchanged.
+    train_loader = DataLoader(WithIndex(train_ds) if args.head_mask_prob < 1.0 else train_ds,
+                              batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                               pin_memory=True, persistent_workers=persistent)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
                             pin_memory=True, persistent_workers=persistent)
@@ -268,6 +271,24 @@ if __name__ == "__main__":
                              "--use_variational_bottleneck or --train_student (both assume a shared batch across "
                              "heads) - combine with --architecture_variation freely. Off by default; leaving it "
                              "off reproduces today's shared-batch training exactly, for an easy revert/comparison.")
+    parser.add_argument("--no_mean_logit_loss", action="store_true",
+                        help="Drop the ensemble-mean (averaged-logit) term from the training task loss, leaving the "
+                             "plain average of per-head losses as in a standard deep ensemble (validation loss is "
+                             "unchanged). Off by default; leaving it off reproduces today's (M+1)-term loss exactly.")
+    parser.add_argument("--head_mask_prob", type=float, default=1.0,
+                        help="Per-head sample masking (Bootstrapped DQN, Osband et al. 2016): each head's task "
+                             "loss only uses a random fraction p of each batch's patches, so heads learn from "
+                             "different data despite one shared feature input. 1.0 = off (original behaviour).")
+    parser.add_argument("--head_mask_mode", type=str, default="batch", choices=["batch", "fixed"],
+                        help="batch: new random masks every batch (each head gets its own training noise but "
+                             "sees all data over an epoch). fixed: each patch (or image, see --head_mask_unit) is "
+                             "permanently assigned to a random subset of heads for the whole run (bagging-like).")
+    parser.add_argument("--head_mask_unit", type=str, default="patch", choices=["patch", "image"],
+                        help="Granularity of the fixed masks: patch (as in the reBEN scripts) or image (all patches "
+                             "of a training image share one assignment, so a head never sees the neighbours of a "
+                             "patch it misses). Only used with --head_mask_mode fixed.")
+    parser.add_argument("--head_mask_seed", type=int, default=0,
+                        help="Seed for the fixed masks, so a resume reproduces the same assignment.")
     # Misc
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--run_name", type=str, default="run")

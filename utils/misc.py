@@ -279,7 +279,8 @@ def compute_class_weights(train_loader, num_classes, ignore_index=0):
     Classes absent from training or equal to ignore_index get weight 0.
     """
     counts = torch.zeros(num_classes)
-    for _, targets in train_loader:
+    for batch in train_loader:
+        targets = batch[1]
         for c in range(num_classes):
             counts[c] += (targets == c).sum().item()
 

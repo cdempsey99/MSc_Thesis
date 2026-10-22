@@ -160,6 +160,38 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
     student_scaler = torch.amp.GradScaler('cuda', enabled=use_amp) if student_model is not None else None
     if use_amp:
         log_msg("Mixed precision (fp16 autocast + GradScaler) enabled")
+    no_mean_logit_loss = bool(input_dict.get("no_mean_logit_loss", False))
+    if no_mean_logit_loss:
+        log_msg("Ensemble-mean (averaged-logit) task loss term disabled: per-head losses only")
+
+    # Per-head sample masking (--head_mask_prob < 1): each head's task loss only sees a fraction p of
+    # the batch. fixed mode draws one [N, M] assignment for the whole run (seeded, so a resume
+    # reproduces it); with --head_mask_unit image all patches of one training image share a row.
+    head_mask_prob = input_dict.get("head_mask_prob", 1.0)
+    use_head_masks = head_mask_prob < 1.0
+    fixed_head_masks = None
+    if use_head_masks:
+        assert bagged_train_loaders is None,             "--head_mask_prob is not supported combined with --data_bagging (both give heads different data)"
+        head_mask_mode = input_dict.get("head_mask_mode", "batch")
+        head_mask_unit = input_dict.get("head_mask_unit", "patch")
+        if head_mask_mode == "fixed":
+            base_ds = train_loader.dataset.ds  # WithIndex wrapper -> BakedFeatureDataset
+            g = torch.Generator().manual_seed(input_dict.get("head_mask_seed", 0))
+            if head_mask_unit == "image":
+                n_images = len(base_ds.file_paths)
+                patches_per_image = len(base_ds) // n_images
+                image_masks = torch.rand(n_images, decoder_model.M, generator=g) < head_mask_prob
+                fixed_head_masks = image_masks.repeat_interleave(patches_per_image, dim=0).to(DEVICE)
+                log_msg(f"Fixed image-level masks: training images per head "
+                        f"{image_masks.sum(dim=0).tolist()} of {n_images}")
+            else:
+                fixed_head_masks = (torch.rand(len(base_ds), decoder_model.M, generator=g)
+                                    < head_mask_prob).to(DEVICE)  # [N, M]
+        elif head_mask_unit == "image":
+            log_msg("WARNING: --head_mask_unit image only applies to --head_mask_mode fixed; using per-patch batch masks")
+        log_msg(f"Per-head sample masking: p={head_mask_prob}, mode={head_mask_mode}, unit={head_mask_unit} "
+                f"(each head trains on ~{head_mask_prob * input_dict['batch_size']:.0f} of "
+                f"{input_dict['batch_size']} patches per batch)")
 
     loss_history = {"train": [], "val": []}
 
@@ -306,10 +338,16 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
         else:
             n_valid_batches = 0
             n_skipped_batches = 0
-            for features, targets in train_loader:
+            for batch in train_loader:
+                features, targets = batch[0], batch[1]
                 optimizer.zero_grad()
                 features = features.to(DEVICE)
                 targets = targets.to(DEVICE).long()
+                if use_head_masks:
+                    if fixed_head_masks is not None:
+                        head_masks = fixed_head_masks[batch[2].to(DEVICE)].T  # [M, B]
+                    else:
+                        head_masks = torch.rand(decoder_model.M, features.shape[0], device=DEVICE) < head_mask_prob
 
                 bn_snapshot = _bn_snapshot(decoder_model)
 
@@ -318,14 +356,29 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
 
                     # FocalLoss is built on F.cross_entropy, which autocast always runs in fp32
                     total_task_loss = 0
+                    n_loss_terms = 0
+                    head_high_res = None  # still named in the skip-batch `del`s below if every head is masked out
                     for head_idx in range(decoder_model.M):
-                        head_high_res = _to_224(all_preds[head_idx])
-                        total_task_loss += criterion(head_high_res, targets)
+                        if use_head_masks:
+                            sel = head_masks[head_idx]
+                            if not sel.any():  # vanishingly rare at p=0.9, batch 32: head simply skips this step
+                                continue
+                            head_high_res = _to_224(all_preds[head_idx][sel])
+                            total_task_loss += criterion(head_high_res, targets[sel])
+                        else:
+                            head_high_res = _to_224(all_preds[head_idx])
+                            total_task_loss += criterion(head_high_res, targets)
+                        n_loss_terms += 1
 
-                    mean_logits_low = all_preds.mean(dim=0)
-                    mean_logits_high = _to_224(mean_logits_low)
-                    total_task_loss += criterion(mean_logits_high, targets)
-                    task_loss = total_task_loss / (decoder_model.M + 1)
+                    if no_mean_logit_loss:
+                        mean_logits_low = mean_logits_high = None  # still named in the skip-batch `del`s below
+                    else:
+                        mean_logits_low = all_preds.mean(dim=0)
+                        mean_logits_high = _to_224(mean_logits_low)
+                        total_task_loss += criterion(mean_logits_high, targets)
+                        n_loss_terms += 1
+                    # n_loss_terms is M (+1 with the mean term) unless a head was fully masked out
+                    task_loss = total_task_loss / max(n_loss_terms, 1)
                 # Diversity losses below are computed outside autocast on fp32 logits - they compare
                 # small differences between heads' probabilities, where fp16 rounding would matter.
                 all_preds = all_preds.float()

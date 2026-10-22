@@ -201,6 +201,21 @@ class BakedFeatureDataset(Dataset):
         return self.file_paths[file_idx], local_idx
 
 
+class WithIndex(Dataset):
+    """Wraps a dataset so each item also returns its index - needed by --head_mask_mode fixed in
+    train_decoders.py to look up a patch's permanent head assignment. Module-level so DataLoader
+    workers can pickle it."""
+    def __init__(self, ds):
+        self.ds = ds
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, i):
+        features, mask = self.ds[i]
+        return features, mask, i
+
+
 class FileLocalitySampler(Sampler):
     """
     Shuffles at the FILE level (order of files, and patch order within each file) instead
