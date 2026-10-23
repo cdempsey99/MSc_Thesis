@@ -6,7 +6,7 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 
 from utils.dataset_e2e import ReBENRawDataset, load_reben_splits
-from models.encoder import initialize_clay_encoder, get_encoder_representation_partial
+from models.encoder import initialize_clay_encoder, get_encoder_representation_partial, REBEN_GSD
 from utils.misc import log_msg
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -76,9 +76,11 @@ def run_extraction(args):
         exclude_snow=True,
         exclude_cloud=True,
         max_patches=args.max_patches,
+        clay_normalise=args.clay_normalise_s2,
     )
 
-    encoder = initialize_clay_encoder()
+    encoder = initialize_clay_encoder(single_norm=args.clay_single_norm, native_forward=args.clay_native_forward,
+                                      gsd=REBEN_GSD)
     encoder.eval()
 
     split_info = {}
@@ -109,6 +111,17 @@ if __name__ == "__main__":
     parser.add_argument("--out_dir",       type=str, required=True)
     parser.add_argument("--shard_size",    type=int, default=1000)
     parser.add_argument("--batch_size",    type=int, default=32)
+    parser.add_argument("--clay_native_forward", action="store_true",
+                        help="Run Clay as its own Encoder.forward does: GSD-scaled position encoding, cls token, single final "
+                             "norm (implies --clay_single_norm). Off by default = the original no-position-encoding path of "
+                             "every existing embedding/checkpoint; a model trained with it on must be evaluated with it on.")
+    parser.add_argument("--clay_normalise_s2", action="store_true",
+                        help="z-score the S2 DN with Clay's sentinel-2-l2a band stats instead of DN/10000. Off by default = every "
+                             "existing model; a model trained with it on must be evaluated with it on.")
+    parser.add_argument("--clay_single_norm", action="store_true",
+                        help="Skip the second application of Clay's final LayerNorm (its transformer already applies it). "
+                             "Off by default to match all existing embeddings/checkpoints; a model trained with it on "
+                             "must also be evaluated with it on.")
     parser.add_argument("--max_patches",   type=int, default=None,
                         help="Limit train patches for QA runs (val/test get max_patches//5)")
     args = parser.parse_args()

@@ -90,13 +90,21 @@ class ReBENRawDataset(Dataset):
     """
     BANDS = ["B04", "B03", "B02"]  # Red, Green, Blue — all 10m native res (120x120)
     WAVELENGTHS = torch.tensor([0.6646, 0.5598, 0.4924], dtype=torch.float32)  # μm
+    # Clay metadata.yaml sentinel-2-l2a band stats (raw L2A DN), in self.BANDS order (red, green, blue).
+    # Clay z-scores its inputs with these in its datamodule - the model itself does not normalise.
+    CLAY_MEAN = torch.tensor([1552.0, 1355.0, 1105.0]).view(3, 1, 1)
+    CLAY_STD = torch.tensor([1888.0, 1757.0, 1809.0]).view(3, 1, 1)
 
-    def __init__(self, patch_ids, s2_root, ref_root, augment=False):
+    def __init__(self, patch_ids, s2_root, ref_root, augment=False, clay_normalise=False):
+        """clay_normalise: z-score the raw DN with Clay's sentinel-2-l2a stats (as Clay was pretrained)
+        instead of the original DN / 10000 reflectance. Off by default = every existing model."""
         self.patch_ids = patch_ids
         self.s2_root = Path(s2_root)
         self.ref_root = Path(ref_root)
         self.augment = augment
-        log_msg(f"ReBENRawDataset: {len(patch_ids)} patches")
+        self.clay_normalise = clay_normalise
+        log_msg(f"ReBENRawDataset: {len(patch_ids)} patches" +
+                (" (Clay sentinel-2-l2a z-score normalisation)" if clay_normalise else ""))
 
     def __len__(self):
         return len(self.patch_ids)
@@ -123,7 +131,10 @@ class ReBENRawDataset(Dataset):
                     bands.append(src.read(1).astype(np.float32))
             stacked = np.stack(bands, axis=0)
 
-        img_tensor = torch.from_numpy(stacked) / 10000.0  # [3, 120, 120] — S2 DN → reflectance
+        if self.clay_normalise:
+            img_tensor = (torch.from_numpy(stacked) - self.CLAY_MEAN) / self.CLAY_STD  # [3, 120, 120]
+        else:
+            img_tensor = torch.from_numpy(stacked) / 10000.0  # [3, 120, 120] — S2 DN → reflectance
         img_tensor = F.interpolate(img_tensor.unsqueeze(0), size=(224, 224),
                                    mode='bilinear', align_corners=False).squeeze(0)
 
@@ -164,7 +175,7 @@ class ReBENRawDataset(Dataset):
 
 def load_reben_splits(metadata_path, s2_root, ref_root,
                       exclude_snow=True, exclude_cloud=True, max_patches=None,
-                      max_val_patches=None, exclude_countries=None, only_countries=None):
+                      max_val_patches=None, exclude_countries=None, only_countries=None, clay_normalise=False):
     """
     Reads metadata.parquet and returns train/val/test ReBENRawDataset objects
     using the official reBEN splits. Filters snowy/cloudy patches by default.
@@ -202,9 +213,9 @@ def load_reben_splits(metadata_path, s2_root, ref_root,
             log_msg(f"  {name} countries: {country_of.loc[ids].value_counts().to_dict()}")
 
     return (
-        ReBENRawDataset(train_ids, s2_root, ref_root, augment=True),
-        ReBENRawDataset(val_ids,   s2_root, ref_root, augment=False),
-        ReBENRawDataset(test_ids,  s2_root, ref_root, augment=False),
+        ReBENRawDataset(train_ids, s2_root, ref_root, augment=True,  clay_normalise=clay_normalise),
+        ReBENRawDataset(val_ids,   s2_root, ref_root, augment=False, clay_normalise=clay_normalise),
+        ReBENRawDataset(test_ids,  s2_root, ref_root, augment=False, clay_normalise=clay_normalise),
     )
 
 

@@ -213,7 +213,7 @@ if __name__ == "__main__":
     parser.add_argument("--out_dir", type=str, default="./results")
     # Data Params (must match extraction)
     parser.add_argument("--patch_size", type=int, default=224)
-    parser.add_argument("--stride", type=int, default=112)
+    parser.add_argument("--stride", type=int, default=224)
     # Model Params
     parser.add_argument("--decoder_in_channels", type=int, default=1024)
     parser.add_argument("--decoder_embed_dim", type=int, default=256)

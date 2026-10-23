@@ -58,7 +58,7 @@ from torch.utils.data import DataLoader, Subset
 
 from configs.config import CHECKPOINT_DIR
 from models.ensemble import StudentHead, VariationalBottleneck, VBEvalWrapper
-from models.encoder import initialize_clay_encoder_partial_unfreeze, get_encoder_representation_partial
+from models.encoder import initialize_clay_encoder_partial_unfreeze, get_encoder_representation_partial, REBEN_GSD
 from posthoc_ensemble_reben import InferredDecoder
 from utils.misc import log_msg, auroc_pixels_per_batch, auroc_pixel_sample
 
@@ -76,14 +76,15 @@ def _student_from_state_dict(st_sd):
     return student.to(DEVICE).eval()
 
 
-def load_models(stem, pipeline, n_unfrozen_blocks):
+def load_models(stem, pipeline, n_unfrozen_blocks, single_norm=False, native_forward=False):
     dec_sd = torch.load(f"{stem}_decoder.pth", map_location=DEVICE)["model_state_dict"]
     decoder = InferredDecoder(dec_sd).to(DEVICE).eval()   # strict load: a wrong/odd checkpoint fails loudly
     log_msg(f"  decoder: M={decoder.M}, head configs (embed_dim, refine_blocks)={decoder.head_configs}")
 
     encoder = None
     if pipeline != "frozen":
-        encoder = initialize_clay_encoder_partial_unfreeze(n_unfrozen_blocks=n_unfrozen_blocks)
+        encoder = initialize_clay_encoder_partial_unfreeze(n_unfrozen_blocks=n_unfrozen_blocks, single_norm=single_norm,
+                                                           native_forward=native_forward, gsd=REBEN_GSD)
         enc_sd = torch.load(f"{stem}_encoder.pth", map_location=DEVICE)["encoder_state_dict"]
         res = encoder.load_state_dict(enc_sd, strict=False)   # as the training scripts' own reload
         log_msg(f"  encoder: {len(enc_sd)} keys loaded, {len(res.missing_keys)} missing, "
@@ -412,6 +413,17 @@ def main():
     p.add_argument("--stride", type=int, default=None, help="FBP: must match the embeddings used in training")
     p.add_argument("--max_images", type=int, default=None, help="FBP: as train_decoders.py's --max_images")
     p.add_argument("--n_unfrozen_blocks", type=int, default=4)
+    p.add_argument("--clay_native_forward", action="store_true",
+                   help="Run Clay as its own Encoder.forward does: GSD-scaled position encoding, cls token, single final "
+                        "norm (implies --clay_single_norm). Off by default = the original no-position-encoding path of "
+                        "every existing embedding/checkpoint; a model trained with it on must be evaluated with it on.")
+    p.add_argument("--clay_normalise_s2", action="store_true",
+                   help="z-score the S2 DN with Clay's sentinel-2-l2a band stats instead of DN/10000. Off by default = every "
+                        "existing model; a model trained with it on must be evaluated with it on.")
+    p.add_argument("--clay_single_norm", action="store_true",
+                   help="Skip the second application of Clay's final LayerNorm (its transformer already applies it). "
+                        "Off by default to match all existing embeddings/checkpoints; a model trained with it on "
+                        "must also be evaluated with it on.")
     p.add_argument("--num_classes", type=int, default=None, help="Default 20 (reBEN/SAR) or 25 (FBP)")
     p.add_argument("--batch_size", type=int, default=None,
                    help="Default 16 (reBEN/SAR) or 64 (FBP, = train_decoders.py's test loader)")
@@ -434,7 +446,8 @@ def main():
     if args.pipeline == "finetuned":
         from utils.dataset_e2e import load_reben_splits, ReBENRawDataset
         _, _, test_ds = load_reben_splits(metadata_path=args.metadata_path, s2_root=args.s2_root,
-                                          ref_root=args.ref_root, max_patches=args.max_patches)
+                                          ref_root=args.ref_root, max_patches=args.max_patches,
+                                          clay_normalise=args.clay_normalise_s2)
         waves = ReBENRawDataset.WAVELENGTHS
     elif args.pipeline == "sar":
         from utils.dataset_e2e import load_reben_sar_splits, ReBENSARRawDataset
@@ -474,7 +487,7 @@ def main():
                 encoder, decoder, student = load_models_fbp(run, args.checkpoint_dir)
             else:
                 full = run if os.path.isabs(run) else os.path.join(args.checkpoint_dir, run)
-                encoder, decoder, student = load_models(full, args.pipeline, args.n_unfrozen_blocks)
+                encoder, decoder, student = load_models(full, args.pipeline, args.n_unfrozen_blocks, args.clay_single_norm, args.clay_native_forward)
             res, cal = evaluate(encoder, decoder, student, loader, waves, args.num_classes, fbp=fbp)
         except Exception as e:   # one bad checkpoint must not cost the rest of the batch
             log_msg(f"  FAILED: {type(e).__name__}: {e}")

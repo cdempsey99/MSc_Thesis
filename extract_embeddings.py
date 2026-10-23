@@ -6,7 +6,7 @@ import time
 import argparse
 
 from utils.dataset import FBPPatchDataset
-from models.encoder import initialize_clay_encoder, get_encoder_representation
+from models.encoder import initialize_clay_encoder, get_encoder_representation, FBP_WAVES_LEGACY, FBP_WAVES_GF2_BGR, FBP_GSD
 from utils.training import log_msg
 
 # Set Device
@@ -28,7 +28,10 @@ def run_extraction(args):
         all_tifs = all_tifs[:args.max_images]
 
     # Initialize Encoder
-    encoder_model = initialize_clay_encoder().to(DEVICE)
+    encoder_model = initialize_clay_encoder(single_norm=args.clay_single_norm, native_forward=args.clay_native_forward,
+                                            gsd=FBP_GSD).to(DEVICE)
+    waves = FBP_WAVES_GF2_BGR if args.fbp_correct_waves else FBP_WAVES_LEGACY
+    log_msg(f"FBP band wavelengths passed to Clay: {waves}")
     encoder_model.eval()
 
     log_msg(f"Starting extraction for {len(all_tifs)} images into {output_base}")
@@ -62,7 +65,7 @@ def run_extraction(args):
             all_masks = []
 
             for batch_imgs, batch_msks in loader:
-                feats = get_encoder_representation(batch_imgs.to(DEVICE), encoder_model)
+                feats = get_encoder_representation(batch_imgs.to(DEVICE), encoder_model, waves=waves)
                 all_feats.append(feats.cpu())
                 all_masks.append(batch_msks.cpu())
 
@@ -98,9 +101,20 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir", type=str, required=True)
     parser.add_argument("--out_dir", type=str, required=True)
     parser.add_argument("--patch_size", type=int, default=224)
-    parser.add_argument("--stride", type=int, default=112)
+    parser.add_argument("--stride", type=int, default=224)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--max_images", type=int, default=None)
+    parser.add_argument("--clay_native_forward", action="store_true",
+                        help="Run Clay as its own Encoder.forward does: GSD-scaled position encoding, cls token, single final "
+                             "norm (implies --clay_single_norm). Off by default = the original no-position-encoding path of "
+                             "every existing embedding/checkpoint; a model trained with it on must be evaluated with it on.")
+    parser.add_argument("--fbp_correct_waves", action="store_true",
+                        help="Pass the correct GF-2 wavelengths for the tifs' blue/green/red bands ([0.485, 0.555, 0.660] um) "
+                             "instead of the original [0.842, 0.665, 0.560] (NIR/red/green) every existing FBP embedding used.")
+    parser.add_argument("--clay_single_norm", action="store_true",
+                        help="Skip the second application of Clay's final LayerNorm (its transformer already applies it). "
+                             "Off by default to match all existing embeddings/checkpoints; a model trained with it on "
+                             "must also be evaluated with it on.")
 
     args = parser.parse_args()
 
