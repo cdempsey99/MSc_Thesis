@@ -140,9 +140,14 @@ def load_models_fbp(run, checkpoint_dir):
     return None, teacher, student
 
 
-def build_fbp_test_files(data_dir, patch_size, stride, max_images=None):
-    """Mirrors train_decoders.py's split exactly (same glob, same seed=42 shuffle, same 70/15/15 cut)."""
-    embedding_dir = Path(data_dir) / "embeddings" / "fbp" / "clay_v1" / f"patch{patch_size}_stride{stride}"
+def build_fbp_test_files(data_dir, patch_size, stride, max_images=None, embedding_dir=None):
+    """Mirrors train_decoders.py's split exactly (same glob, same seed=42 shuffle, same 70/15/15 cut).
+    embedding_dir: the folder holding the *_embeddings.pt files, used as-is (e.g. a renamed backup copy);
+    otherwise it is built from data_dir/patch_size/stride as train_decoders.py does."""
+    if embedding_dir is not None:
+        embedding_dir = Path(embedding_dir)
+    else:
+        embedding_dir = Path(data_dir) / "embeddings" / "fbp" / "clay_v1" / f"patch{patch_size}_stride{stride}"
     all_files = sorted(list(embedding_dir.glob("*_embeddings.pt")))
     if not all_files:
         raise FileNotFoundError(f"No *_embeddings.pt in {embedding_dir} - check --data_dir / --stride")
@@ -407,7 +412,10 @@ def main():
     p.add_argument("--s2_root", type=str)
     p.add_argument("--s1_root", type=str)
     p.add_argument("--ref_root", type=str)
-    p.add_argument("--embedding_dir", type=str)
+    p.add_argument("--embedding_dir", type=str,
+                   help="frozen: the baked reBEN embeddings dir. fbp: optional, the folder holding the FBP "
+                        "*_embeddings.pt files, used as-is instead of <data_dir>/embeddings/fbp/clay_v1/patch*_stride* "
+                        "(e.g. a renamed backup of older embeddings)")
     p.add_argument("--data_dir", type=str, help="FBP: root containing embeddings/ (train_decoders.py's --data_dir)")
     p.add_argument("--patch_size", type=int, default=224, help="FBP: must match the embeddings used in training")
     p.add_argument("--stride", type=int, default=None, help="FBP: must match the embeddings used in training")
@@ -462,9 +470,10 @@ def main():
         waves = None
     else:
         from utils.dataset import BakedFeatureDataset
-        if args.data_dir is None or args.stride is None:
-            p.error("--pipeline fbp needs --data_dir and --stride")
-        test_files = build_fbp_test_files(args.data_dir, args.patch_size, args.stride, args.max_images)
+        if args.embedding_dir is None and (args.data_dir is None or args.stride is None):
+            p.error("--pipeline fbp needs --embedding_dir, or --data_dir and --stride")
+        test_files = build_fbp_test_files(args.data_dir, args.patch_size, args.stride, args.max_images,
+                                          embedding_dir=args.embedding_dir)
         log_msg(f"FBP test split: {len(test_files)} images: {[f.stem.replace('_embeddings', '') for f in test_files]}")
         test_ds = BakedFeatureDataset(test_files, augment=False)
         waves = None

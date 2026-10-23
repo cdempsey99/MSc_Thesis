@@ -54,7 +54,8 @@ case "$1" in
         ;;
     fbp)
         python3 -u reeval_auroc.py --pipeline fbp --tag calib_fbp --skip_done --calibration_dir "$CAL_DIR" \
-            --data_dir /beegfs/scratch/callumdempsey/results --stride 224 --max_images 150 --num_workers 4 \
+            --embedding_dir /beegfs/scratch/callumdempsey/results/embeddings/fbp/clay_v1/patch224_stride224_old_bkp \
+            --stride 224 --max_images 150 --num_workers 4 \
             --run AS1_class_imbalance_focal_loss_qa_150img_20260616_1443_final_model_20260616_1953.pth \
             --run AS1_fbp_fulldataset_extended80_final_model_20261021_0736.pth \
             --run AS2_FBP_frozen_encoder_m=10_ensemble_extended80_final_model_20260926_1512.pth \
