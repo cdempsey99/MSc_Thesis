@@ -706,10 +706,10 @@ def full_decoder_training_run(input_dict, train_loader, val_loader=None, bagged_
         criterion = DiceLoss(ignore_index=0)
         log_msg("Using Dice Loss")
     else:
-        log_msg("Computing class weights (log-damped inverse frequency, capped at 10)...")
-        class_weights = compute_class_weights(train_loader, num_classes, ignore_index=0).to(DEVICE)
-        log_msg(f"Class weights — min: {class_weights[class_weights>0].min():.3f}, median: {class_weights[class_weights>0].median():.3f}, max: {class_weights.max():.3f}")
-        criterion = nn.CrossEntropyLoss(weight=class_weights, ignore_index=0)
+        # Plain (unweighted) cross-entropy, as before 15/06. The class-weighted variant that replaced it then
+        # (log-damped inverse frequency, capped at 10) is still available via compute_class_weights in utils/misc.py.
+        criterion = nn.CrossEntropyLoss(ignore_index=0)  # ignore index 0: pixels not labelled by humans
+        log_msg("Using plain (unweighted) Cross-Entropy Loss")
 
     student_model = None
     student_optimizer = None
