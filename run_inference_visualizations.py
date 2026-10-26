@@ -108,7 +108,7 @@ def _fbp_raw_patch(test_ds, g_idx, stride):
     import rasterio
     from rasterio.windows import Window
     with rasterio.open(raw_img_path) as src:
-        img = src.read([1, 2, 3], window=Window(x, y, 224, 224)).astype(np.float32)
+        img = src.read([3, 2, 1], window=Window(x, y, 224, 224)).astype(np.float32)  # FBP tifs are B,G,R: show as R,G,B
         img = (img - img.min()) / (img.max() - img.min() + 1e-10)
     return np.transpose(img, (1, 2, 0)), f"{img_stem} x={x} y={y}"
 

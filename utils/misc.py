@@ -599,7 +599,7 @@ def evaluate_student_test_set(student_model, test_loader, args, run_name="studen
                     raw_patch = None
                     if raw_img_path.exists():
                         with rasterio.open(raw_img_path) as src:
-                            img = src.read([1, 2, 3], window=Window(x, y, 224, 224)).astype(np.float32)
+                            img = src.read([3, 2, 1], window=Window(x, y, 224, 224)).astype(np.float32)  # FBP tifs are B,G,R: show as R,G,B
                             img = (img - img.min()) / (img.max() - img.min() + 1e-10)
                             raw_patch = np.transpose(img, (1, 2, 0))
 
@@ -1352,7 +1352,7 @@ def evaluate_test_set(trained_model, test_loader, criterion, args, run_name="tes
                     if raw_img_path.exists():
                         with rasterio.open(raw_img_path) as src:
                             win = Window(x, y, 224, 224)
-                            img = src.read([1, 2, 3], window=win).astype(np.float32)
+                            img = src.read([3, 2, 1], window=win).astype(np.float32)  # FBP tifs are B,G,R: show as R,G,B
                             img = (img - img.min()) / (img.max() - img.min() + 1e-10)
                             raw_patch = np.transpose(img, (1, 2, 0))
 

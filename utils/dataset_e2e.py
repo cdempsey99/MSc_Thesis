@@ -21,10 +21,17 @@ class FBPRawDataset(Dataset):
     Dataset for end-to-end training — returns raw unnormalised image patches
     and corresponding masks. No pre-baking.
     """
+    # Per-band FBP stats, the same z-score the frozen pipeline applies before extraction (utils/dataset.py)
+    FBP_MEAN = np.array([80.53, 118.39, 115.69], dtype=np.float32).reshape(3, 1, 1)
+    FBP_STD = np.array([58.25, 65.24, 63.92], dtype=np.float32).reshape(3, 1, 1)
+
     def __init__(self, img_paths, mask_paths, patch_size=224, stride=224,
-                 augment=False, max_samples=None):
+                 augment=False, max_samples=None, normalise=False):
+        """normalise: z-score the 8-bit bands with FBP_MEAN/FBP_STD as the frozen pipeline does. Off by
+        default = the original raw 0-255 input every existing fine-tuned FBP run used."""
         self.patch_size = patch_size
         self.augment = augment
+        self.normalise = normalise
         self.samples = []
 
         for img_p, mask_p in zip(img_paths, mask_paths):
@@ -51,8 +58,11 @@ class FBPRawDataset(Dataset):
         win = Window(x, y, self.patch_size, self.patch_size)
 
         with rasterio.open(img_p) as src:
-            # Raw pixel values, no normalisation — Clay handles this internally
             img = src.read([1, 2, 3], window=win).astype(np.float32)
+        # Clay does NOT normalise internally (that happens in its datamodule); without normalise the raw
+        # 0-255 values go straight in
+        if self.normalise:
+            img = (img - self.FBP_MEAN) / self.FBP_STD
 
         with rasterio.open(mask_p) as src:
             mask = src.read(1, window=win).astype(np.int64)

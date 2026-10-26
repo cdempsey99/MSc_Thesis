@@ -24,8 +24,10 @@ from utils.visualisation import plot_loss_curves
 from models.ensemble import DecoderEnsemble
 from models.encoder import (
     initialize_clay_encoder_partial_unfreeze,
-    get_encoder_representation_partial
+    get_encoder_representation_partial,
+    FBP_WAVES_LEGACY, FBP_WAVES_GF2_BGR, FBP_GSD,
 )
+import math
 from utils.visualisation import *
 from utils.misc import get_decoder_output_maps
 
@@ -70,21 +72,22 @@ def train_e2e(args):
     test_masks = [mask_paths[i] for i in test_idx]
 
     log_msg(f"Split: {len(train_imgs)} Train | {len(val_imgs)} Val | {len(test_imgs)} Test")
+    log_msg(f"Test images: {sorted(p.stem for p in test_imgs)}")
 
     # 3. Datasets and loaders
     log_msg("Initialising datasets...")
     train_ds = FBPRawDataset(train_imgs, train_masks,
                              patch_size=args.patch_size,
                              stride=args.stride,
-                             augment=True)
+                             augment=True, normalise=args.fbp_normalise)
     val_ds = FBPRawDataset(val_imgs, val_masks,
                            patch_size=args.patch_size,
                            stride=args.stride,
-                           augment=False)
+                           augment=False, normalise=args.fbp_normalise)
     test_ds = FBPRawDataset(test_imgs, test_masks,
                             patch_size=args.patch_size,
                             stride=args.stride,
-                            augment=False)
+                            augment=False, normalise=args.fbp_normalise)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
                               shuffle=True, num_workers=4, pin_memory=True)
@@ -96,8 +99,12 @@ def train_e2e(args):
     # 4. Initialise partially unfrozen encoder and decoder ensemble
     log_msg(f"Initialising encoder with {args.n_unfrozen_blocks} unfrozen blocks...")
     encoder_model = initialize_clay_encoder_partial_unfreeze(
-        n_unfrozen_blocks=args.n_unfrozen_blocks
+        n_unfrozen_blocks=args.n_unfrozen_blocks, single_norm=args.clay_single_norm,
+        native_forward=args.clay_native_forward, gsd=FBP_GSD
     )
+    waves = torch.tensor(FBP_WAVES_GF2_BGR if args.fbp_correct_waves else FBP_WAVES_LEGACY, dtype=torch.float32)
+    log_msg(f"FBP band wavelengths passed to Clay: {waves.tolist()}" +
+            (" | inputs z-score normalised (--fbp_normalise)" if args.fbp_normalise else " | raw 0-255 inputs"))
 
     log_msg("Initialising decoder ensemble...")
     decoder = DecoderEnsemble(
@@ -122,6 +129,15 @@ def train_e2e(args):
     plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-8
     )
+    # --lr_schedule cosine: one cosine from each group's base LR down to 1% of it over num_epochs, no warmup -
+    # the frozen FBP pipeline's schedule (decoder 1e-4 -> 1e-6). Default plateau = the original warmup+plateau.
+    cosine_scheduler = None
+    if args.lr_schedule == "cosine":
+        cosine_scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lambda e: 0.01 + 0.99 * 0.5 * (1 + math.cos(math.pi * min(e, args.num_epochs) / args.num_epochs)))
+        log_msg(f"LR schedule: cosine to 0.01x base over {args.num_epochs} epochs (no warmup)")
+    if args.no_mean_logit_loss:
+        log_msg("Ensemble-mean (averaged-logit) task loss term disabled: per-head losses only")
 
     scaler = torch.cuda.amp.GradScaler()
     if args.use_focal_loss:
@@ -192,15 +208,18 @@ def train_e2e(args):
             batch_masks = batch_masks.to(DEVICE).long()
 
             with torch.cuda.amp.autocast():
-                features = get_encoder_representation_partial(batch_imgs, encoder_model)
+                features = get_encoder_representation_partial(batch_imgs, encoder_model, waves=waves)
                 all_preds = decoder(features)
 
                 total_task_loss = 0
                 for head_idx in range(decoder.M):
                     total_task_loss += criterion(all_preds[head_idx], batch_masks)
-                mean_logits = all_preds.mean(dim=0)
-                total_task_loss += criterion(mean_logits, batch_masks)
-                task_loss = total_task_loss / (decoder.M + 1)
+                if args.no_mean_logit_loss:
+                    task_loss = total_task_loss / decoder.M
+                else:
+                    mean_logits = all_preds.mean(dim=0)
+                    total_task_loss += criterion(mean_logits, batch_masks)
+                    task_loss = total_task_loss / (decoder.M + 1)
 
             scaler.scale(task_loss).backward()
             scaler.unscale_(optimizer)
@@ -231,7 +250,7 @@ def train_e2e(args):
                 v_masks = v_masks.to(DEVICE).long()
 
                 with torch.cuda.amp.autocast():
-                    features = get_encoder_representation_partial(v_imgs, encoder_model)
+                    features = get_encoder_representation_partial(v_imgs, encoder_model, waves=waves)
                     all_preds = decoder(features)
 
                     total_val_loss = 0
@@ -278,7 +297,9 @@ def train_e2e(args):
             with open(loss_path, "w") as f:
                 json.dump(loss_history, f, indent=2)
 
-        if epoch < args.warmup_epochs:
+        if cosine_scheduler is not None:
+            cosine_scheduler.step()
+        elif epoch < args.warmup_epochs:
             warmup_scheduler.step()
         else:
             plateau_scheduler.step(avg_val_loss)
@@ -306,15 +327,17 @@ def train_e2e(args):
     log_msg("Training completed.")
     plot_loss_curves(loss_path, save_name=f"{run_name}_loss_curves")
 
-    # Load best model for evaluation
+    # Load best model for evaluation (--eval_checkpoint final keeps the final-epoch weights instead)
     best_decoder_path = CHECKPOINT_DIR / f"{run_name}_best_decoder.pth"
-    if best_decoder_path.exists():
+    if args.eval_checkpoint == "final":
+        log_msg("--eval_checkpoint=final: evaluating final-epoch weights, not the val-loss best checkpoint")
+    elif best_decoder_path.exists():
         log_msg("Loading best decoder for evaluation...")
         ckpt = torch.load(best_decoder_path, map_location=DEVICE)
         decoder.load_state_dict(ckpt['model_state_dict'])
 
     best_encoder_path = CHECKPOINT_DIR / f"{run_name}_best_encoder.pth"
-    if best_encoder_path.exists():
+    if args.eval_checkpoint != "final" and best_encoder_path.exists():
         log_msg("Loading best encoder for evaluation...")
         enc_ckpt = torch.load(best_encoder_path, map_location=DEVICE)
         encoder_model.load_state_dict(enc_ckpt['encoder_state_dict'], strict=False)
@@ -324,7 +347,7 @@ def train_e2e(args):
 
     def _teacher_forward(imgs):
         with torch.cuda.amp.autocast():
-            features = get_encoder_representation_partial(imgs, encoder_model)
+            features = get_encoder_representation_partial(imgs, encoder_model, waves=waves)
             return decoder(features)
 
     evaluate_error_localization(
@@ -366,10 +389,14 @@ def evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, 
             test_imgs = test_imgs.to(DEVICE)
 
             with torch.cuda.amp.autocast():
-                features = get_encoder_representation_partial(test_imgs, encoder_model)
+                features = get_encoder_representation_partial(test_imgs, encoder_model, waves=args.waves)
                 all_preds = decoder(features)
-                mean_logits = all_preds.mean(dim=0)
-                mean_probs = torch.softmax(mean_logits, dim=1)
+                if args.eval_mean_probs:
+                    # true probability mixture, as utils.misc.evaluate_test_set (frozen pipeline) does
+                    mean_probs = torch.softmax(all_preds.float(), dim=2).mean(dim=0)
+                else:
+                    mean_logits = all_preds.mean(dim=0)
+                    mean_probs = torch.softmax(mean_logits, dim=1)
                 class_maps = torch.argmax(mean_probs, dim=1).cpu().numpy()
                 conf_maps = torch.max(mean_probs, dim=1)[0].cpu().numpy()
 
@@ -400,7 +427,7 @@ def evaluate_test_set_e2e(encoder_model, decoder, test_loader, criterion, args, 
                     if Path(img_p).exists():
                         with rasterio.open(img_p) as src:
                             win = Window(x, y, 224, 224)
-                            img = src.read([1, 2, 3], window=win).astype(np.float32)
+                            img = src.read([3, 2, 1], window=win).astype(np.float32)  # FBP tifs are B,G,R: show as R,G,B
                             img = (img - img.min()) / (img.max() - img.min() + 1e-10)
                             raw_patch = np.transpose(img, (1, 2, 0))
 
@@ -561,6 +588,29 @@ if __name__ == "__main__":
     # Loss
     parser.add_argument("--use_focal_loss", action="store_true")
     parser.add_argument("--focal_gamma", type=float, default=2.0)
+    parser.add_argument("--no_mean_logit_loss", action="store_true",
+                        help="Drop the ensemble-mean (averaged-logit) term from the training task loss, leaving the "
+                             "plain average of per-head losses (as train_decoders.py --no_mean_logit_loss).")
+
+    # Matching the frozen pipeline (all off by default = the original fine-tuned FBP behaviour)
+    parser.add_argument("--fbp_normalise", action="store_true",
+                        help="z-score the 8-bit FBP bands with the frozen pipeline's per-band stats instead of raw 0-255")
+    parser.add_argument("--fbp_correct_waves", action="store_true",
+                        help="Pass the correct GF-2 blue/green/red wavelengths [0.485, 0.555, 0.660] um")
+    parser.add_argument("--clay_native_forward", action="store_true",
+                        help="Clay position encoding (gsd 4 m), cls token, single final norm")
+    parser.add_argument("--clay_single_norm", action="store_true",
+                        help="Skip the second application of Clay's final LayerNorm")
+    parser.add_argument("--lr_schedule", type=str, default="plateau", choices=["plateau", "cosine"],
+                        help="plateau: original warmup + ReduceLROnPlateau. cosine: frozen pipeline's single cosine "
+                             "to 0.01x base, no warmup (set --early_stopping_patience above --num_epochs to disable "
+                             "early stopping)")
+    parser.add_argument("--eval_checkpoint", type=str, default="best", choices=["best", "final"],
+                        help="best (original): reload the val-loss best checkpoint for evaluation. final: final weights.")
+    parser.add_argument("--eval_mean_probs", action="store_true",
+                        help="Ensemble prediction = mean of head softmaxes (as the frozen pipeline's evaluate_test_set) "
+                             "instead of the original softmax of mean logits")
 
     args = parser.parse_args()
+    args.waves = torch.tensor(FBP_WAVES_GF2_BGR if args.fbp_correct_waves else FBP_WAVES_LEGACY, dtype=torch.float32)
     train_e2e(args)
