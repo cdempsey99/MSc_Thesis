@@ -2,20 +2,20 @@
 plot_calibration.py - error-confidence / reliability figures from the calibration arrays that
 reeval_auroc.py --calibration_dir saves (one .npz per checkpoint and model: <tag>__<run>__<teacher|student>.npz).
 
-Per .npz, one figure with four panels:
-  (a) reliability curve: one point per confidence bin at the bin's ACTUAL mean confidence (not the bin
-      centre) against its accuracy, vs the diagonal; below it, the share of all pixels and the share of all
-      ERRORS falling in each bin - i.e. where the mass and the errors sit on the confidence scale
-  (b) error-confidence curve with equal-mass bins (every point holds the same number of pixels), vs the
-      calibrated line error = 1 - confidence; above the line = overconfident, below = underconfident
-  (c) confidence histograms of correct vs wrong pixels
-  (d) risk-coverage: error rate of the most-confident x% of pixels, ranked by confidence and by total
+Per .npz, one figure with three panels:
+  (a) reliability curve with equal-mass bins (every point holds the same number of pixels, so the points
+      crowd where the pixels are): accuracy vs mean confidence against the diagonal; below the diagonal =
+      overconfident, above = underconfident. Title: standard 10-bin ECE, equal-mass ECE, signed gap
+  (b) where pixels and errors sit on the confidence scale: per confidence bin a stacked bar of correct and
+      wrong pixels, both as shares of ALL pixels (bar height = pixel mass, orange = error mass, orange
+      fraction of a bar = that bin's error rate)
+  (c) risk-coverage: error rate of the most-certain x% of pixels, ranked by confidence, total and epistemic
       uncertainty; the flat line is a model whose ranking carries no information
 plus a CSV row of summary numbers (ECE, equal-mass ECE, signed gap, share of pixels / errors below 0.5
 confidence, class-wise ECE) and, with several inputs, an overlay figure comparing them.
 
-Panels (a) and the ECE / mass numbers use the exact per-bin sums over every scored pixel; (b)-(d) use the
-~5M-pixel AUROC sample. Usage:
+Panel (b) and the ECE / mass numbers use the exact per-bin sums over every scored pixel; (a) and (c) use
+the ~5M-pixel AUROC sample. Usage:
     python plot_calibration.py results/calibration/*.npz --labels AS1 AS2 ... --classes reben --out_dir results/calibration_plots
 """
 import argparse
@@ -30,8 +30,9 @@ import matplotlib.pyplot as plt
 
 from configs.config import FBP_CLASSES, REBEN_CLASSES
 
-N_REL_BINS = 10
-N_EQUAL_MASS = 50
+N_REL_BINS = 10      # standard ECE binning
+N_EQUAL_MASS = 50    # points on the equal-mass reliability curve
+N_HIST_BINS = 20     # bars in the correct/wrong pixel histogram
 
 
 def _coarse(d, n_out=N_REL_BINS):
@@ -82,10 +83,11 @@ def summarise(d, class_names):
 
 
 def equal_mass_curve(d, n_groups=N_EQUAL_MASS):
+    """(mean confidence, accuracy) of n_groups equal-size groups of pixels sorted by confidence."""
     sc, se = d["sample_conf"], d["sample_err"].astype(np.float64)
     order = np.argsort(sc)
     groups = np.array_split(order, n_groups)
-    return np.array([sc[g].mean() for g in groups]), np.array([se[g].mean() for g in groups])
+    return np.array([sc[g].mean() for g in groups]), np.array([1 - se[g].mean() for g in groups])
 
 
 def risk_coverage(score_low_is_certain, err, n_points=100):
@@ -96,46 +98,38 @@ def risk_coverage(score_low_is_certain, err, n_points=100):
 
 
 def plot_one(d, label, summ, bins, out_path):
-    n, acc, conf, ok = bins
-    err_per_bin = n * (1 - acc)
-    fig = plt.figure(figsize=(16, 9))
-    gs = fig.add_gridspec(3, 3, height_ratios=[2, 1, 2])
+    fig = plt.figure(figsize=(18, 7))
+    gs = fig.add_gridspec(2, 3, height_ratios=[5, 1])
 
+    # (a) equal-mass reliability
     ax = fig.add_subplot(gs[0, 0])
     ax.plot([0, 1], [0, 1], "--", color="grey", label="perfect calibration")
-    ax.plot(conf[ok], acc[ok], "o-", label="model (bin mean confidence)")
+    mc, ma = equal_mass_curve(d)
+    ax.plot(mc, ma, ".-", label=f"model ({N_EQUAL_MASS} equal-mass bins)")
     ax.set(xlim=(0, 1), ylim=(0, 1), xlabel="confidence", ylabel="accuracy",
-           title=f"(a) reliability  ECE={summ['ece_10bin']:.3f}  signed gap={summ['signed_gap']:+.3f}")
-    ax.legend(fontsize=8)
-    ax2 = fig.add_subplot(gs[1, 0], sharex=ax)
-    centres = (np.arange(N_REL_BINS) + 0.5) / N_REL_BINS
-    w = 0.4 / N_REL_BINS
-    ax2.bar(centres - w / 2, n / n.sum(), width=w, label="share of pixels")
-    ax2.bar(centres + w / 2, err_per_bin / max(err_per_bin.sum(), 1), width=w, label="share of errors")
-    ax2.set(xlabel="confidence bin", ylabel="share")
-    ax2.legend(fontsize=8)
+           title=f"(a) reliability  ECE={summ['ece_10bin']:.3f}  equal-mass ECE={summ['ece_equal_mass_15']:.3f}\n"
+                 f"signed gap={summ['signed_gap']:+.3f} (< 0 underconfident, > 0 overconfident)")
+    ax.legend(fontsize=8, loc="upper left")
 
+    # (b) stacked correct / wrong pixels per confidence bin, as shares of all pixels (exact sums)
     ax = fig.add_subplot(gs[0, 1])
-    mc, er = equal_mass_curve(d)
-    xs = np.linspace(0, 1, 50)
-    ax.plot(xs, 1 - xs, "--", color="grey", label="calibrated: error = 1 - conf")
-    ax.plot(mc, er, ".-", label=f"model ({N_EQUAL_MASS} equal-mass bins)")
-    ax.set(xlim=(0, 1), ylim=(0, 1), xlabel="confidence", ylabel="error rate",
-           title=f"(b) error-confidence  equal-mass ECE={summ['ece_equal_mass_15']:.3f}")
-    ax.legend(fontsize=8)
+    k = len(d["fine_n"]) // N_HIST_BINS
+    hn = d["fine_n"].reshape(N_HIST_BINS, k).sum(1).astype(np.float64)
+    hc = d["fine_correct"].reshape(N_HIST_BINS, k).sum(1).astype(np.float64)
+    tot = max(hn.sum(), 1)
+    centres = (np.arange(N_HIST_BINS) + 0.5) / N_HIST_BINS
+    w = 0.9 / N_HIST_BINS
+    ax.bar(centres, hc / tot, width=w, label="correct pixels")
+    ax.bar(centres, (hn - hc) / tot, width=w, bottom=hc / tot, label="wrong pixels")
+    ax.set(xlim=(0, 1), xlabel="confidence", ylabel="share of all pixels",
+           title=f"(b) pixels and errors by confidence\n{100 * summ['share_pixels_conf_below_0.5']:.0f}% of pixels and "
+                 f"{100 * summ['share_errors_conf_below_0.5']:.0f}% of errors below 0.5")
+    ax.legend(fontsize=8, loc="upper left")
 
+    # (c) risk-coverage
     ax = fig.add_subplot(gs[0, 2])
-    sc, se = d["sample_conf"], d["sample_err"].astype(bool)
-    hb = np.linspace(0, 1, 51)
-    ax.hist(sc[~se], bins=hb, density=True, alpha=0.6, label="correct pixels")
-    ax.hist(sc[se], bins=hb, density=True, alpha=0.6, label="wrong pixels")
-    ax.set(xlabel="confidence", ylabel="density",
-           title=f"(c) confidence: {100 * summ['share_errors_conf_below_0.5']:.0f}% of errors and "
-                 f"{100 * summ['share_pixels_conf_below_0.5']:.0f}% of pixels below 0.5")
-    ax.legend(fontsize=8)
-
-    ax = fig.add_subplot(gs[2, :2])
-    err = se.astype(np.float64)
+    sc = d["sample_conf"]
+    err = d["sample_err"].astype(np.float64)
     cov, risk = risk_coverage(-sc, err)
     ax.plot(cov, risk, label="ranked by confidence")
     cov, risk = risk_coverage(d["sample_total_unc"], err)
@@ -145,13 +139,14 @@ def plot_one(d, label, summ, bins, out_path):
         ax.plot(cov, risk, label="ranked by epistemic uncertainty")
     ax.axhline(err.mean(), ls="--", color="grey", label="uninformative ranking")
     ax.set(xlabel="coverage (fraction of most-certain pixels kept)", ylabel="error rate of kept pixels",
-           title="(d) risk-coverage")
+           title="(c) risk-coverage")
     ax.legend(fontsize=8)
 
-    ax = fig.add_subplot(gs[2, 2])
+    ax = fig.add_subplot(gs[1, :])
     ax.axis("off")
-    ax.text(0, 1, "\n".join(f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}"
-                            for k, v in summ.items()), va="top", fontsize=8, family="monospace", wrap=True)
+    items = [f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}" for k, v in summ.items()]
+    ax.text(0, 1, "   |   ".join(items[:7]) + "\n" + "   |   ".join(items[7:]), va="top", fontsize=8,
+            family="monospace", wrap=True)
     fig.suptitle(label)
     fig.tight_layout()
     fig.savefig(out_path, dpi=120)
@@ -177,7 +172,7 @@ def main():
         summ, bins = summarise(d, class_names)
         plot_one(d, label, summ, bins, os.path.join(args.out_dir, f"{Path(f).stem}.png"))
         rows.append({"label": label, "file": Path(f).name, **summ})
-        curves.append((label, bins, equal_mass_curve(d)))
+        curves.append((label, equal_mass_curve(d), risk_coverage(-d["sample_conf"], d["sample_err"].astype(np.float64))))
         print(f"{label}: ECE {summ['ece_10bin']:.4f} | equal-mass ECE {summ['ece_equal_mass_15']:.4f} | "
               f"signed gap {summ['signed_gap']:+.4f} | pixels <0.5 conf {100 * summ['share_pixels_conf_below_0.5']:.1f}% | "
               f"errors <0.5 conf {100 * summ['share_errors_conf_below_0.5']:.1f}%")
@@ -190,13 +185,13 @@ def main():
     if len(curves) > 1:
         fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
         axes[0].plot([0, 1], [0, 1], "--", color="grey")
-        xs = np.linspace(0, 1, 50)
-        axes[1].plot(xs, 1 - xs, "--", color="grey")
-        for label, (n, acc, conf, ok), (mc, er) in curves:
-            axes[0].plot(conf[ok], acc[ok], "o-", label=label)
-            axes[1].plot(mc, er, ".-", label=label)
-        axes[0].set(xlim=(0, 1), ylim=(0, 1), xlabel="confidence", ylabel="accuracy", title="reliability (bin mean confidence)")
-        axes[1].set(xlim=(0, 1), ylim=(0, 1), xlabel="confidence", ylabel="error rate", title="error-confidence (equal-mass bins)")
+        for label, (mc, ma), (cov, risk) in curves:
+            axes[0].plot(mc, ma, ".-", label=label)
+            axes[1].plot(cov, risk, label=label)
+        axes[0].set(xlim=(0, 1), ylim=(0, 1), xlabel="confidence", ylabel="accuracy",
+                    title=f"reliability ({N_EQUAL_MASS} equal-mass bins)")
+        axes[1].set(xlabel="coverage (fraction of most-confident pixels kept)", ylabel="error rate of kept pixels",
+                    title="risk-coverage, ranked by confidence")
         for ax in axes:
             ax.legend(fontsize=8)
         fig.tight_layout()
