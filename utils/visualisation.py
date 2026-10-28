@@ -575,8 +575,11 @@ def plot_error_localization_histogram(rho_total, rho_epistemic, save_name="error
     save_path = os.path.join(BASE_OUT, "error_localization")
     ensure_dir(save_path)
 
-    rho_total = np.asarray(rho_total)
-    rho_epistemic = np.asarray(rho_epistemic)
+    # Drop NaN/inf per-patch values (np.histogram can't bin them - crashed SAR AS4 after training, 26/10)
+    rho_total = np.asarray(rho_total, dtype=float)
+    rho_total = rho_total[np.isfinite(rho_total)]
+    rho_epistemic = np.asarray(rho_epistemic, dtype=float)
+    rho_epistemic = rho_epistemic[np.isfinite(rho_epistemic)]
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
     for ax, vals, label, color in [
