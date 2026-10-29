@@ -46,7 +46,7 @@ from utils.dataset_e2e import load_reben_splits, load_reben_sar_splits, ReBENRaw
 from utils.misc import log_msg, fit_temperature
 from utils.visualisation import plot_reliability_diagram
 from models.ensemble import DecoderEnsemble
-from models.encoder import initialize_clay_encoder_partial_unfreeze, get_encoder_representation_partial
+from models.encoder import initialize_clay_encoder_partial_unfreeze, get_encoder_representation_partial, REBEN_GSD
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -62,6 +62,7 @@ def load_splits(args):
             metadata_path=args.metadata_path, s2_root=args.img_root, ref_root=args.ref_root,
             exclude_snow=not args.include_snow, exclude_cloud=not args.include_cloud,
             max_patches=args.max_patches, max_val_patches=args.max_val_patches,
+            clay_normalise=args.clay_normalise_s2,
         )
     else:
         return load_reben_sar_splits(
@@ -202,6 +203,13 @@ def main():
     parser.add_argument("--lee_filter", action="store_true", help="SAR only")
     parser.add_argument("--max_val_pixels", type=int, default=2_000_000)
     parser.add_argument("--run_name", type=str, default="AS1_calibration")
+    parser.add_argument("--clay_native_forward", action="store_true",
+                        help="Clay position encoding, cls token, single final norm - must match how the checkpoint "
+                             "was trained (off = original path)")
+    parser.add_argument("--clay_normalise_s2", action="store_true",
+                        help="reBEN optical only: Clay sentinel-2-l2a z-score inputs - must match training")
+    parser.add_argument("--clay_single_norm", action="store_true",
+                        help="Skip the second final LayerNorm - must match training")
     args = parser.parse_args()
 
     waves = WAVES[args.dataset]
@@ -212,7 +220,9 @@ def main():
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
     log_msg(f"Val: {len(val_ds)} patches | Test: {len(test_ds)} patches")
 
-    encoder_model = initialize_clay_encoder_partial_unfreeze(n_unfrozen_blocks=args.n_unfrozen_blocks)
+    encoder_model = initialize_clay_encoder_partial_unfreeze(n_unfrozen_blocks=args.n_unfrozen_blocks,
+                                                             single_norm=args.clay_single_norm,
+                                                             native_forward=args.clay_native_forward, gsd=REBEN_GSD)
     enc_ckpt = torch.load(args.encoder_checkpoint, map_location=DEVICE)
     encoder_model.load_state_dict(enc_ckpt['encoder_state_dict'], strict=False)
     encoder_model.to(DEVICE)
