@@ -19,7 +19,7 @@ from rasterio.windows import Window
 from utils.misc import (log_msg, save_checkpoint, FocalLoss, js_divergence_loss, pearson_diversity_loss,
                         orthogonality_loss, evaluate_error_localization, ensemble_uncertainty_and_pred,
                         endd_loss, get_temperature, resume_student_cosine, dirichlet_uncertainty_and_pred,
-                        _select_visualization_patches, auroc_pixels_per_batch, auroc_pixel_sample)
+                        _select_visualization_patches, auroc_pixels_per_batch, auroc_pixel_sample, HeadLossTracker)
 from utils.dataset_e2e import load_reben_sar_splits, ReBENSARRawDataset
 S1_WAVES = ReBENSARRawDataset.WAVELENGTHS  # [3.5, 4.0] μm — Clay metadata.yaml nominal SAR values
 import math
@@ -107,6 +107,7 @@ def train_e2e_reben_sar(args):
         num_classes=args.num_classes,
     )
     decoder.to(DEVICE)
+    head_tracker = HeadLossTracker(decoder.M, DEVICE)  # per-head train/val losses + ensemble val NLL
 
     student_model = None
     student_optimizer = None
@@ -292,6 +293,7 @@ def train_e2e_reben_sar(args):
             batch_masks = batch_masks.to(DEVICE, non_blocking=True).long()
 
             bn_snapshot = _bn_snapshot(decoder)
+            head_tracker.begin_batch()
 
             with torch.cuda.amp.autocast():
                 features = get_encoder_representation_partial(batch_imgs, encoder_model, waves=S1_WAVES)
@@ -299,7 +301,9 @@ def train_e2e_reben_sar(args):
 
                 total_task_loss = 0
                 for head_idx in range(decoder.M):
-                    total_task_loss += criterion(all_preds[head_idx], batch_masks)
+                    head_loss = criterion(all_preds[head_idx], batch_masks)
+                    total_task_loss += head_loss
+                    head_tracker.add_train(head_idx, head_loss)
                 mean_logits = all_preds.mean(dim=0)
                 total_task_loss += criterion(mean_logits, batch_masks)
                 task_loss = total_task_loss / (decoder.M + 1)
@@ -354,6 +358,7 @@ def train_e2e_reben_sar(args):
             epoch_pearson_loss += div_loss_pearson.detach()
             epoch_orth_loss += div_loss_orth.detach()
             n_valid_batches += 1
+            head_tracker.commit_batch()  # only batches that actually stepped count towards the per-head means
 
         torch.cuda.synchronize()
         train_phase_time = time.perf_counter() - train_phase_start
@@ -401,11 +406,14 @@ def train_e2e_reben_sar(args):
                     features = get_encoder_representation_partial(v_imgs, encoder_model, waves=S1_WAVES)
                     all_preds = decoder(features)
                     total_val_loss = 0
+                    val_head_losses = []
                     for head_idx in range(decoder.M):
-                        total_val_loss += criterion(all_preds[head_idx], v_masks)
+                        val_head_losses.append(criterion(all_preds[head_idx], v_masks))
+                        total_val_loss += val_head_losses[-1]
                     mean_logits = all_preds.mean(dim=0)
                     total_val_loss += criterion(mean_logits, v_masks)
                     v_loss = total_val_loss / (decoder.M + 1)
+                head_tracker.add_val(val_head_losses, all_preds, v_masks)
                 val_loss += v_loss.item()
 
                 if student_model is not None and epoch >= args.student_warmup_epochs:
@@ -417,6 +425,7 @@ def train_e2e_reben_sar(args):
         avg_val_loss = val_loss / len(val_loader)
         loss_history["val"].append(avg_val_loss)
         log_msg(f"Validation Loss: {avg_val_loss:.8f}")
+        head_tracker.log_epoch(loss_history)  # train_heads / val_heads / val_heads_nll / val_ensemble_nll
 
         # Stepped here, before any checkpoint is written, so a saved checkpoint always carries the
         # lr for the NEXT epoch - previously a plateau halving on a save epoch (every 5th) was

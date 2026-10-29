@@ -98,8 +98,8 @@ def risk_coverage(score_low_is_certain, err, n_points=100):
 
 
 def plot_one(d, label, summ, bins, out_path):
-    fig = plt.figure(figsize=(18, 7))
-    gs = fig.add_gridspec(2, 3, height_ratios=[5, 1])
+    fig = plt.figure(figsize=(18, 6.2))
+    gs = fig.add_gridspec(2, 3, height_ratios=[10, 1])
 
     # (a) equal-mass reliability
     ax = fig.add_subplot(gs[0, 0])
@@ -121,6 +121,7 @@ def plot_one(d, label, summ, bins, out_path):
     w = 0.9 / N_HIST_BINS
     ax.bar(centres, hc / tot, width=w, label="correct pixels")
     ax.bar(centres, (hn - hc) / tot, width=w, bottom=hc / tot, label="wrong pixels")
+    ax.set_ylim(0, 1.1 * hn.max() / tot)  # headroom so the tallest bar is never clipped
     ax.set(xlim=(0, 1), xlabel="confidence", ylabel="share of all pixels",
            title=f"(b) pixels and errors by confidence\n{100 * summ['share_pixels_conf_below_0.5']:.0f}% of pixels and "
                  f"{100 * summ['share_errors_conf_below_0.5']:.0f}% of errors below 0.5")

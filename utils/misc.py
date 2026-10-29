@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 import random
 import time
@@ -245,6 +246,73 @@ class DiceLoss(nn.Module):
             return torch.tensor(0.0, device=input.device, requires_grad=True)
 
         return 1.0 - torch.stack(dice_scores).mean()
+
+
+class HeadLossTracker:
+    """Per-epoch per-head diagnostics, appended to a run's loss_history under:
+      train_heads      - each head's training loss (the training criterion, e.g. focal), per epoch
+      val_heads        - each head's validation loss (same criterion), per epoch
+      val_heads_nll    - each head's validation NLL on its own (labelled pixels)
+      val_ensemble_nll - the ensemble's validation NLL from AVERAGED PROBABILITIES (how the ensemble predicts)
+    val_heads_nll vs val_ensemble_nll is the like-for-like comparison: a typical head on its own vs the
+    ensemble. Purely additive logging - training, checkpoint selection and the existing train/val keys are
+    unchanged. Usage per training batch: begin_batch(); add_train(m, loss) per head; commit_batch() once the
+    batch counts (skip it for batches the non-finite guard drops). Per validation batch: add_val(...).
+    End of epoch: log_epoch(loss_history)."""
+
+    def __init__(self, M, device):
+        self.M, self.device = M, device
+        self._reset_epoch()
+        self.begin_batch()
+
+    def _reset_epoch(self):
+        z = lambda: torch.zeros(self.M, device=self.device)
+        self.tr_sum, self.tr_n = z(), z()
+        self.va_sum, self.va_batches = z(), 0
+        self.va_nll_sum, self.ens_nll_sum, self.n_pix = z(), torch.zeros((), device=self.device), 0
+
+    def begin_batch(self):
+        self.b_sum = torch.zeros(self.M, device=self.device)
+        self.b_n = torch.zeros(self.M, device=self.device)
+
+    def add_train(self, head_idx, loss):
+        self.b_sum[head_idx] += loss.detach().float()
+        self.b_n[head_idx] += 1
+
+    def commit_batch(self):
+        self.tr_sum += self.b_sum
+        self.tr_n += self.b_n
+        self.begin_batch()
+
+    @torch.no_grad()
+    def add_val(self, head_losses, all_preds, targets, ignore_index=0):
+        """head_losses: [M] criterion values for this batch. all_preds: [M, B, C, H, W] logits at the target
+        resolution. targets: [B, H, W] class indices (ignore_index = unlabelled)."""
+        self.va_sum += torch.stack([l.detach().float() for l in head_losses])
+        self.va_batches += 1
+        valid = targets != ignore_index
+        n = int(valid.sum())
+        if n == 0:
+            return
+        t = targets.clamp(min=0).long().unsqueeze(1)
+        mean_p = None
+        for m in range(all_preds.shape[0]):
+            logp = torch.log_softmax(all_preds[m].float(), dim=1)
+            self.va_nll_sum[m] += -logp.gather(1, t).squeeze(1)[valid].sum()
+            p = logp.exp()
+            mean_p = p if mean_p is None else mean_p + p
+        mean_p /= all_preds.shape[0]
+        self.ens_nll_sum += -torch.log(mean_p.gather(1, t).squeeze(1).clamp_min(1e-10))[valid].sum()
+        self.n_pix += n
+
+    def log_epoch(self, loss_history):
+        loss_history.setdefault("train_heads", []).append((self.tr_sum / self.tr_n.clamp_min(1)).tolist())
+        if self.va_batches > 0:
+            loss_history.setdefault("val_heads", []).append((self.va_sum / self.va_batches).tolist())
+            if self.n_pix > 0:
+                loss_history.setdefault("val_heads_nll", []).append((self.va_nll_sum / self.n_pix).tolist())
+                loss_history.setdefault("val_ensemble_nll", []).append(float(self.ens_nll_sum / self.n_pix))
+        self._reset_epoch()
 
 
 class FocalLoss(nn.Module):

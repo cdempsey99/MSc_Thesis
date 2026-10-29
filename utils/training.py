@@ -141,6 +141,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
     optimizer.zero_grad()
     save_interval = 5
     decoder_model.to(DEVICE)
+    head_tracker = HeadLossTracker(decoder_model.M, DEVICE)  # per-head train/val losses + ensemble val NLL
     start_epoch = 0
     # Epoch the student's EnDD temperature finishes annealing at - the run's own num_epochs unless
     # this is an extension, in which case it stays at the original run's end (T held at 1.0 after).
@@ -316,12 +317,16 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                 compute_start = time.time()
                 optimizer.zero_grad()
                 total_task_loss = 0
+                head_tracker.begin_batch()
                 for head_idx, (features_m, targets_m) in enumerate(batches):
                     features_m = features_m.to(DEVICE)
                     targets_m = targets_m.to(DEVICE).long()
                     with torch.autocast('cuda', dtype=torch.float16, enabled=use_amp):
                         head_high_res = _to_224(decoder_model.heads[head_idx](features_m))
-                        total_task_loss += criterion(head_high_res, targets_m)
+                        head_loss = criterion(head_high_res, targets_m)
+                        total_task_loss += head_loss
+                    head_tracker.add_train(head_idx, head_loss)
+                head_tracker.commit_batch()
                 task_loss = total_task_loss / decoder_model.M
 
                 scaler.scale(task_loss).backward()
@@ -350,6 +355,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                         head_masks = torch.rand(decoder_model.M, features.shape[0], device=DEVICE) < head_mask_prob
 
                 bn_snapshot = _bn_snapshot(decoder_model)
+                head_tracker.begin_batch()
 
                 with torch.autocast('cuda', dtype=torch.float16, enabled=use_amp):
                     all_preds, kl_loss, mean_std = _ensemble_forward(decoder_model, features, bottleneck)
@@ -364,10 +370,12 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                             if not sel.any():  # vanishingly rare at p=0.9, batch 32: head simply skips this step
                                 continue
                             head_high_res = _to_224(all_preds[head_idx][sel])
-                            total_task_loss += criterion(head_high_res, targets[sel])
+                            head_loss = criterion(head_high_res, targets[sel])
                         else:
                             head_high_res = _to_224(all_preds[head_idx])
-                            total_task_loss += criterion(head_high_res, targets)
+                            head_loss = criterion(head_high_res, targets)
+                        total_task_loss += head_loss
+                        head_tracker.add_train(head_idx, head_loss)
                         n_loss_terms += 1
 
                     if no_mean_logit_loss:
@@ -468,6 +476,7 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                 epoch_kl_loss += kl_loss.item() if torch.is_tensor(kl_loss) else kl_loss
                 epoch_std_loss += mean_std.item() if torch.is_tensor(mean_std) else mean_std
                 n_valid_batches += 1
+                head_tracker.commit_batch()  # only batches that actually stepped count towards the per-head means
 
             if n_skipped_batches > 0:
                 log_msg(f"  Epoch {epoch+1}: skipped {n_skipped_batches}/{n_steps} batches this epoch due to non-finite loss.")
@@ -537,14 +546,19 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                         all_preds, _, _ = _ensemble_forward(decoder_model, v_features, bottleneck)
 
                         total_val_loss = 0
+                        val_head_losses = []
                         for head_idx in range(decoder_model.M):
                             head_high = _to_224(all_preds[head_idx])
-                            total_val_loss += criterion(head_high, v_targets)
+                            val_head_losses.append(criterion(head_high, v_targets))
+                            total_val_loss += val_head_losses[-1]
                         mean_logits_low = all_preds.mean(dim=0)
                         mean_logits_high = _to_224(mean_logits_low)
                         total_val_loss += criterion(mean_logits_high, v_targets)
                         v_loss = total_val_loss / (decoder_model.M + 1)
 
+                    all_preds_224 = all_preds if all_preds.shape[-2:] == (224, 224) else \
+                        torch.stack([_to_224(p) for p in all_preds])
+                    head_tracker.add_val(val_head_losses, all_preds_224, v_targets)
                     val_task_loss += v_loss.item()
             avg_val_loss = val_task_loss / len(val_loader)
 
@@ -574,6 +588,8 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
                         str(CHECKPOINT_DIR), filename=f"{run_name}_best_student.pth"
                     )
                     log_msg(f"  New best student val loss {best_student_val_loss:.6f} — saved")
+
+        head_tracker.log_epoch(loss_history)  # train_heads / val_heads / val_heads_nll / val_ensemble_nll
 
         # Stepped before the periodic save so the saved scheduler state matches the saved 'epoch'
         # (previously saved one step behind, so every walltime resume repeated one epoch's lr).

@@ -12,7 +12,7 @@ import numpy as np
 import os
 
 from utils.misc import (log_msg, save_checkpoint, FocalLoss, evaluate_error_localization, ensemble_uncertainty_and_pred,
-                        js_divergence_loss, auroc_pixels_per_batch, auroc_pixel_sample)
+                        js_divergence_loss, auroc_pixels_per_batch, auroc_pixel_sample, HeadLossTracker)
 from utils.dataset_e2e import BakedReBENDataset
 from utils.visualisation import plot_loss_curves, plot_confusion_matrix
 from models.ensemble import DecoderEnsemble
@@ -347,6 +347,7 @@ def train_decoders_reben(args):
         architecture_variation=args.architecture_variation,
     )
     decoder.to(DEVICE)
+    head_tracker = HeadLossTracker(decoder.M, DEVICE)  # per-head train/val losses + ensemble val NLL
     if args.architecture_variation:
         log_msg(f"Per-head architecture variation enabled - refine_blocks: {decoder.refine_block_counts}, "
                 f"embed_dim: {decoder.head_embed_dims}")
@@ -493,6 +494,7 @@ def train_decoders_reben(args):
             batch_features = batch_features.to(DEVICE, non_blocking=True)
             batch_masks    = batch_masks.to(DEVICE, non_blocking=True).long()
 
+            head_tracker.begin_batch()
             with torch.cuda.amp.autocast():
                 all_preds = decoder(batch_features)
 
@@ -508,9 +510,11 @@ def train_decoders_reben(args):
                         sel = head_masks[head_idx]
                         if not sel.any():  # vanishingly rare at p=0.5, batch 32: head simply skips this step
                             continue
-                        total_loss += criterion(all_preds[head_idx][sel], batch_masks[sel])
+                        head_loss = criterion(all_preds[head_idx][sel], batch_masks[sel])
                     else:
-                        total_loss += criterion(all_preds[head_idx], batch_masks)
+                        head_loss = criterion(all_preds[head_idx], batch_masks)
+                    total_loss += head_loss
+                    head_tracker.add_train(head_idx, head_loss)
                     n_loss_terms += 1
                 if not args.no_mean_logit_loss:
                     mean_logits = all_preds.mean(dim=0)
@@ -532,6 +536,7 @@ def train_decoders_reben(args):
             scaler.update()
             epoch_loss += loss.detach()
             epoch_jsd += div_loss_jsd.detach()
+            head_tracker.commit_batch()
 
         train_phase_time = time.perf_counter() - train_phase_start
         n_batches = len(train_loader)
@@ -557,15 +562,19 @@ def train_decoders_reben(args):
                 with torch.cuda.amp.autocast():
                     all_preds = decoder(v_features)
                     total_val = 0
+                    val_head_losses = []
                     for head_idx in range(decoder.M):
-                        total_val += criterion(all_preds[head_idx], v_masks)
+                        val_head_losses.append(criterion(all_preds[head_idx], v_masks))
+                        total_val += val_head_losses[-1]
                     mean_logits = all_preds.mean(dim=0)
                     total_val += criterion(mean_logits, v_masks)
                     val_loss += (total_val / (decoder.M + 1)).detach()
+                head_tracker.add_val(val_head_losses, all_preds, v_masks)
 
         avg_val_loss = val_loss.item() / len(val_loader)
         loss_history["val"].append(avg_val_loss)
         log_msg(f"Validation Loss: {avg_val_loss:.8f}")
+        head_tracker.log_epoch(loss_history)  # train_heads / val_heads / val_heads_nll / val_ensemble_nll
 
         # Stepped before any checkpoint is written, so a saved checkpoint carries the lr for the
         # NEXT epoch (same ordering fix as the fine-tuned pipeline)

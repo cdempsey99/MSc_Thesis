@@ -19,7 +19,7 @@ from rasterio.windows import Window
 from utils.misc import get_ece
 from utils.dataset_e2e import FBPRawDataset
 from utils.misc import (log_msg, save_checkpoint, FocalLoss, evaluate_error_localization, ensemble_uncertainty_and_pred,
-                        auroc_pixels_per_batch, auroc_pixel_sample)
+                        auroc_pixels_per_batch, auroc_pixel_sample, HeadLossTracker)
 from utils.visualisation import plot_loss_curves
 from models.ensemble import DecoderEnsemble
 from models.encoder import (
@@ -114,6 +114,7 @@ def train_e2e(args):
         num_classes=args.num_classes
     )
     decoder.to(DEVICE)
+    head_tracker = HeadLossTracker(decoder.M, DEVICE)  # per-head train/val losses + ensemble val NLL
 
     # 5. Optimiser — separate LR for unfrozen encoder params and decoder
     trainable_encoder_params = [p for p in encoder_model.parameters() if p.requires_grad]
@@ -212,8 +213,12 @@ def train_e2e(args):
                 all_preds = decoder(features)
 
                 total_task_loss = 0
+                head_tracker.begin_batch()
                 for head_idx in range(decoder.M):
-                    total_task_loss += criterion(all_preds[head_idx], batch_masks)
+                    head_loss = criterion(all_preds[head_idx], batch_masks)
+                    total_task_loss += head_loss
+                    head_tracker.add_train(head_idx, head_loss)
+                head_tracker.commit_batch()
                 if args.no_mean_logit_loss:
                     task_loss = total_task_loss / decoder.M
                 else:
@@ -254,17 +259,21 @@ def train_e2e(args):
                     all_preds = decoder(features)
 
                     total_val_loss = 0
+                    val_head_losses = []
                     for head_idx in range(decoder.M):
-                        total_val_loss += criterion(all_preds[head_idx], v_masks)
+                        val_head_losses.append(criterion(all_preds[head_idx], v_masks))
+                        total_val_loss += val_head_losses[-1]
                     mean_logits = all_preds.mean(dim=0)
                     total_val_loss += criterion(mean_logits, v_masks)
                     v_loss = total_val_loss / (decoder.M + 1)
 
+                head_tracker.add_val(val_head_losses, all_preds, v_masks)
                 val_loss += v_loss.item()
 
         avg_val_loss = val_loss / len(val_loader)
         loss_history["val"].append(avg_val_loss)
         log_msg(f"Validation Loss: {avg_val_loss:.8f}")
+        head_tracker.log_epoch(loss_history)  # train_heads / val_heads / val_heads_nll / val_ensemble_nll
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss

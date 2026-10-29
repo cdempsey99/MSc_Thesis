@@ -502,6 +502,38 @@ def plot_loss_curves(loss_history_path, save_name="loss_curves"):
     plt.close()
     print(f"Loss curves saved to {full_path}")
 
+    # Per-head figure (runs logged with HeadLossTracker): left = each head's train and val loss (training
+    # criterion); right = each head's val NLL on its own vs the ensemble's val NLL from averaged probabilities
+    if history.get("train_heads") or history.get("val_heads_nll"):
+        fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(16, 6))
+        for key, color, name in (("train_heads", "blue", "train"), ("val_heads", "orange", "val")):
+            rows = history.get(key) or []
+            if rows:
+                per_head = np.asarray(rows, dtype=float)  # [epochs, M]
+                ep = range(1, per_head.shape[0] + 1)
+                for m in range(per_head.shape[1]):
+                    ax_l.plot(ep, per_head[:, m], color=color, alpha=0.35, lw=1,
+                              label=f"{name}, each head" if m == 0 else None)
+        ax_l.set(xlabel="Epoch", ylabel="Loss (training criterion)", title="Per-head train / val loss")
+        ax_l.legend()
+        ax_l.grid(alpha=0.3)
+        if history.get("val_heads_nll"):
+            per_head = np.asarray(history["val_heads_nll"], dtype=float)
+            ep = range(1, per_head.shape[0] + 1)
+            for m in range(per_head.shape[1]):
+                ax_r.plot(ep, per_head[:, m], color="grey", alpha=0.5, lw=1,
+                          label="each head alone" if m == 0 else None)
+            ax_r.plot(range(1, len(history["val_ensemble_nll"]) + 1), history["val_ensemble_nll"], color="black",
+                      lw=2.5, label="ensemble (averaged probabilities)")
+        ax_r.set(xlabel="Epoch", ylabel="Validation NLL (labelled pixels)",
+                 title="Validation NLL: heads alone vs ensemble")
+        ax_r.legend()
+        ax_r.grid(alpha=0.3)
+        heads_path = os.path.join(save_path, f"{save_name}_heads_{current_time}.png")
+        fig.savefig(heads_path, bbox_inches='tight')
+        plt.close(fig)
+        print(f"Per-head loss curves saved to {heads_path}")
+
 
 def plot_error_localization_heatmap(uncertainty_map, correct_mask, valid_mask,
                                      save_name="error_localization_heatmap", smooth_sigma=10):

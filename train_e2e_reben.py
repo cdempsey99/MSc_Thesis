@@ -21,7 +21,8 @@ from scipy.stats import spearmanr
 from utils.misc import (log_msg, save_checkpoint, FocalLoss, js_divergence_loss, pearson_diversity_loss,
                         orthogonality_loss, endd_loss, get_temperature, resume_student_cosine, evaluate_error_localization,
                         ensemble_uncertainty_and_pred, dirichlet_uncertainty_and_pred,
-                        _select_visualization_patches, auroc_pixels_per_batch, auroc_pixel_sample)
+                        _select_visualization_patches, auroc_pixels_per_batch, auroc_pixel_sample,
+                        HeadLossTracker)
 from utils.dataset_e2e import load_reben_splits, ReBENRawDataset
 S2_WAVES = ReBENRawDataset.WAVELENGTHS  # [0.6646, 0.5598, 0.4924] μm — S2 B04/B03/B02
 from utils.visualisation import (plot_loss_curves, visualise_all_metrics, plot_confusion_matrix,
@@ -140,6 +141,7 @@ def train_e2e_reben(args):
         architecture_variation=args.architecture_variation,
     )
     decoder.to(DEVICE)
+    head_tracker = HeadLossTracker(decoder.M, DEVICE)  # per-head train/val losses + ensemble val NLL
     if args.architecture_variation:
         log_msg(f"Per-head architecture variation enabled - refine_blocks: {decoder.refine_block_counts}, embed_dim: {decoder.head_embed_dims}")
 
@@ -402,6 +404,7 @@ def train_e2e_reben(args):
             batch_masks = batch_masks.to(DEVICE, non_blocking=True).long()
 
             bn_snapshot = _bn_snapshot(decoder)
+            head_tracker.begin_batch()
 
             with torch.cuda.amp.autocast():
                 features = get_encoder_representation_partial(batch_imgs, encoder_model, waves=S2_WAVES)
@@ -419,9 +422,11 @@ def train_e2e_reben(args):
                         sel = head_masks[head_idx]
                         if not sel.any():  # vanishingly rare at p=0.5, batch 32: head simply skips this step
                             continue
-                        total_task_loss += criterion(all_preds[head_idx][sel], batch_masks[sel])
+                        head_loss = criterion(all_preds[head_idx][sel], batch_masks[sel])
                     else:
-                        total_task_loss += criterion(all_preds[head_idx], batch_masks)
+                        head_loss = criterion(all_preds[head_idx], batch_masks)
+                    total_task_loss += head_loss
+                    head_tracker.add_train(head_idx, head_loss)
                     n_loss_terms += 1
                 if not args.no_mean_logit_loss:
                     mean_logits = all_preds.mean(dim=0)
@@ -482,6 +487,7 @@ def train_e2e_reben(args):
             epoch_pearson_loss += div_loss_pearson.detach()
             epoch_orth_loss += div_loss_orth.detach()
             n_valid_batches += 1
+            head_tracker.commit_batch()  # only batches that actually stepped count towards the per-head means
 
         torch.cuda.synchronize()
         train_phase_time = time.perf_counter() - train_phase_start
@@ -531,11 +537,14 @@ def train_e2e_reben(args):
                     features = get_encoder_representation_partial(v_imgs, encoder_model, waves=S2_WAVES)
                     all_preds = eval_model(features)
                     total_val_loss = 0
+                    val_head_losses = []
                     for head_idx in range(decoder.M):
-                        total_val_loss += criterion(all_preds[head_idx], v_masks)
+                        val_head_losses.append(criterion(all_preds[head_idx], v_masks))
+                        total_val_loss += val_head_losses[-1]
                     mean_logits = all_preds.mean(dim=0)
                     total_val_loss += criterion(mean_logits, v_masks)
                     v_loss = total_val_loss / (decoder.M + 1)
+                head_tracker.add_val(val_head_losses, all_preds, v_masks)
                 val_loss += v_loss.item()
 
                 if student_model is not None and epoch >= args.student_warmup_epochs:
@@ -547,6 +556,7 @@ def train_e2e_reben(args):
         avg_val_loss = val_loss / len(val_loader)
         loss_history["val"].append(avg_val_loss)
         log_msg(f"Validation Loss: {avg_val_loss:.8f}")
+        head_tracker.log_epoch(loss_history)  # train_heads / val_heads / val_heads_nll / val_ensemble_nll
 
         # Stepped here, before any checkpoint is written, so a saved checkpoint always carries the
         # lr for the NEXT epoch - previously a plateau halving on a save epoch (every 5th) was
