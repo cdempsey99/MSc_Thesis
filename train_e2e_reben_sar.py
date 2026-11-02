@@ -498,16 +498,19 @@ def train_e2e_reben_sar(args):
     log_msg("Training completed.")
     plot_loss_curves(loss_path, save_name=f"{run_name}_loss_curves")
 
-    # Load best for evaluation
+    # Load best for evaluation (--eval_checkpoint final keeps the final-epoch weights instead)
     best_decoder_path = CHECKPOINT_DIR / f"{run_name}_best_decoder.pth"
-    if best_decoder_path.exists():
+    if args.eval_checkpoint == "final":
+        log_msg("--eval_checkpoint=final: evaluating final-epoch weights (teacher and student), "
+                "not the val-loss best checkpoints")
+    elif best_decoder_path.exists():
         ckpt = torch.load(best_decoder_path, map_location=DEVICE)
         decoder.load_state_dict(ckpt['model_state_dict'])
     best_encoder_path = CHECKPOINT_DIR / f"{run_name}_best_encoder.pth"
-    if best_encoder_path.exists():
+    if args.eval_checkpoint != "final" and best_encoder_path.exists():
         enc_ckpt = torch.load(best_encoder_path, map_location=DEVICE)
         encoder_model.load_state_dict(enc_ckpt['encoder_state_dict'], strict=False)
-    if student_model is not None:
+    if student_model is not None and args.eval_checkpoint != "final":
         best_student_path = CHECKPOINT_DIR / f"{run_name}_best_student.pth"
         if best_student_path.exists():
             student_ckpt = torch.load(best_student_path, map_location=DEVICE)
@@ -1174,6 +1177,9 @@ if __name__ == "__main__":
                         help="Limit train patches for QA runs (val/test get max_patches//5)")
     parser.add_argument("--max_val_patches", type=int, default=None,
                         help="Cap val patches independently of --max_patches")
+    parser.add_argument("--eval_checkpoint", type=str, default="best", choices=["best", "final"],
+                        help="best (original): reload the val-loss best decoder/encoder/student checkpoints for "
+                             "evaluation. final: evaluate the final-epoch weights.")
 
     args = parser.parse_args()
     train_e2e_reben_sar(args)
