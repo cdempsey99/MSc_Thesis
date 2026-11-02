@@ -612,6 +612,20 @@ def train_e2e_reben(args):
             with open(loss_path, "w") as f:
                 json.dump(loss_history, f, indent=2)
 
+        # --snapshot_epochs: permanent copies of the weights at the listed epochs (never overwritten), named so
+        # reeval_auroc.py can score them with the stem <run_name>_ep<N>. Weights only, no optimizer state.
+        if args.snapshot_epochs and (epoch + 1) in args.snapshot_epochs:
+            snap = f"{run_name}_ep{epoch + 1}"
+            save_checkpoint({'epoch': epoch + 1, 'model_state_dict': decoder.state_dict(),
+                             'bottleneck_state_dict': bottleneck.state_dict() if bottleneck is not None else None},
+                            str(CHECKPOINT_DIR), filename=f"{snap}_decoder.pth")
+            save_checkpoint({'epoch': epoch + 1, 'encoder_state_dict': encoder_model.state_dict()},
+                            str(CHECKPOINT_DIR), filename=f"{snap}_encoder.pth")
+            if student_model is not None:
+                save_checkpoint({'epoch': epoch + 1, 'model_state_dict': student_model.state_dict()},
+                                str(CHECKPOINT_DIR), filename=f"{snap}_student.pth")
+            log_msg(f"Snapshot saved: {snap}_*.pth")
+
 
     record_compute_cost(flops_profile, epochs_completed=args.num_epochs - compute_start_epoch,
                         batches_per_epoch=len(train_loader), start_time=training_start_time,
@@ -1412,6 +1426,10 @@ if __name__ == "__main__":
     parser.add_argument("--eval_checkpoint", type=str, default="best", choices=["best", "final"],
                         help="best (original): reload the val-loss best decoder/encoder/student checkpoints for "
                              "evaluation. final: evaluate the final-epoch weights.")
+    parser.add_argument("--snapshot_epochs", type=int, nargs="+", default=None,
+                        help="Epochs (1-based, e.g. 20 40 60) at which to keep a permanent copy of the decoder/encoder"
+                             "/student weights as <run_name>_ep<N>_*.pth, for learning-curve evaluation with "
+                             "reeval_auroc.py. Off by default.")
 
     args = parser.parse_args()
     train_e2e_reben(args)

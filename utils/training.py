@@ -164,6 +164,9 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
     no_mean_logit_loss = bool(input_dict.get("no_mean_logit_loss", False))
     if no_mean_logit_loss:
         log_msg("Ensemble-mean (averaged-logit) task loss term disabled: per-head losses only")
+    snapshot_epochs = input_dict.get("snapshot_epochs") or []
+    if snapshot_epochs:
+        log_msg(f"Weight snapshots (--snapshot_epochs) will be kept at epochs {snapshot_epochs}")
 
     # Per-head sample masking (--head_mask_prob < 1): each head's task loss only sees a fraction p of
     # the batch. fixed mode draws one [N, M] assignment for the whole run (seeded, so a resume
@@ -620,6 +623,17 @@ def train_model(decoder_model, train_loader, val_loader, criterion, optimizer, i
             loss_path = os.path.join(runs_dir, f"{run_name}_loss_history.json")
             with open(loss_path, "w") as f:
                 json.dump(loss_history, f, indent=2)
+
+        # --snapshot_epochs: permanent copy of the weights at the listed epochs (never overwritten), one file that
+        # reeval_auroc.py --pipeline fbp scores directly (teacher + student from the same file). Weights only.
+        if snapshot_epochs and (epoch + 1) in snapshot_epochs:
+            save_checkpoint({
+                'epoch': epoch + 1,
+                'model_state_dict': decoder_model.state_dict(),
+                'bottleneck_state_dict': bottleneck.state_dict() if bottleneck is not None else None,
+                'student_model_state_dict': student_model.state_dict() if student_model is not None else None,
+            }, str(CHECKPOINT_DIR), filename=f"{run_name}_ep{epoch + 1}_model.pth")
+            log_msg(f"Snapshot saved: {run_name}_ep{epoch + 1}_model.pth")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     final_state = {

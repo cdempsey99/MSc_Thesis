@@ -305,6 +305,10 @@ if __name__ == "__main__":
                              "default, matches existing behaviour) or 'final' (last epoch's weights - val-loss "
                              "selection on FBP's small val split has repeatedly proven unreliable, e.g. picking "
                              "an epoch-6 checkpoint out of a 40-epoch run)")
+    parser.add_argument("--snapshot_epochs", type=int, nargs="+", default=None,
+                        help="Epochs (1-based, e.g. 20 40 60) at which to keep a permanent copy of the weights "
+                             "(teacher, bottleneck, student) as <run_name>_ep<N>_model.pth, for learning-curve "
+                             "evaluation with reeval_auroc.py --pipeline fbp. Off by default.")
 
     args = parser.parse_args()
     run_training(args)
