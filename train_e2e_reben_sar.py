@@ -38,6 +38,21 @@ from profile_flops import ensure_flops_profile, start_compute_tracking, record_c
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+class _WithIndex(torch.utils.data.Dataset):
+    """Wraps a dataset so each item also returns its index - needed by --head_mask_mode fixed to
+    look up a patch's permanent head assignment. Module-level so DataLoader workers can pickle it.
+    Same as train_e2e_reben.py."""
+    def __init__(self, ds):
+        self.ds = ds
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, i):
+        img, mask = self.ds[i]
+        return img, mask, i
+
+
 def _bn_snapshot(module):
     """Per-channel running_mean/running_var for every BatchNorm2d in module — cheap to clone every batch."""
     return {name: (m.running_mean.clone(), m.running_var.clone())
@@ -82,9 +97,25 @@ def train_e2e_reben_sar(args):
     # persistent_workers avoids respawning num_workers processes at the start of every epoch -
     # only valid when num_workers > 0, so guarded rather than a bare True.
     persistent = args.num_workers > 0
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size,
+    # Training loader also yields each patch's dataset index, used by --head_mask_mode fixed to
+    # give every patch a permanent head assignment. Val/test loaders are untouched.
+    train_loader = DataLoader(_WithIndex(train_ds), batch_size=args.batch_size,
                               shuffle=True, num_workers=args.num_workers, pin_memory=True,
                               persistent_workers=persistent)
+
+    # Per-head sample masks (Bootstrapped-DQN-style, Osband et al. 2016), as in train_e2e_reben.py:
+    # each head's task loss only counts the patches its mask selects. p=1 (default) = original behaviour.
+    use_head_masks = args.head_mask_prob < 1.0
+    fixed_head_masks = None
+    if use_head_masks:
+        if args.head_mask_mode == "fixed":
+            g = torch.Generator().manual_seed(args.head_mask_seed)
+            fixed_head_masks = (torch.rand(len(train_ds), args.ensemble_size, generator=g)
+                                < args.head_mask_prob).to(DEVICE)  # [N, M], drawn once for the whole run
+        log_msg(f"Per-head sample masking: p={args.head_mask_prob}, mode={args.head_mask_mode} "
+                f"(each head trains on ~{args.head_mask_prob * args.batch_size:.0f} of {args.batch_size} patches per batch)")
+    if args.no_mean_logit_loss:
+        log_msg("Ensemble-mean (averaged-logit) task loss term disabled: per-head losses only")
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size,
                               shuffle=False, num_workers=args.num_workers, pin_memory=True,
                               persistent_workers=persistent)
@@ -105,9 +136,12 @@ def train_e2e_reben_sar(args):
         in_channels=1024,
         embed_dim=args.decoder_embed_dim,
         num_classes=args.num_classes,
+        architecture_variation=args.architecture_variation,
     )
     decoder.to(DEVICE)
     head_tracker = HeadLossTracker(decoder.M, DEVICE)  # per-head train/val losses + ensemble val NLL
+    if args.architecture_variation:
+        log_msg(f"Per-head architecture variation enabled - refine_blocks: {decoder.refine_block_counts}, embed_dim: {decoder.head_embed_dims}")
 
     student_model = None
     student_optimizer = None
@@ -132,6 +166,7 @@ def train_e2e_reben_sar(args):
             "ensemble_size": args.ensemble_size,
             "decoder_embed_dim": args.decoder_embed_dim,
             "num_classes": args.num_classes,
+            "architecture_variation": args.architecture_variation,
             "in_channels": 2,
             "batch_size": args.batch_size,
             "include_student": args.train_student,
@@ -155,10 +190,30 @@ def train_e2e_reben_sar(args):
     def warmup_lambda(epoch):
         return min(1.0, float(epoch + 1) / float(max(1, args.warmup_epochs)))
 
-    warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, warmup_lambda)
+    # --lr_schedule cosine: same linear warmup, then cosine decay from the base lr (reached on the
+    # last warmup epoch) to lr_min_ratio * base on the final epoch - identical to train_e2e_reben.py,
+    # including the SGDR-style warm restart when an extension resumes at/past the planned length.
+    cosine_state = {'end': args.num_epochs, 'restart': None}
+
+    def _cosine(t):
+        return args.lr_min_ratio + (1.0 - args.lr_min_ratio) * 0.5 * (1.0 + math.cos(math.pi * min(1.0, t)))
+
+    def cosine_lambda(epoch):
+        if cosine_state['restart'] is not None and epoch >= cosine_state['restart']:
+            restart = cosine_state['restart']
+            return _cosine((epoch - restart) / max(1, args.num_epochs - 1 - restart))
+        if epoch < args.warmup_epochs - 1:
+            return warmup_lambda(epoch)
+        return _cosine((epoch - (args.warmup_epochs - 1)) / max(1, cosine_state['end'] - args.warmup_epochs))
+
+    warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, cosine_lambda if args.lr_schedule == "cosine" else warmup_lambda)
     plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-8
     )
+    log_msg(f"LR schedule: {args.lr_schedule} ({args.warmup_epochs} warmup epochs"
+            + (f", cosine to {args.lr_min_ratio}x base by epoch {args.num_epochs})" if args.lr_schedule == "cosine"
+               else ", then halve on 5-epoch val plateau)"))
     scaler = torch.cuda.amp.GradScaler()
 
     if args.use_focal_loss:
@@ -179,6 +234,7 @@ def train_e2e_reben_sar(args):
 
     if args.resume:
         resume_ckpt_epochs = {}
+        saved_lr_plan = None
         decoder_ckpt = Path(args.resume_decoder_path) if args.resume_decoder_path else None
         encoder_ckpt = Path(args.resume_encoder_path) if args.resume_encoder_path else None
         if decoder_ckpt and decoder_ckpt.exists():
@@ -198,6 +254,8 @@ def train_e2e_reben_sar(args):
                 plateau_scheduler.load_state_dict(ckpt['plateau_scheduler_state_dict'])
             if ckpt.get('scaler_state_dict') is not None:
                 scaler.load_state_dict(ckpt['scaler_state_dict'])
+            if ckpt.get('lr_schedule') == "cosine":
+                saved_lr_plan = (ckpt.get('lr_schedule_num_epochs'), ckpt.get('lr_schedule_restart_epoch'))
         if encoder_ckpt and encoder_ckpt.exists():
             log_msg(f"Resuming encoder from {encoder_ckpt}...")
             enc_ckpt = torch.load(encoder_ckpt, map_location=DEVICE)
@@ -233,7 +291,25 @@ def train_e2e_reben_sar(args):
             with open(loss_path) as f:
                 loss_history = json.load(f)
         log_msg(f"Resuming from epoch {start_epoch + 1}")
-        if start_epoch < args.warmup_epochs:
+        if args.lr_schedule == "cosine" and start_epoch < args.num_epochs:
+            if saved_lr_plan is None:
+                raise ValueError("--lr_schedule cosine resume needs a last_decoder checkpoint saved by a cosine "
+                                 "run; this one has no cosine schedule info (plateau run, or a 'best' checkpoint?)")
+            saved_num_epochs, saved_restart = saved_lr_plan
+            if saved_num_epochs == args.num_epochs:
+                # Cut-off run, same plan: continue the original curve (including any earlier restart)
+                cosine_state.update(end=saved_num_epochs, restart=saved_restart)
+            elif args.num_epochs > saved_num_epochs and start_epoch >= saved_num_epochs:
+                cosine_state.update(end=saved_num_epochs, restart=start_epoch)
+                log_msg(f"Extension {saved_num_epochs} -> {args.num_epochs} epochs: cosine warm restart "
+                        f"from base lr over epochs {start_epoch + 1}-{args.num_epochs}")
+            else:
+                raise ValueError(f"Cosine schedule was planned for {saved_num_epochs} epochs; resuming at epoch "
+                                 f"{start_epoch} with --num_epochs {args.num_epochs} is ambiguous. Finish the "
+                                 f"original {saved_num_epochs} epochs first, then extend from there.")
+        # LambdaLR sets lr = base * lambda(step count) absolutely, so stepping start_epoch times
+        # repositions it exactly. Cosine needs this for every epoch, plateau only inside warmup.
+        if args.lr_schedule == "cosine" or start_epoch < args.warmup_epochs:
             for _ in range(start_epoch):
                 warmup_scheduler.step()
         if student_scheduler is not None:
@@ -286,7 +362,7 @@ def train_e2e_reben_sar(args):
         decoder.train()
 
         train_phase_start = time.perf_counter()
-        for batch_imgs, batch_masks in train_loader:
+        for batch_imgs, batch_masks, batch_idx in train_loader:
             optimizer.zero_grad()
             # non_blocking lets the host->GPU copy overlap with compute (loaders use pin_memory=True)
             batch_imgs  = batch_imgs.to(DEVICE, non_blocking=True)
@@ -299,14 +375,29 @@ def train_e2e_reben_sar(args):
                 features = get_encoder_representation_partial(batch_imgs, encoder_model, waves=S1_WAVES)
                 all_preds = decoder(features)
 
+                if use_head_masks:
+                    if fixed_head_masks is not None:
+                        head_masks = fixed_head_masks[batch_idx.to(DEVICE)].T  # [M, B]
+                    else:
+                        head_masks = torch.rand(decoder.M, batch_imgs.shape[0], device=DEVICE) < args.head_mask_prob
                 total_task_loss = 0
+                n_loss_terms = 0
                 for head_idx in range(decoder.M):
-                    head_loss = criterion(all_preds[head_idx], batch_masks)
+                    if use_head_masks:
+                        sel = head_masks[head_idx]
+                        if not sel.any():  # vanishingly rare at p>=0.5, batch 16+: head simply skips this step
+                            continue
+                        head_loss = criterion(all_preds[head_idx][sel], batch_masks[sel])
+                    else:
+                        head_loss = criterion(all_preds[head_idx], batch_masks)
                     total_task_loss += head_loss
                     head_tracker.add_train(head_idx, head_loss)
-                mean_logits = all_preds.mean(dim=0)
-                total_task_loss += criterion(mean_logits, batch_masks)
-                task_loss = total_task_loss / (decoder.M + 1)
+                    n_loss_terms += 1
+                if not args.no_mean_logit_loss:
+                    mean_logits = all_preds.mean(dim=0)
+                    total_task_loss += criterion(mean_logits, batch_masks)
+                    n_loss_terms += 1
+                task_loss = total_task_loss / max(n_loss_terms, 1)
 
             # Diversity losses computed in float32, outside autocast, for numerical stability
             div_loss_jsd = torch.tensor(0.0, device=DEVICE)
@@ -430,7 +521,7 @@ def train_e2e_reben_sar(args):
         # Stepped here, before any checkpoint is written, so a saved checkpoint always carries the
         # lr for the NEXT epoch - previously a plateau halving on a save epoch (every 5th) was
         # written after the save and silently lost on resume. Same between-epoch timing as before.
-        if epoch < args.warmup_epochs:
+        if args.lr_schedule == "cosine" or epoch < args.warmup_epochs:
             warmup_scheduler.step()
         else:
             plateau_scheduler.step(avg_val_loss)
@@ -462,6 +553,9 @@ def train_e2e_reben_sar(args):
                              'optimizer_state_dict': optimizer.state_dict(),
                              'best_val_loss': best_val_loss,
                              'plateau_scheduler_state_dict': plateau_scheduler.state_dict(),
+                             'lr_schedule': args.lr_schedule,
+                             'lr_schedule_num_epochs': args.num_epochs,
+                             'lr_schedule_restart_epoch': cosine_state['restart'],
                              'scaler_state_dict': scaler.state_dict()},
                             str(CHECKPOINT_DIR), filename=f"{run_name}_last_decoder.pth")
             save_checkpoint({'epoch': epoch + 1, 'encoder_state_dict': encoder_model.state_dict()},
@@ -578,9 +672,20 @@ def evaluate_test_set_reben_sar(encoder_model, decoder, test_loader, args, run_n
     nll_count = 0
     auroc_entropy = []
     auroc_errors  = []
+    auroc_epistemic = []  # same pixels as auroc_entropy: does head disagreement (MI) rank the errors?
+    auroc_aleatoric = []  # ... and the mean per-head entropy, for comparison
     # Seeded uniform pixel sample from every batch (see utils.misc.auroc_pixel_sample) - was first 2M pixels
     auroc_per_batch = auroc_pixels_per_batch(test_loader)
     auroc_gen = torch.Generator().manual_seed(0)
+    # Decision-level diversity counts over all labelled pixels (as in evaluate_test_set_reben), kept on
+    # GPU until the end: pairwise disagreements, pairwise double-faults (both heads wrong), per-head
+    # errors, ensemble errors, and pixels where at least one head is right (oracle).
+    div_pixels = 0
+    pair_disagree = torch.zeros(decoder.M, decoder.M, device=DEVICE)
+    pair_double_fault = torch.zeros(decoder.M, decoder.M, device=DEVICE)
+    head_errors = torch.zeros(decoder.M, device=DEVICE)
+    ens_errors = torch.zeros((), device=DEVICE)
+    oracle_correct = torch.zeros((), device=DEVICE)
     n_pairs = decoder.M * (decoder.M - 1) // 2
     head_conf_matrices = [np.zeros((num_classes, num_classes), dtype=np.int64) for _ in range(decoder.M)]
     total_ent_sum = 0.0
@@ -615,9 +720,9 @@ def evaluate_test_set_reben_sar(encoder_model, decoder, test_loader, args, run_n
                 nll_count += labelled_t.sum().item()
                 ent_t = -(mean_probs_f32 * torch.log(mean_probs_f32.clamp(min=1e-10))).sum(dim=1)
                 auroc_t = auroc_pixel_sample(labelled_t, auroc_per_batch, auroc_gen)
-                err_t = (torch.argmax(mean_probs_f32, dim=1) != test_masks_t).float()
+                ens_wrong_t = torch.argmax(mean_probs_f32, dim=1) != test_masks_t
                 auroc_entropy.append(ent_t[auroc_t].cpu().numpy())
-                auroc_errors.append(err_t[auroc_t].cpu().numpy())
+                auroc_errors.append(ens_wrong_t.float()[auroc_t].cpu().numpy())
                 # UQ decomposition
                 total_ent_sum += ent_t[labelled_t].sum().item()
                 aleat = torch.zeros_like(ent_t)
@@ -627,6 +732,20 @@ def evaluate_test_set_reben_sar(encoder_model, decoder, test_loader, args, run_n
                 aleat /= decoder.M
                 aleatoric_sum += aleat[labelled_t].sum().item()
                 uq_count += labelled_t.sum().item()
+                if decoder.M > 1:
+                    auroc_aleatoric.append(aleat[auroc_t].cpu().numpy())
+                    auroc_epistemic.append((ent_t - aleat).clamp(min=0)[auroc_t].cpu().numpy())
+                    gt_l = test_masks_t[labelled_t]                                     # [P]
+                    head_pred_l = torch.argmax(all_head_probs_f32, dim=2)[:, labelled_t]  # [M, P]
+                    head_wrong_l = head_pred_l != gt_l                                  # [M, P]
+                    div_pixels += gt_l.numel()
+                    head_errors += head_wrong_l.sum(dim=1)
+                    ens_errors += ens_wrong_t[labelled_t].sum()
+                    oracle_correct += (~head_wrong_l).any(dim=0).sum()
+                    for i in range(decoder.M):
+                        for j in range(i + 1, decoder.M):
+                            pair_disagree[i, j] += (head_pred_l[i] != head_pred_l[j]).sum()
+                            pair_double_fault[i, j] += (head_wrong_l[i] & head_wrong_l[j]).sum()
                 if n_pairs > 0:
                     for i in range(decoder.M):
                         for j in range(i + 1, decoder.M):
@@ -714,6 +833,30 @@ def evaluate_test_set_reben_sar(encoder_model, decoder, test_loader, args, run_n
     else:
         global_auroc = 0.0
 
+    # Decision-level diversity (M > 1 only; None otherwise), same definitions as evaluate_test_set_reben:
+    #   normalised disagreement (Fort et al. 2019) = mean pairwise disagreement / ensemble error rate;
+    #   error correlation ratio = per pair, double-fault rate / (e_i * e_j), averaged (1 = independent);
+    #   oracle accuracy = fraction of pixels where at least one head is right.
+    norm_disagreement = error_corr_ratio = oracle_acc = ens_acc_labelled = None
+    auroc_epistemic_score = auroc_aleatoric_score = None
+    if decoder.M > 1 and div_pixels > 0:
+        n = float(div_pixels)
+        head_err_rate = (head_errors / n).cpu().numpy()
+        ens_err_rate = ens_errors.item() / n
+        pair_dis = (pair_disagree / n).cpu().numpy()
+        pair_df = (pair_double_fault / n).cpu().numpy()
+        pairs = [(i, j) for i in range(decoder.M) for j in range(i + 1, decoder.M)]
+        mean_disagreement = float(np.mean([pair_dis[i, j] for i, j in pairs]))
+        norm_disagreement = mean_disagreement / ens_err_rate if ens_err_rate > 0 else None
+        ratios = [pair_df[i, j] / (head_err_rate[i] * head_err_rate[j]) for i, j in pairs
+                  if head_err_rate[i] > 0 and head_err_rate[j] > 0]
+        error_corr_ratio = float(np.mean(ratios)) if ratios else None
+        oracle_acc = oracle_correct.item() / n
+        ens_acc_labelled = 1.0 - ens_err_rate
+        if auroc_epistemic and len(np.unique(all_err)) > 1:
+            auroc_epistemic_score = float(roc_auc_score(all_err, np.concatenate(auroc_epistemic)))
+            auroc_aleatoric_score = float(roc_auc_score(all_err, np.concatenate(auroc_aleatoric)))
+
     # Per-head mIoU
     head_mious = []
     for m in range(decoder.M):
@@ -751,6 +894,12 @@ def evaluate_test_set_reben_sar(encoder_model, decoder, test_loader, args, run_n
     log_msg(f"Uncertainty: total={mean_total_ent:.4f} | aleatoric={mean_aleatoric:.4f} | "
             f"epistemic={mean_epistemic:.4f} | pairwise_JSD={mean_pairwise_jsd:.4f}")
     log_msg(f"Per-head mIoU: {' | '.join(f'head{m}={v:.4f}' for m, v in enumerate(head_mious))}")
+    if norm_disagreement is not None or error_corr_ratio is not None:
+        fmt = lambda v: f"{v:.4f}" if v is not None else "n/a"
+        log_msg(f"Diversity: norm_disagreement={fmt(norm_disagreement)} | error_corr_ratio={fmt(error_corr_ratio)} | "
+                f"oracle_acc={fmt(oracle_acc)} (ensemble acc on same pixels={fmt(ens_acc_labelled)}) | "
+                f"AUROC epistemic={fmt(auroc_epistemic_score)} aleatoric={fmt(auroc_aleatoric_score)} "
+                f"total={global_auroc:.4f}")
     log_msg("Per-class IoU (descending frequency):")
     freq_order = np.argsort(class_pixel_counts)[::-1]
     for class_idx in freq_order:
@@ -770,6 +919,14 @@ def evaluate_test_set_reben_sar(encoder_model, decoder, test_loader, args, run_n
         "mean_aleatoric": mean_aleatoric,
         "mean_epistemic": mean_epistemic,
         "mean_pairwise_jsd": mean_pairwise_jsd,
+        "normalised_disagreement": norm_disagreement,
+        "error_correlation_ratio": error_corr_ratio,
+        "oracle_accuracy": oracle_acc,
+        "ensemble_accuracy_labelled": ens_acc_labelled,
+        "auroc_epistemic": auroc_epistemic_score,
+        "auroc_aleatoric": auroc_aleatoric_score,
+        "diversity_methods": args.diversity_methods,
+        "lam_jsd": args.lam_jsd,
         "per_head_miou": {f"head_{m}": v for m, v in enumerate(head_mious)},
         "num_patches": patch_count,
         "per_class_iou": {class_names[i + 1]: float(iou) for i, iou in enumerate(iou_per_class)},
@@ -1112,6 +1269,9 @@ if __name__ == "__main__":
                         help="Apply an adaptive Lee speckle filter to VV/VH bands instead of the flat median filter")
 
     # Model
+    parser.add_argument("--architecture_variation", action="store_true",
+                         help="Per-head decoder architecture variation (depth/width), as in train_e2e_reben.py. "
+                              "Off by default = the original uniform heads.")
     parser.add_argument("--ensemble_size",     type=int,   default=5)
     parser.add_argument("--decoder_embed_dim", type=int,   default=512)
     parser.add_argument("--num_classes",       type=int,   default=20)
@@ -1142,6 +1302,12 @@ if __name__ == "__main__":
     parser.add_argument("--lr_encoder",   type=float, default=1e-6)
     parser.add_argument("--lr_decoder",   type=float, default=1e-4)
     parser.add_argument("--warmup_epochs", type=int,   default=5)
+    parser.add_argument("--lr_schedule", type=str, default="plateau", choices=["plateau", "cosine"],
+                        help="plateau: warmup then halve lr after 5 epochs without a new best val loss "
+                             "(original behaviour). cosine: warmup then cosine decay to "
+                             "lr_min_ratio * base lr at the final epoch, identical for every run.")
+    parser.add_argument("--lr_min_ratio", type=float, default=0.01,
+                        help="Cosine schedule only: final lr as a fraction of each group's base lr.")
     parser.add_argument("--hide_unlabelled_pixels", action="store_true")
 
     # Loss
@@ -1153,6 +1319,17 @@ if __name__ == "__main__":
     parser.add_argument("--lam_jsd",     type=float, default=0.0)
     parser.add_argument("--lam_pearson", type=float, default=0.0)
     parser.add_argument("--lam_orth",    type=float, default=0.0)
+    parser.add_argument("--head_mask_prob", type=float, default=1.0,
+                        help="Per-head sample masking (Bootstrapped DQN, Osband et al. 2016): each head's task "
+                             "loss only uses a random fraction p of each batch's patches. 1.0 = off (original behaviour).")
+    parser.add_argument("--head_mask_mode", type=str, default="batch", choices=["batch", "fixed"],
+                        help="batch: new random masks every batch. fixed: each patch is permanently assigned to a "
+                             "random subset of heads for the whole run (bagging-like).")
+    parser.add_argument("--head_mask_seed", type=int, default=0,
+                        help="Seed for the fixed per-patch masks, so a resume reproduces the same assignment.")
+    parser.add_argument("--no_mean_logit_loss", action="store_true",
+                        help="Drop the ensemble-mean (averaged-logit) term from the task loss, leaving the plain "
+                             "average of per-head losses as in a standard deep ensemble.")
 
     # AS4 in-parallel student
     parser.add_argument("--train_student", action="store_true", help="Train AS4 StudentHead in parallel with teacher ensemble")
