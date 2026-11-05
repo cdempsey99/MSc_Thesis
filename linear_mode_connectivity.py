@@ -1,5 +1,5 @@
 """
-lmc_reben.py - linear mode connectivity between two fine-tuned reBEN models.
+linear_mode_connectivity.py - linear mode connectivity between two fine-tuned reBEN models (or two FBP decoders, --pipeline fbp).
 
 Question: do two independently fine-tuned models (each with its own fine-tuned Clay encoder and its own
 decoder, both started from the same pretrained Clay weights) sit in the same loss basin? Walk the straight
@@ -26,10 +26,17 @@ Checkpoints are given as stems, as in reeval_auroc.py (<stem>_decoder.pth / <ste
 the two heads must have the same architecture (arch-var heads of different sizes cannot be interpolated).
 Sanity check: --run_b equal to --run_a (and the same head) must give a flat path.
 
+--pipeline fbp: FBP's frozen-encoder decoders on the baked Clay embeddings. There is no encoder to
+interpolate, so this asks whether independently trained decoders ON IDENTICAL FEATURES share a basin -
+either two heads of one ensemble, or the same head of two runs. --run_a/--run_b are then checkpoint FILE
+names as in reeval_auroc.py --pipeline fbp (e.g. <run_name>_final_model_<ts>.pth, <run_name>_ep20_model.pth);
+the train/val split is rebuilt exactly as train_decoders.py builds it (--embedding_dir, --max_images).
+Decoder-only, in fp32 like FBP training. Variational-bottleneck checkpoints are not supported.
+
 Forward passes only, so it runs fine on the older tesla cards, away from the main training jobs:
-    sbatch -J lmc_reben -p TestAndBuild,gpu_short --gres=gpu:tesla:1 --mem=32G --cpus-per-task=8 --time=03:00:00 \
-        -o ~/logs/lmc_reben_%j.out --wrap "cd ~/MSc_Thesis && export OUT_DIR=/home/users/c/callumdempsey/results && \
-        /beegfs/scratch/callumdempsey/miniconda/envs/thesis_env/bin/python3 -u lmc_reben.py \
+    sbatch -J lmc -p TestAndBuild,gpu_short --gres=gpu:tesla:1 --mem=32G --cpus-per-task=8 --time=03:00:00 \
+        -o ~/logs/lmc_%j.out --wrap "cd ~/MSc_Thesis && export OUT_DIR=/home/users/c/callumdempsey/results && \
+        /beegfs/scratch/callumdempsey/miniconda/envs/thesis_env/bin/python3 -u linear_mode_connectivity.py \
         --run_a <stem_A> --run_b <stem_B> --tag <name> --clay_native_forward --clay_normalise_s2 \
         --metadata_path .../metadata.parquet --s2_root .../BigEarthNet-S2 --ref_root .../Reference_Maps"
 """
@@ -37,6 +44,8 @@ import argparse
 import copy
 import json
 import os
+import random
+from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
@@ -49,7 +58,7 @@ from torch.utils.data import DataLoader, Subset
 
 from configs.config import CHECKPOINT_DIR
 from models.encoder import get_encoder_representation_partial
-from reeval_auroc import load_models, _miou
+from reeval_auroc import load_models, load_models_fbp, _miou
 from utils.dataset_e2e import load_reben_splits, ReBENRawDataset
 from utils.misc import log_msg, FocalLoss
 
@@ -73,20 +82,37 @@ def head_stages(head):
 
 
 class SingleModel(torch.nn.Module):
-    """One encoder + one decoder head, returning [B, C, 224, 224] logits."""
+    """One encoder + one decoder head, returning [B, C, 224, 224] logits. encoder=None (FBP): the inputs
+    already are the baked encoder features and the head runs in fp32, as in FBP training."""
 
     def __init__(self, encoder, head, waves):
         super().__init__()
         self.encoder, self.head, self.waves = encoder, head, waves
 
     def features(self, x):
+        if self.encoder is None:
+            return x.float()
         with torch.cuda.amp.autocast():
             return get_encoder_representation_partial(x, self.encoder, waves=self.waves)
 
     def forward(self, x):
         feats = self.features(x)
-        with torch.cuda.amp.autocast():
+        with torch.cuda.amp.autocast(enabled=self.encoder is not None):
             return self.head(feats)
+
+
+def fbp_train_val_files(embedding_dir, max_images=None):
+    """Train/val embedding files exactly as train_decoders.py splits them (sorted glob, optional
+    max_images cut, seed-42 shuffle, 70/15/15)."""
+    all_files = sorted(Path(embedding_dir).glob("*_embeddings.pt"))
+    if not all_files:
+        raise FileNotFoundError(f"No *_embeddings.pt in {embedding_dir}")
+    if max_images is not None:
+        all_files = all_files[:max_images]
+    random.seed(42)
+    random.shuffle(all_files)
+    n = len(all_files)
+    return all_files[:int(n * 0.7)], all_files[int(n * 0.7):int(n * 0.85)]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -183,7 +209,7 @@ def recalibrate_bn(model, loader, n_batches):
 
 
 @torch.no_grad()
-def evaluate(model, loader, num_classes, focal):
+def evaluate(model, loader, num_classes, focal, fbp_miou=False):
     model.eval()
     conf = torch.zeros(num_classes, num_classes, dtype=torch.long, device=DEVICE)
     nll_sum, focal_sum, n_lab = 0.0, 0.0, 0
@@ -203,7 +229,7 @@ def evaluate(model, loader, num_classes, focal):
         conf += torch.bincount(y[lab] * num_classes + pred[lab], minlength=num_classes ** 2).view(num_classes, num_classes)
     conf = conf.cpu().numpy()
     return {"nll": nll_sum / max(n_lab, 1), "focal": focal_sum / max(n_lab, 1),
-            "acc": float(np.trace(conf) / max(conf.sum(), 1)), "miou": _miou(conf, False)}
+            "acc": float(np.trace(conf) / max(conf.sum(), 1)), "miou": _miou(conf, fbp_miou)}
 
 
 def barrier(values, alphas, higher_is_worse=True):
@@ -219,12 +245,14 @@ def barrier(values, alphas, higher_is_worse=True):
 def run_path(name, model, sd_a_enc, sd_b_enc, enc_keys, sd_a_dec, sd_b_dec, dec_keys, alphas,
              bn_loader, train_loader, val_loader, args, focal):
     rows = []
+    fbp = args.pipeline == "fbp"
     for alpha in alphas:
-        model.encoder.load_state_dict(blend_state(sd_a_enc, sd_b_enc, alpha, enc_keys), strict=False)
+        if model.encoder is not None:
+            model.encoder.load_state_dict(blend_state(sd_a_enc, sd_b_enc, alpha, enc_keys), strict=False)
         model.head.load_state_dict(blend_state(sd_a_dec, sd_b_dec, alpha, dec_keys))
         recalibrate_bn(model, bn_loader, args.n_bn_batches)
-        tr = evaluate(model, train_loader, args.num_classes, focal)
-        va = evaluate(model, val_loader, args.num_classes, focal)
+        tr = evaluate(model, train_loader, args.num_classes, focal, fbp)
+        va = evaluate(model, val_loader, args.num_classes, focal, fbp)
         rows.append({"alpha": float(alpha), "train": tr, "val": va})
         log_msg(f"[{name}] a={alpha:.2f} | train nll {tr['nll']:.4f} acc {tr['acc']:.4f} | "
                 f"val nll {va['nll']:.4f} acc {va['acc']:.4f} miou {va['miou']:.4f}")
@@ -236,37 +264,58 @@ def run_path(name, model, sd_a_enc, sd_b_enc, enc_keys, sd_a_dec, sd_b_dec, dec_
 
 
 def main():
-    p = argparse.ArgumentParser(description="Linear mode connectivity between two fine-tuned reBEN models")
-    p.add_argument("--run_a", required=True, help="checkpoint stem of model A (without _decoder.pth)")
-    p.add_argument("--run_b", required=True, help="checkpoint stem of model B")
+    p = argparse.ArgumentParser(description="Linear mode connectivity between two fine-tuned reBEN models "
+                                            "(or two FBP frozen-encoder decoders, --pipeline fbp)")
+    p.add_argument("--pipeline", choices=["finetuned", "fbp"], default="finetuned")
+    p.add_argument("--run_a", required=True, help="checkpoint stem of model A (without _decoder.pth); "
+                                                  "fbp: checkpoint file name")
+    p.add_argument("--run_b", required=True, help="checkpoint stem of model B; fbp: checkpoint file name")
     p.add_argument("--head_a", type=int, default=0, help="head index of A (ensemble checkpoints)")
     p.add_argument("--head_b", type=int, default=0, help="head index of B")
     p.add_argument("--tag", required=True, help="name for the output files")
     p.add_argument("--checkpoint_dir", type=str, default=str(CHECKPOINT_DIR))
-    p.add_argument("--metadata_path", required=True)
-    p.add_argument("--s2_root", required=True)
-    p.add_argument("--ref_root", required=True)
+    p.add_argument("--metadata_path", default=None, help="finetuned only")
+    p.add_argument("--s2_root", default=None, help="finetuned only")
+    p.add_argument("--ref_root", default=None, help="finetuned only")
+    p.add_argument("--embedding_dir", default="/beegfs/scratch/callumdempsey/results/embeddings/fbp/clay_v1/patch224_stride224",
+                   help="fbp only: folder with the *_embeddings.pt files")
+    p.add_argument("--max_images", type=int, default=None, help="fbp only: as passed to train_decoders.py (subset runs: 112)")
     p.add_argument("--n_unfrozen_blocks", type=int, default=4)
     p.add_argument("--clay_native_forward", action="store_true")
     p.add_argument("--clay_normalise_s2", action="store_true")
     p.add_argument("--clay_single_norm", action="store_true")
-    p.add_argument("--num_classes", type=int, default=20)
+    p.add_argument("--num_classes", type=int, default=None, help="default 20 (reBEN) / 25 (FBP)")
     p.add_argument("--n_alphas", type=int, default=11, help="points on the path, endpoints included")
     p.add_argument("--n_align", type=int, default=2000, help="training patches for activation matching")
     p.add_argument("--n_train_eval", type=int, default=2000, help="training patches evaluated along the path")
     p.add_argument("--n_val", type=int, default=3000, help="validation patches evaluated along the path")
     p.add_argument("--n_bn_batches", type=int, default=50, help="training batches for BatchNorm recalibration")
-    p.add_argument("--batch_size", type=int, default=16)
+    p.add_argument("--batch_size", type=int, default=None, help="default 16 (reBEN) / 64 (FBP)")
     p.add_argument("--num_workers", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--skip_unaligned", action="store_true", help="only evaluate the aligned path")
     args = p.parse_args()
+    fbp = args.pipeline == "fbp"
+    if args.num_classes is None:
+        args.num_classes = 25 if fbp else 20
+    if args.batch_size is None:
+        args.batch_size = 64 if fbp else 16
+    if not fbp and None in (args.metadata_path, args.s2_root, args.ref_root):
+        p.error("--pipeline finetuned needs --metadata_path, --s2_root and --ref_root")
     log_msg(f"LMC: {vars(args)}")
 
     # Data: fixed, seeded patch subsets, no augmentation anywhere
-    train_ds, val_ds, _ = load_reben_splits(metadata_path=args.metadata_path, s2_root=args.s2_root,
-                                            ref_root=args.ref_root, clay_normalise=args.clay_normalise_s2)
-    train_ds.augment = False
+    if fbp:
+        from utils.dataset import BakedFeatureDataset
+        train_files, val_files = fbp_train_val_files(args.embedding_dir, args.max_images)
+        log_msg(f"FBP split: {len(train_files)} train / {len(val_files)} val images "
+                f"(val: {[f.stem.replace('_embeddings', '') for f in val_files]})")
+        train_ds = BakedFeatureDataset(train_files, augment=False)
+        val_ds = BakedFeatureDataset(val_files, augment=False)
+    else:
+        train_ds, val_ds, _ = load_reben_splits(metadata_path=args.metadata_path, s2_root=args.s2_root,
+                                                ref_root=args.ref_root, clay_normalise=args.clay_normalise_s2)
+        train_ds.augment = False
     g = np.random.default_rng(args.seed)
     tr_idx = g.permutation(len(train_ds))
     n_bn = args.n_bn_batches * args.batch_size
@@ -281,10 +330,18 @@ def main():
     log_msg(f"Patches: align {len(align_idx)} | BN {len(bn_idx)} | train eval {len(tr_eval_idx)} | val {len(va_idx)}")
 
     # Models
-    waves = ReBENRawDataset.WAVELENGTHS
-    stems = [r if os.path.isabs(r) else os.path.join(args.checkpoint_dir, r) for r in (args.run_a, args.run_b)]
-    enc_a, dec_a, _ = load_models(stems[0], "finetuned", args.n_unfrozen_blocks, args.clay_single_norm, args.clay_native_forward)
-    enc_b, dec_b, _ = load_models(stems[1], "finetuned", args.n_unfrozen_blocks, args.clay_single_norm, args.clay_native_forward)
+    if fbp:
+        waves = None
+        _, dec_a, _ = load_models_fbp(args.run_a, args.checkpoint_dir)
+        _, dec_b, _ = load_models_fbp(args.run_b, args.checkpoint_dir)
+        if not hasattr(dec_a, "heads") or not hasattr(dec_b, "heads"):
+            raise ValueError("Variational-bottleneck checkpoints are not supported (the heads see mu_m, not the features)")
+        enc_a = enc_b = None
+    else:
+        waves = ReBENRawDataset.WAVELENGTHS
+        stems = [r if os.path.isabs(r) else os.path.join(args.checkpoint_dir, r) for r in (args.run_a, args.run_b)]
+        enc_a, dec_a, _ = load_models(stems[0], "finetuned", args.n_unfrozen_blocks, args.clay_single_norm, args.clay_native_forward)
+        enc_b, dec_b, _ = load_models(stems[1], "finetuned", args.n_unfrozen_blocks, args.clay_single_norm, args.clay_native_forward)
     head_a = copy.deepcopy(dec_a.heads[args.head_a]).to(DEVICE).eval()
     head_b = copy.deepcopy(dec_b.heads[args.head_b]).to(DEVICE).eval()
     shapes_a = {k: v.shape for k, v in head_a.state_dict().items()}
@@ -294,15 +351,20 @@ def main():
     model_a, model_b = SingleModel(enc_a, head_a, waves), SingleModel(enc_b, head_b, waves)
     focal = FocalLoss(gamma=2.0, ignore_index=0)
 
-    sd_a_enc = {k: v.detach().clone() for k, v in enc_a.state_dict().items()}
-    sd_b_enc = {k: v.detach().clone() for k, v in enc_b.state_dict().items()}
-    enc_keys = [k for k, v in sd_a_enc.items() if v.is_floating_point() and not torch.equal(v, sd_b_enc[k])]
-    log_msg(f"Encoder: {len(enc_keys)} of {len(sd_a_enc)} tensors differ between A and B (interpolated); "
-            f"the rest (frozen blocks) are identical")
+    if fbp:
+        sd_a_enc = sd_b_enc = {}
+        enc_keys = []
+        log_msg("Encoder: frozen and shared (baked features) - only the decoder heads are interpolated")
+    else:
+        sd_a_enc = {k: v.detach().clone() for k, v in enc_a.state_dict().items()}
+        sd_b_enc = {k: v.detach().clone() for k, v in enc_b.state_dict().items()}
+        enc_keys = [k for k, v in sd_a_enc.items() if v.is_floating_point() and not torch.equal(v, sd_b_enc[k])]
+        log_msg(f"Encoder: {len(enc_keys)} of {len(sd_a_enc)} tensors differ between A and B (interpolated); "
+                f"the rest (frozen blocks) are identical")
 
     # Endpoint check before anything is changed
-    ref_a = evaluate(model_a, val_loader, args.num_classes, focal)
-    ref_b = evaluate(model_b, val_loader, args.num_classes, focal)
+    ref_a = evaluate(model_a, val_loader, args.num_classes, focal, fbp)
+    ref_b = evaluate(model_b, val_loader, args.num_classes, focal, fbp)
     log_msg(f"Endpoints as loaded: A val nll {ref_a['nll']:.4f} acc {ref_a['acc']:.4f} | "
             f"B val nll {ref_b['nll']:.4f} acc {ref_b['acc']:.4f}")
 
