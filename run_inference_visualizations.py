@@ -39,7 +39,8 @@ Usage (reBEN, student + teacher):
         --s2_root ... --ref_root ... --metadata_path ... \
         --checkpoint_path .../..._last_student.pth \
         --encoder_checkpoint_path .../..._last_encoder.pth \
-        --include_teacher --teacher_checkpoint_path .../..._last_decoder.pth --ensemble_size 10 \
+        --include_teacher --teacher_checkpoint_path .../..._last_decoder.pth \
+        --clay_native_forward --clay_normalise_s2 --save_arrays \
         --num_vis 40 --run_name AS4_reben_inference
 """
 import argparse
@@ -51,9 +52,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
 
+from configs.config import BASE_OUT
 from utils.misc import log_msg, get_decoder_output_maps, _select_visualization_patches
 from utils.visualisation import visualise_all_metrics, visualise_student_uncertainty
-from models.ensemble import DecoderEnsemble, StudentHead
+from models.ensemble import StudentHead
+from posthoc_ensemble_reben import InferredDecoder
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -162,6 +165,15 @@ def main():
     parser.add_argument("--s1_root", default=None)
     parser.add_argument("--despeckle", action="store_true")
     parser.add_argument("--lee_filter", action="store_true")
+    # Encoder input settings - must match how the checkpoint was trained (all final reBEN/SAR runs:
+    # --clay_native_forward; reBEN optical also --clay_normalise_s2). FBP uses pre-extracted features.
+    parser.add_argument("--clay_native_forward", action="store_true")
+    parser.add_argument("--clay_normalise_s2", action="store_true")
+    parser.add_argument("--clay_single_norm", action="store_true")
+    parser.add_argument("--save_arrays", action="store_true",
+                        help="Also save each patch's maps (raw image, GT, teacher/student predictions and "
+                             "uncertainties) as BASE_OUT/vis_arrays/<run_name>/patch_<id>.npz, for drawing "
+                             "composite thesis figures offline with shared colour scales")
     args = parser.parse_args()
 
     if args.num_classes is None:
@@ -178,7 +190,7 @@ def main():
     elif args.dataset == "reben":
         from utils.dataset_e2e import load_reben_splits, ReBENRawDataset
         _, _, test_ds = load_reben_splits(metadata_path=args.metadata_path, s2_root=args.s2_root,
-                                          ref_root=args.ref_root)
+                                          ref_root=args.ref_root, clay_normalise=args.clay_normalise_s2)
         waves = ReBENRawDataset.WAVELENGTHS
     else:
         from utils.dataset_e2e import load_reben_sar_splits, ReBENSARRawDataset
@@ -201,27 +213,38 @@ def main():
     # 3. Models
     encoder_model = None
     if args.dataset != "fbp":
-        from models.encoder import initialize_clay_encoder_partial_unfreeze, get_encoder_representation_partial
-        encoder_model = initialize_clay_encoder_partial_unfreeze(n_unfrozen_blocks=args.n_unfrozen_blocks)
+        from models.encoder import (initialize_clay_encoder_partial_unfreeze, get_encoder_representation_partial,
+                                    REBEN_GSD)
+        encoder_model = initialize_clay_encoder_partial_unfreeze(
+            n_unfrozen_blocks=args.n_unfrozen_blocks, single_norm=args.clay_single_norm,
+            native_forward=args.clay_native_forward, gsd=REBEN_GSD)
         enc_ckpt = torch.load(args.encoder_checkpoint_path, map_location=DEVICE)
         encoder_model.load_state_dict(enc_ckpt['encoder_state_dict'], strict=False)
         encoder_model.to(DEVICE).eval()
         log_msg(f"Loaded encoder from {args.encoder_checkpoint_path}")
 
-    student = StudentHead(in_channels=1024, embed_dim=args.decoder_embed_dim, num_classes=args.num_classes)
+    # Student: a separate student file ('model_state_dict'), or - as in the FBP train_decoders.py final/snapshot
+    # checkpoints - the 'student_model_state_dict' stored next to the teacher in one file. Size read off the weights.
     student_ckpt = torch.load(args.checkpoint_path, map_location=DEVICE)
-    student.load_state_dict(student_ckpt['model_state_dict'])
+    st_sd = student_ckpt.get('student_model_state_dict') or student_ckpt['model_state_dict']
+    w = st_sd["linear_fusion.weight"]
+    student = StudentHead(in_channels=w.shape[1], embed_dim=w.shape[0], num_classes=st_sd["classifier.weight"].shape[0])
+    student.load_state_dict(st_sd)
     student.to(DEVICE).eval()
     log_msg(f"Loaded student from {args.checkpoint_path}")
 
     teacher = None
     if args.include_teacher:
-        teacher = DecoderEnsemble(M=args.ensemble_size, in_channels=1024, embed_dim=args.decoder_embed_dim,
-                                  num_classes=args.num_classes, architecture_variation=args.architecture_variation)
+        # InferredDecoder reads M and each head's size off the checkpoint, so uniform and arch-var teachers both
+        # load (--ensemble_size / --architecture_variation / --decoder_embed_dim are no longer needed for it)
         teacher_ckpt = torch.load(args.teacher_checkpoint_path, map_location=DEVICE)
-        teacher.load_state_dict(teacher_ckpt['model_state_dict'])
-        teacher.to(DEVICE).eval()
-        log_msg(f"Loaded teacher (M={args.ensemble_size}) from {args.teacher_checkpoint_path}")
+        teacher = InferredDecoder(teacher_ckpt['model_state_dict']).to(DEVICE).eval()
+        log_msg(f"Loaded teacher (M={teacher.M}, heads {teacher.head_configs}) from {args.teacher_checkpoint_path}")
+
+    arr_dir = None
+    if args.save_arrays:
+        arr_dir = Path(BASE_OUT) / "vis_arrays" / args.run_name
+        arr_dir.mkdir(parents=True, exist_ok=True)
 
     # 4. Run inference on just the selected patches and render panels
     with torch.no_grad():
@@ -231,7 +254,7 @@ def main():
             gt = mask.squeeze().cpu().numpy()
 
             if args.dataset == "fbp":
-                features = raw_input
+                features = raw_input.float()  # baked features may be stored in half precision; heads run in fp32
                 raw_patch, patch_info = _fbp_raw_patch(test_ds, g_idx, args.stride)
             else:
                 features = get_encoder_representation_partial(raw_input, encoder_model, waves=waves)
@@ -258,6 +281,17 @@ def main():
                     save_name=f"{args.run_name}_teacher_patch_{g_idx}", raw_patch=raw_patch,
                     patch_info=patch_info, num_classes=args.num_classes,
                 )
+
+            if arr_dir is not None:
+                arrays = {"gt": gt, "student_pred": pred_class[0], "student_total": total_ent[0].cpu().numpy(),
+                          "student_aleatoric": aleatoric[0].cpu().numpy(), "student_epistemic": epistemic[0].cpu().numpy(),
+                          "student_alpha0": alpha0[0].cpu().numpy(), "patch_info": np.array(patch_info)}
+                if raw_patch is not None:
+                    arrays["raw_patch"] = raw_patch
+                if teacher is not None:
+                    arrays.update({"teacher_pred": class_map, "teacher_total": total_entropy.squeeze().cpu().numpy(),
+                                   "teacher_epistemic": mi_map.squeeze().cpu().numpy()})
+                np.savez_compressed(arr_dir / f"patch_{g_idx}.npz", **arrays)
 
             log_msg(f"[{i + 1}/{len(vis_indices)}] rendered patch {g_idx}")
 
