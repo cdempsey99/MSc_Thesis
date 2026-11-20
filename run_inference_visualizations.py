@@ -225,13 +225,26 @@ def main():
 
     # Student: a separate student file ('model_state_dict'), or - as in the FBP train_decoders.py final/snapshot
     # checkpoints - the 'student_model_state_dict' stored next to the teacher in one file. Size read off the weights.
-    student_ckpt = torch.load(args.checkpoint_path, map_location=DEVICE)
-    st_sd = student_ckpt.get('student_model_state_dict') or student_ckpt['model_state_dict']
+    student_path = args.checkpoint_path
+    student_ckpt = torch.load(student_path, map_location=DEVICE)
+    st_sd = student_ckpt.get('student_model_state_dict')
+    if st_sd is None and "linear_fusion.weight" not in student_ckpt.get('model_state_dict', {}):
+        # A teacher file was given (keys 'heads.i.*'): FBP final checkpoints keep the student in a sibling file
+        # <run>_final_student_<ts>.pth, as reeval_auroc.load_models_fbp also assumes
+        sib = os.path.basename(student_path).replace("_final_model_", "_final_student_")
+        sib_path = os.path.join(os.path.dirname(student_path), sib)
+        if sib == os.path.basename(student_path) or not os.path.exists(sib_path):
+            raise FileNotFoundError(f"{student_path} holds no student weights and no sibling {sib} was found - "
+                                    f"pass the student checkpoint via --checkpoint_path")
+        student_path = sib_path
+        student_ckpt = torch.load(student_path, map_location=DEVICE)
+    if st_sd is None:
+        st_sd = student_ckpt['model_state_dict']
     w = st_sd["linear_fusion.weight"]
     student = StudentHead(in_channels=w.shape[1], embed_dim=w.shape[0], num_classes=st_sd["classifier.weight"].shape[0])
     student.load_state_dict(st_sd)
     student.to(DEVICE).eval()
-    log_msg(f"Loaded student from {args.checkpoint_path}")
+    log_msg(f"Loaded student from {student_path}")
 
     teacher = None
     if args.include_teacher:
