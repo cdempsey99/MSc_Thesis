@@ -77,9 +77,20 @@ def _student_from_state_dict(st_sd):
 
 
 def load_models(stem, pipeline, n_unfrozen_blocks, single_norm=False, native_forward=False):
-    dec_sd = torch.load(f"{stem}_decoder.pth", map_location=DEVICE)["model_state_dict"]
+    dec_ckpt = torch.load(f"{stem}_decoder.pth", map_location=DEVICE)
+    dec_sd = dec_ckpt["model_state_dict"]
     decoder = InferredDecoder(dec_sd).to(DEVICE).eval()   # strict load: a wrong/odd checkpoint fails loudly
     log_msg(f"  decoder: M={decoder.M}, head configs (embed_dim, refine_blocks)={decoder.head_configs}")
+    # Per-head variational bottleneck (train_e2e_reben(_sar).py --use_variational_bottleneck saves it in the decoder
+    # checkpoint): evaluate each head on its own mu_m, exactly as load_models_fbp does for FBP. Without this a VB run
+    # would be scored with raw encoder features going into heads that were trained on mu_m.
+    bn_sd = dec_ckpt.get("bottleneck_state_dict")
+    if bn_sd is not None:
+        n_heads = len({k.split(".")[1] for k in bn_sd if k.startswith("mu_convs.")})
+        bottleneck = VariationalBottleneck(channels=bn_sd["mu_convs.0.weight"].shape[0], num_heads=n_heads)
+        bottleneck.load_state_dict(bn_sd)
+        decoder = VBEvalWrapper(decoder, bottleneck.to(DEVICE).eval()).eval()
+        log_msg(f"  per-head variational bottleneck found ({n_heads} heads): evaluating each head on its mu_m")
 
     encoder = None
     if pipeline != "frozen":
