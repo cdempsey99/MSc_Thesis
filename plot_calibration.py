@@ -160,11 +160,15 @@ def main():
     p.add_argument("--labels", nargs="+", default=None, help="One label per npz (default: file name)")
     p.add_argument("--classes", choices=["reben", "fbp", "none"], default="none")
     p.add_argument("--out_dir", default="results/calibration_plots")
+    p.add_argument("--colors", nargs="+", default=None,
+                   help="One matplotlib colour per npz for the overlay figure (default: matplotlib's colour cycle)")
     args = p.parse_args()
     class_names = {"reben": REBEN_CLASSES, "fbp": FBP_CLASSES, "none": None}[args.classes]
     labels = args.labels or [Path(f).stem for f in args.npz]
     if len(labels) != len(args.npz):
         p.error("--labels needs one label per npz")
+    if args.colors and len(args.colors) != len(args.npz):
+        p.error("--colors needs one colour per npz")
     os.makedirs(args.out_dir, exist_ok=True)
 
     rows, curves = [], []
@@ -185,10 +189,11 @@ def main():
 
     if len(curves) > 1:
         fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
-        axes[0].plot([0, 1], [0, 1], "--", color="grey")
-        for label, (mc, ma), (cov, risk) in curves:
-            axes[0].plot(mc, ma, ".-", label=label)
-            axes[1].plot(cov, risk, label=label)
+        axes[0].plot([0, 1], [0, 1], ":", color="black", lw=0.8)  # black dotted: never confused with a model colour
+        for i, (label, (mc, ma), (cov, risk)) in enumerate(curves):
+            col = {"color": args.colors[i]} if args.colors else {}
+            axes[0].plot(mc, ma, ".-", label=label, **col)
+            axes[1].plot(cov, risk, label=label, **col)
         axes[0].set(xlim=(0, 1), ylim=(0, 1), xlabel="confidence", ylabel="accuracy",
                     title=f"reliability ({N_EQUAL_MASS} equal-mass bins)")
         axes[1].set(xlabel="coverage (fraction of most-confident pixels kept)", ylabel="error rate of kept pixels",
@@ -197,6 +202,7 @@ def main():
             ax.legend(fontsize=8)
         fig.tight_layout()
         fig.savefig(os.path.join(args.out_dir, "calibration_overlay.png"), dpi=120)
+        fig.savefig(os.path.join(args.out_dir, "calibration_overlay.pdf"))
         plt.close(fig)
     print(f"Figures and calibration_summary.csv written to {args.out_dir}")
 
