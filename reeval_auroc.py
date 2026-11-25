@@ -217,6 +217,10 @@ class _Tracker:
         self.ens_err = torch.zeros((), device=DEVICE)
         self.oracle = torch.zeros((), device=DEVICE)
         self.unanimous = torch.zeros((), device=DEVICE)
+        # good / bad diversity split: pairwise disagreements counted separately on pixels where the
+        # ensemble prediction is wrong (disagreement that can flag or fix an error) and right
+        self.pair_dis_wrong = torch.zeros(M, M, device=DEVICE)
+        self.pair_dis_right = torch.zeros(M, M, device=DEVICE)
 
     def add(self, mean_p, y, lab, conf_lab, smp, tot, ale, head_pred=None):
         pred = mean_p.argmax(dim=1)
@@ -278,8 +282,11 @@ class _Tracker:
                 self.unanimous += (ew_l & hw_l.all(dim=0)).sum()
                 for i in range(self.M):
                     for j in range(i + 1, self.M):
-                        self.pair_dis[i, j] += (hp_l[i] != hp_l[j]).sum()
+                        dis_ij = hp_l[i] != hp_l[j]
+                        self.pair_dis[i, j] += dis_ij.sum()
                         self.pair_df[i, j] += (hw_l[i] & hw_l[j]).sum()
+                        self.pair_dis_wrong[i, j] += (dis_ij & ew_l).sum()
+                        self.pair_dis_right[i, j] += (dis_ij & ~ew_l).sum()
 
     def summary(self, ensemble):
         err = np.concatenate(self.auroc["err"])
@@ -331,6 +338,18 @@ class _Tracker:
                 "unanimous_share_of_errors": self.unanimous.item() / self.ens_err.item()
                 if self.ens_err.item() > 0 else None,
                 "per_head_miou": [_miou(self.head_conf[m].cpu().numpy(), self.fbp_style) for m in range(self.M)],
+            })
+            # Good / bad diversity split (cf. Brown & Kuncheva 2010; Wood et al. 2023): mean pairwise disagreement
+            # rate among pixels the ensemble gets wrong vs right, and the share of all pairwise disagreement that
+            # falls on ensemble errors (equal to the ensemble error rate if disagreement were spread uniformly)
+            n_wrong, n_right = self.ens_err.item(), dn - self.ens_err.item()
+            dis_w = float(np.mean([self.pair_dis_wrong[i, j].item() for i, j in pairs]))
+            dis_r = float(np.mean([self.pair_dis_right[i, j].item() for i, j in pairs]))
+            out.update({
+                "disagreement_rate_on_errors": dis_w / n_wrong if n_wrong > 0 else None,
+                "disagreement_rate_on_correct": dis_r / n_right if n_right > 0 else None,
+                "disagreement_share_on_errors": dis_w / (dis_w + dis_r) if dis_w + dis_r > 0 else None,
+                "ensemble_error_rate": ens_rate,
             })
         return out
 
@@ -534,6 +553,12 @@ def main():
                             f"oracle_acc {_fmt(r.get('oracle_accuracy'))} | "
                             f"unanimous errors {_fmt(r.get('unanimous_share_of_errors'), True)} | "
                             f"per-head mIoU {[round(v, 4) for v in r.get('per_head_miou', [])]}")
+                    if r.get("disagreement_share_on_errors") is not None:
+                        log_msg(f"  {who} good/bad diversity: disagreement rate on errors "
+                                f"{_fmt(r.get('disagreement_rate_on_errors'))} | on correct "
+                                f"{_fmt(r.get('disagreement_rate_on_correct'))} | share of disagreement on errors "
+                                f"{_fmt(r.get('disagreement_share_on_errors'))} (ensemble error rate "
+                                f"{_fmt(r.get('ensemble_error_rate'))})")
         with open(out_path, "w") as f:
             json.dump(results, f, indent=2)
         del encoder, decoder, student
